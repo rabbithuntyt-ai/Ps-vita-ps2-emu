@@ -68,7 +68,7 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 - [x] AArch32 JIT: 128-bit values (VU registers, MMI) allocated in NEON registers q8-q15 instead of going through memory for every operation (84% of VU operands in registers on Play!'s VU tests)
 - [x] AArch32 JIT: exact reciprocal / reciprocal square root (was a ~16-bit NEON estimate)
 - [x] ARM cross build running Play!'s CodeGen and VU test suites under qemu in CI
-- [ ] AArch32 JIT: FP32 values in registers (needs s0-s31 = q0-q7 handling)
+- [x] AArch32 JIT: FP32 values in registers s16-s23 (saved in the prologue only by blocks that use them)
 - [ ] Optional accurate VU rounding (round toward zero) for games that need it (tri-Ace): ARMv7 NEON always rounds to nearest
 - [ ] VU1 microprogram recompiler profiling and tuning (often the 3D bottleneck)
 - [ ] Idle-loop and busy-wait detection, per game when the generic one misses

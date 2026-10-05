@@ -1,0 +1,510 @@
+diff --git a/include/AArch32Assembler.h b/include/AArch32Assembler.h
+index 700db0e..f1d1da8 100644
+--- a/include/AArch32Assembler.h
++++ b/include/AArch32Assembler.h
+@@ -313,6 +313,9 @@ public:
+ 	void Vshr_I16(QUAD_REGISTER, QUAD_REGISTER, uint8);
+ 	void Vshr_I32(QUAD_REGISTER, QUAD_REGISTER, uint8);
+ 	void Vabs_F32(SINGLE_REGISTER, SINGLE_REGISTER);
++	void Vmov_F32(SINGLE_REGISTER, SINGLE_REGISTER);
++	void Vpush(DOUBLE_REGISTER, uint8);
++	void Vpop(DOUBLE_REGISTER, uint8);
+ 	void Vabs_F32(QUAD_REGISTER, QUAD_REGISTER);
+ 	void Vneg_F32(SINGLE_REGISTER, SINGLE_REGISTER);
+ 	void Vneg_F32(QUAD_REGISTER, QUAD_REGISTER);
+diff --git a/include/Jitter_CodeGen_AArch32.h b/include/Jitter_CodeGen_AArch32.h
+index c587fcf..bcd83f0 100644
+--- a/include/Jitter_CodeGen_AArch32.h
++++ b/include/Jitter_CodeGen_AArch32.h
+@@ -128,6 +128,11 @@ namespace Jitter
+ 		void StoreRegisterInRelativeFp32(CTempRegisterContext&, CSymbol*, CAArch32Assembler::SINGLE_REGISTER);
+ 
+ 		void LoadTemporaryFp32InRegister(CTempRegisterContext&, CAArch32Assembler::SINGLE_REGISTER, CSymbol*);
++		CAArch32Assembler::SINGLE_REGISTER PrepareSymbolRegisterDefFp32(CSymbol*, CAArch32Assembler::SINGLE_REGISTER);
++		CAArch32Assembler::SINGLE_REGISTER PrepareSymbolRegisterUseFp32(CTempRegisterContext&, CSymbol*, CAArch32Assembler::SINGLE_REGISTER);
++		//Always returns the work register (for instructions limited to s0-s15 / q0-q3)
++		CAArch32Assembler::SINGLE_REGISTER PrepareSymbolRegisterUseFp32Copy(CTempRegisterContext&, CSymbol*, CAArch32Assembler::SINGLE_REGISTER);
++		void CommitSymbolRegisterFp32(CTempRegisterContext&, CSymbol*, CAArch32Assembler::SINGLE_REGISTER);
+ 		void StoreRegisterInTemporaryFp32(CTempRegisterContext&, CSymbol*, CAArch32Assembler::SINGLE_REGISTER);
+ 
+ 		void LoadMemory128AddressInRegister(CAArch32Assembler::REGISTER, CSymbol*, uint32 = 0);
+@@ -713,18 +718,20 @@ namespace Jitter
+ 
+ 		//FPUOP
+ 		template <typename>
+-		void Emit_Fpu_MemMem(const STATEMENT&);
++		void Emit_Fpu_VarVar(const STATEMENT&);
+ 		template <typename>
+-		void Emit_Fpu_MemMemMem(const STATEMENT&);
++		void Emit_Fpu_VarVarVar(const STATEMENT&);
+ 		template <typename>
+-		void Emit_FpuMd_MemMemMem(const STATEMENT&);
+-		void Emit_Fp_Rcpl_MemMem(const STATEMENT&);
+-		void Emit_Fp_Rsqrt_MemMem(const STATEMENT&);
+-		void Emit_Fp_Clamp_MemMem(const STATEMENT&);
+-		void Emit_Fp_Cmp_AnyMemMem(const STATEMENT&);
+-		void Emit_Fp_ToSingleI32_MemMem(const STATEMENT&);
+-		void Emit_Fp_ToInt32TruncS_MemMem(const STATEMENT&);
++		void Emit_FpuMd_VarVarVar(const STATEMENT&);
++		void Emit_Fp_Rcpl_VarVar(const STATEMENT&);
++		void Emit_Fp_Rsqrt_VarVar(const STATEMENT&);
++		void Emit_Fp_Clamp_VarVar(const STATEMENT&);
++		void Emit_Fp_Cmp_AnyVarVar(const STATEMENT&);
++		void Emit_Fp_ToSingleI32_VarVar(const STATEMENT&);
++		void Emit_Fp_ToInt32TruncS_VarVar(const STATEMENT&);
+ 		void Emit_Fp_LdCst_TmpCst(const STATEMENT&);
++		void Emit_Fp_LdCst_RegCst(const STATEMENT&);
++		void Emit_Fp32_Mov_VarVar(const STATEMENT&);
+ 		void Emit_Fp_SetRoundingMode_Cst(const STATEMENT&);
+ 
+ 		//MDOP
+@@ -780,6 +787,8 @@ namespace Jitter
+ 		static CONSTMATCHER g_mdConstMatchers[];
+ 		static CAArch32Assembler::REGISTER g_registers[MAX_REGISTERS];
+ 		static CAArch32Assembler::QUAD_REGISTER g_registersMd[MAX_MDREGISTERS];
++		//Single precision values allocated from the MD register pool (same ids)
++		static CAArch32Assembler::SINGLE_REGISTER g_registersFp32[MAX_MDREGISTERS];
+ 		static CAArch32Assembler::REGISTER g_md128AddressRegister;
+ 		static CAArch32Assembler::REGISTER g_paramRegs[MAX_PARAM_REGS];
+ 		static CAArch32Assembler::REGISTER g_baseRegister;
+@@ -805,6 +814,7 @@ namespace Jitter
+ 			PARAM128_SPILL_SLOTS = 4,
+ 		};
+ 		uint32 m_param128SpillBase = 0;
++		bool m_saveFpRegisters = false; //d8-d11 (callee saved) hold allocated FP32 values
+ 		uint32 m_param128SpillCount = 0;
+ 		bool m_hasIntegerDiv = false;
+ 	};
+diff --git a/src/AArch32Assembler.cpp b/src/AArch32Assembler.cpp
+index 671857d..e65fbb7 100644
+--- a/src/AArch32Assembler.cpp
++++ b/src/AArch32Assembler.cpp
+@@ -1223,6 +1223,35 @@ void CAArch32Assembler::Vshr_I32(QUAD_REGISTER qd, QUAD_REGISTER qm, uint8 shift
+ 	WriteWord(opcode);
+ }
+ 
++void CAArch32Assembler::Vmov_F32(SINGLE_REGISTER sd, SINGLE_REGISTER sm)
++{
++	uint32 opcode = 0x0EB00A40;
++	opcode |= (CONDITION_AL << 28);
++	opcode |= FPSIMD_EncodeSd(sd);
++	opcode |= FPSIMD_EncodeSm(sm);
++	WriteWord(opcode);
++}
++
++void CAArch32Assembler::Vpush(DOUBLE_REGISTER firstReg, uint8 count)
++{
++	//VSTMDB sp!, {firstReg - firstReg + count - 1}
++	uint32 opcode = 0x0D2D0B00;
++	opcode |= (CONDITION_AL << 28);
++	opcode |= FPSIMD_EncodeDd(firstReg);
++	opcode |= (count * 2);
++	WriteWord(opcode);
++}
++
++void CAArch32Assembler::Vpop(DOUBLE_REGISTER firstReg, uint8 count)
++{
++	//VLDMIA sp!, {firstReg - firstReg + count - 1}
++	uint32 opcode = 0x0CBD0B00;
++	opcode |= (CONDITION_AL << 28);
++	opcode |= FPSIMD_EncodeDd(firstReg);
++	opcode |= (count * 2);
++	WriteWord(opcode);
++}
++
+ void CAArch32Assembler::Vabs_F32(SINGLE_REGISTER sd, SINGLE_REGISTER sm)
+ {
+ 	uint32 opcode = 0x0EB00AC0;
+diff --git a/src/Jitter_CodeGen_AArch32.cpp b/src/Jitter_CodeGen_AArch32.cpp
+index 6b1ef47..e2e62ba 100644
+--- a/src/Jitter_CodeGen_AArch32.cpp
++++ b/src/Jitter_CodeGen_AArch32.cpp
+@@ -45,6 +45,19 @@ CAArch32Assembler::QUAD_REGISTER CCodeGen_AArch32::g_registersMd[MAX_MDREGISTERS
+ 
+ CAArch32Assembler::REGISTER CCodeGen_AArch32::g_md128AddressRegister = CAArch32Assembler::r12;
+ 
++//s16-s23 (d8-d11) are callee saved: functions using them save them.
++CAArch32Assembler::SINGLE_REGISTER CCodeGen_AArch32::g_registersFp32[MAX_MDREGISTERS] =
++{
++	CAArch32Assembler::s16,
++	CAArch32Assembler::s17,
++	CAArch32Assembler::s18,
++	CAArch32Assembler::s19,
++	CAArch32Assembler::s20,
++	CAArch32Assembler::s21,
++	CAArch32Assembler::s22,
++	CAArch32Assembler::s23,
++};
++
+ CAArch32Assembler::REGISTER CCodeGen_AArch32::g_paramRegs[MAX_PARAM_REGS] =
+ {
+ 	CAArch32Assembler::r0,
+@@ -326,9 +339,9 @@ unsigned int CCodeGen_AArch32::GetAvailableMdRegisterCount() const
+ 
+ bool CCodeGen_AArch32::CanAllocateFpInMdRegisters() const
+ {
+-	//Single precision VFP instructions can only address s0-s31 (q0-q7), not
+-	//the q8-q15 registers used for MD values.
+-	return false;
++	//Allocated FP32 values live in s16-s23, MD values in q8-q15: the same
++	//register id maps to different physical registers for each kind.
++	return true;
+ }
+ 
+ bool CCodeGen_AArch32::Has128BitsCallOperands() const
+@@ -380,6 +393,16 @@ void CCodeGen_AArch32::GenerateCode(const StatementList& statements, unsigned in
+ 
+ 	m_registerSave = GetSavedRegisterList(GetRegisterUsage(statements));
+ 
++	m_saveFpRegisters = false;
++	for(const auto& statement : statements)
++	{
++		statement.VisitOperands(
++		    [&](const SymbolRefPtr& symbolRef, bool) {
++			    if(symbolRef->GetSymbol()->m_type == SYM_FP_REGISTER32) m_saveFpRegisters = true;
++		    });
++		if(m_saveFpRegisters) break;
++	}
++
+ 	Emit_Prolog();
+ 
+ 	for(const auto& statement : statements)
+@@ -451,6 +474,10 @@ uint16 CCodeGen_AArch32::GetSavedRegisterList(uint32 registerUsage)
+ void CCodeGen_AArch32::Emit_Prolog()
+ {
+ 	m_assembler.Stmdb(CAArch32Assembler::rSP, m_registerSave);
++	if(m_saveFpRegisters)
++	{
++		m_assembler.Vpush(CAArch32Assembler::d8, 4);
++	}
+ 	m_assembler.Mov(CAArch32Assembler::r11, CAArch32Assembler::r0);
+ 
+ 	//Align stack to 16 bytes boundary
+@@ -503,6 +530,10 @@ void CCodeGen_AArch32::Emit_Epilog()
+ 	m_assembler.Ldmia(CAArch32Assembler::rSP, (1 << stackTempRegister));
+ 	m_assembler.Mov(CAArch32Assembler::rSP, stackTempRegister);
+ 
++	if(m_saveFpRegisters)
++	{
++		m_assembler.Vpop(CAArch32Assembler::d8, 4);
++	}
+ 	m_assembler.Ldmia(CAArch32Assembler::rSP, m_registerSave);
+ }
+ 
+diff --git a/src/Jitter_CodeGen_AArch32_Fpu.cpp b/src/Jitter_CodeGen_AArch32_Fpu.cpp
+index 42f2fc5..93329d3 100644
+--- a/src/Jitter_CodeGen_AArch32_Fpu.cpp
++++ b/src/Jitter_CodeGen_AArch32_Fpu.cpp
+@@ -104,21 +104,67 @@ void CCodeGen_AArch32::StoreRegisterInTemporaryFp32(CTempRegisterContext& tempRe
+ 	}
+ }
+ 
++CAArch32Assembler::SINGLE_REGISTER CCodeGen_AArch32::PrepareSymbolRegisterDefFp32(CSymbol* symbol, CAArch32Assembler::SINGLE_REGISTER workRegister)
++{
++	if(symbol->m_type == SYM_FP_REGISTER32)
++	{
++		assert(symbol->m_valueLow < MAX_MDREGISTERS);
++		return g_registersFp32[symbol->m_valueLow];
++	}
++	return workRegister;
++}
++
++CAArch32Assembler::SINGLE_REGISTER CCodeGen_AArch32::PrepareSymbolRegisterUseFp32(CTempRegisterContext& tempRegContext, CSymbol* symbol, CAArch32Assembler::SINGLE_REGISTER workRegister)
++{
++	if(symbol->m_type == SYM_FP_REGISTER32)
++	{
++		assert(symbol->m_valueLow < MAX_MDREGISTERS);
++		return g_registersFp32[symbol->m_valueLow];
++	}
++	LoadMemoryFp32InRegister(tempRegContext, workRegister, symbol);
++	return workRegister;
++}
++
++CAArch32Assembler::SINGLE_REGISTER CCodeGen_AArch32::PrepareSymbolRegisterUseFp32Copy(CTempRegisterContext& tempRegContext, CSymbol* symbol, CAArch32Assembler::SINGLE_REGISTER workRegister)
++{
++	auto reg = PrepareSymbolRegisterUseFp32(tempRegContext, symbol, workRegister);
++	if(reg != workRegister)
++	{
++		m_assembler.Vmov_F32(workRegister, reg);
++	}
++	return workRegister;
++}
++
++void CCodeGen_AArch32::CommitSymbolRegisterFp32(CTempRegisterContext& tempRegContext, CSymbol* symbol, CAArch32Assembler::SINGLE_REGISTER usedRegister)
++{
++	if(symbol->m_type == SYM_FP_REGISTER32)
++	{
++		auto reg = g_registersFp32[symbol->m_valueLow];
++		if(reg != usedRegister)
++		{
++			m_assembler.Vmov_F32(reg, usedRegister);
++		}
++		return;
++	}
++	StoreRegisterInMemoryFp32(tempRegContext, symbol, usedRegister);
++}
++
+ template <typename FPUOP>
+-void CCodeGen_AArch32::Emit_Fpu_MemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Fpu_VarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 
+ 	CTempRegisterContext tempRegisterContext;
+ 
+-	LoadMemoryFp32InRegister(tempRegisterContext, CAArch32Assembler::s0, src1);
+-	((m_assembler).*(FPUOP::OpReg()))(CAArch32Assembler::s1, CAArch32Assembler::s0);
+-	StoreRegisterInMemoryFp32(tempRegisterContext, dst, CAArch32Assembler::s1);
++	auto src1Reg = PrepareSymbolRegisterUseFp32(tempRegisterContext, src1, CAArch32Assembler::s0);
++	auto dstReg = PrepareSymbolRegisterDefFp32(dst, CAArch32Assembler::s1);
++	((m_assembler).*(FPUOP::OpReg()))(dstReg, src1Reg);
++	CommitSymbolRegisterFp32(tempRegisterContext, dst, dstReg);
+ }
+ 
+ template <typename FPUOP>
+-void CCodeGen_AArch32::Emit_Fpu_MemMemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Fpu_VarVarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+@@ -126,14 +172,15 @@ void CCodeGen_AArch32::Emit_Fpu_MemMemMem(const STATEMENT& statement)
+ 
+ 	CTempRegisterContext tempRegisterContext;
+ 
+-	LoadMemoryFp32InRegister(tempRegisterContext, CAArch32Assembler::s0, src1);
+-	LoadMemoryFp32InRegister(tempRegisterContext, CAArch32Assembler::s1, src2);
+-	((m_assembler).*(FPUOP::OpReg()))(CAArch32Assembler::s2, CAArch32Assembler::s0, CAArch32Assembler::s1);
+-	StoreRegisterInMemoryFp32(tempRegisterContext, dst, CAArch32Assembler::s2);
++	auto src1Reg = PrepareSymbolRegisterUseFp32(tempRegisterContext, src1, CAArch32Assembler::s0);
++	auto src2Reg = PrepareSymbolRegisterUseFp32(tempRegisterContext, src2, CAArch32Assembler::s1);
++	auto dstReg = PrepareSymbolRegisterDefFp32(dst, CAArch32Assembler::s2);
++	((m_assembler).*(FPUOP::OpReg()))(dstReg, src1Reg, src2Reg);
++	CommitSymbolRegisterFp32(tempRegisterContext, dst, dstReg);
+ }
+ 
+ template <typename FPUMDOP>
+-void CCodeGen_AArch32::Emit_FpuMd_MemMemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_FpuMd_VarVarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+@@ -141,13 +188,14 @@ void CCodeGen_AArch32::Emit_FpuMd_MemMemMem(const STATEMENT& statement)
+ 
+ 	CTempRegisterContext tempRegisterContext;
+ 
+-	LoadMemoryFp32InRegister(tempRegisterContext, CAArch32Assembler::s0, src1);
+-	LoadMemoryFp32InRegister(tempRegisterContext, CAArch32Assembler::s4, src2);
++	//NEON operation on q0-q2: operands in the first lane of each
++	PrepareSymbolRegisterUseFp32Copy(tempRegisterContext, src1, CAArch32Assembler::s0);
++	PrepareSymbolRegisterUseFp32Copy(tempRegisterContext, src2, CAArch32Assembler::s4);
+ 	((m_assembler).*(FPUMDOP::OpReg()))(CAArch32Assembler::q2, CAArch32Assembler::q0, CAArch32Assembler::q1);
+-	StoreRegisterInMemoryFp32(tempRegisterContext, dst, CAArch32Assembler::s8);
++	CommitSymbolRegisterFp32(tempRegisterContext, dst, CAArch32Assembler::s8);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Fp_Rcpl_MemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Fp_Rcpl_VarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+@@ -156,16 +204,17 @@ void CCodeGen_AArch32::Emit_Fp_Rcpl_MemMem(const STATEMENT& statement)
+ 
+ 	//Exact 1 / x (like other backends). The NEON estimate + one refinement
+ 	//step only gives ~16 bits of precision, which games can notice.
+-	LoadMemoryFp32InRegister(tempRegisterContext, CAArch32Assembler::s0, src1);
++	auto src1Reg = PrepareSymbolRegisterUseFp32(tempRegisterContext, src1, CAArch32Assembler::s0);
+ 	auto oneReg = tempRegisterContext.Allocate();
+ 	LoadConstantInRegister(oneReg, 0x3F800000);
+ 	m_assembler.Vmov(CAArch32Assembler::d1, oneReg, 0); //s2 = 1.0
+ 	tempRegisterContext.Release(oneReg);
+-	m_assembler.Vdiv_F32(CAArch32Assembler::s4, CAArch32Assembler::s2, CAArch32Assembler::s0);
+-	StoreRegisterInMemoryFp32(tempRegisterContext, dst, CAArch32Assembler::s4);
++	auto dstReg = PrepareSymbolRegisterDefFp32(dst, CAArch32Assembler::s4);
++	m_assembler.Vdiv_F32(dstReg, CAArch32Assembler::s2, src1Reg);
++	CommitSymbolRegisterFp32(tempRegisterContext, dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Fp_Rsqrt_MemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Fp_Rsqrt_VarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+@@ -173,17 +222,18 @@ void CCodeGen_AArch32::Emit_Fp_Rsqrt_MemMem(const STATEMENT& statement)
+ 	CTempRegisterContext tempRegisterContext;
+ 
+ 	//Exact 1 / sqrt(x)
+-	LoadMemoryFp32InRegister(tempRegisterContext, CAArch32Assembler::s0, src1);
++	auto src1Reg = PrepareSymbolRegisterUseFp32(tempRegisterContext, src1, CAArch32Assembler::s0);
+ 	auto oneReg = tempRegisterContext.Allocate();
+ 	LoadConstantInRegister(oneReg, 0x3F800000);
+ 	m_assembler.Vmov(CAArch32Assembler::d1, oneReg, 0); //s2 = 1.0
+ 	tempRegisterContext.Release(oneReg);
+-	m_assembler.Vsqrt_F32(CAArch32Assembler::s0, CAArch32Assembler::s0);
+-	m_assembler.Vdiv_F32(CAArch32Assembler::s4, CAArch32Assembler::s2, CAArch32Assembler::s0);
+-	StoreRegisterInMemoryFp32(tempRegisterContext, dst, CAArch32Assembler::s4);
++	m_assembler.Vsqrt_F32(CAArch32Assembler::s0, src1Reg);
++	auto dstReg = PrepareSymbolRegisterDefFp32(dst, CAArch32Assembler::s4);
++	m_assembler.Vdiv_F32(dstReg, CAArch32Assembler::s2, CAArch32Assembler::s0);
++	CommitSymbolRegisterFp32(tempRegisterContext, dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Fp_Clamp_MemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Fp_Clamp_VarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+@@ -199,13 +249,13 @@ void CCodeGen_AArch32::Emit_Fp_Clamp_MemMem(const STATEMENT& statement)
+ 	m_assembler.Adrl(cstAddrReg, g_fpClampMask2);
+ 	m_assembler.Vld1_32x4(cst1Reg, cstAddrReg);
+ 
+-	LoadMemoryFp32InRegister(tempRegisterContext, static_cast<CAArch32Assembler::SINGLE_REGISTER>(tmpReg), src1);
++	PrepareSymbolRegisterUseFp32Copy(tempRegisterContext, src1, CAArch32Assembler::s0);
+ 	m_assembler.Vmin_I32(tmpReg, tmpReg, cst0Reg);
+ 	m_assembler.Vmin_U32(tmpReg, tmpReg, cst1Reg);
+-	StoreRegisterInMemoryFp32(tempRegisterContext, dst, static_cast<CAArch32Assembler::SINGLE_REGISTER>(tmpReg));
++	CommitSymbolRegisterFp32(tempRegisterContext, dst, CAArch32Assembler::s0);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Fp_Cmp_AnyMemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Fp_Cmp_AnyVarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+@@ -217,9 +267,9 @@ void CCodeGen_AArch32::Emit_Fp_Cmp_AnyMemMem(const STATEMENT& statement)
+ 	auto dstReg = PrepareSymbolRegisterDef(dst, tmpReg);
+ 
+ 	m_assembler.Mov(dstReg, CAArch32Assembler::MakeImmediateAluOperand(0, 0));
+-	LoadMemoryFp32InRegister(tempRegisterContext, CAArch32Assembler::s0, src1);
+-	LoadMemoryFp32InRegister(tempRegisterContext, CAArch32Assembler::s1, src2);
+-	m_assembler.Vcmp_F32(CAArch32Assembler::s0, CAArch32Assembler::s1);
++	auto src1Reg = PrepareSymbolRegisterUseFp32(tempRegisterContext, src1, CAArch32Assembler::s0);
++	auto src2Reg = PrepareSymbolRegisterUseFp32(tempRegisterContext, src2, CAArch32Assembler::s1);
++	m_assembler.Vcmp_F32(src1Reg, src2Reg);
+ 	m_assembler.Vmrs(CAArch32Assembler::rPC); //Move to general purpose status register
+ 	switch(statement.jmpCondition)
+ 	{
+@@ -244,34 +294,30 @@ void CCodeGen_AArch32::Emit_Fp_Cmp_AnyMemMem(const STATEMENT& statement)
+ 	tempRegisterContext.Release(tmpReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Fp_ToSingleI32_MemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Fp_ToSingleI32_VarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 
+ 	CTempRegisterContext tempRegisterContext;
+ 
+-	auto dstReg = CAArch32Assembler::s0;
+-	auto src1Reg = CAArch32Assembler::s1;
+-
+-	LoadMemoryFp32InRegister(tempRegisterContext, src1Reg, src1);
++	auto src1Reg = PrepareSymbolRegisterUseFp32(tempRegisterContext, src1, CAArch32Assembler::s1);
++	auto dstReg = PrepareSymbolRegisterDefFp32(dst, CAArch32Assembler::s0);
+ 	m_assembler.Vcvt_F32_S32(dstReg, src1Reg);
+-	StoreRegisterInMemoryFp32(tempRegisterContext, dst, dstReg);
++	CommitSymbolRegisterFp32(tempRegisterContext, dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Fp_ToInt32TruncS_MemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Fp_ToInt32TruncS_VarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 
+ 	CTempRegisterContext tempRegisterContext;
+ 
+-	auto dstReg = CAArch32Assembler::s0;
+-	auto src1Reg = CAArch32Assembler::s1;
+-
+-	LoadMemoryFp32InRegister(tempRegisterContext, src1Reg, src1);
++	auto src1Reg = PrepareSymbolRegisterUseFp32(tempRegisterContext, src1, CAArch32Assembler::s1);
++	auto dstReg = PrepareSymbolRegisterDefFp32(dst, CAArch32Assembler::s0);
+ 	m_assembler.Vcvt_S32_F32(dstReg, src1Reg);
+-	StoreRegisterInMemoryFp32(tempRegisterContext, dst, dstReg);
++	CommitSymbolRegisterFp32(tempRegisterContext, dst, dstReg);
+ }
+ 
+ void CCodeGen_AArch32::Emit_Fp_LdCst_TmpCst(const STATEMENT& statement)
+@@ -286,6 +332,31 @@ void CCodeGen_AArch32::Emit_Fp_LdCst_TmpCst(const STATEMENT& statement)
+ 	m_assembler.Str(CAArch32Assembler::r0, CAArch32Assembler::rSP, CAArch32Assembler::MakeImmediateLdrAddress(dst->m_stackLocation + m_stackLevel));
+ }
+ 
++void CCodeGen_AArch32::Emit_Fp_LdCst_RegCst(const STATEMENT& statement)
++{
++	auto dst = statement.dst->GetSymbol().get();
++	auto src1 = statement.src1->GetSymbol().get();
++
++	assert(dst->m_type == SYM_FP_REGISTER32);
++	assert(src1->m_type == SYM_CONSTANT);
++
++	//Constant goes through d1 lane 0 (s2)
++	LoadConstantInRegister(CAArch32Assembler::r0, src1->m_valueLow);
++	m_assembler.Vmov(CAArch32Assembler::d1, CAArch32Assembler::r0, 0);
++	m_assembler.Vmov_F32(g_registersFp32[dst->m_valueLow], CAArch32Assembler::s2);
++}
++
++void CCodeGen_AArch32::Emit_Fp32_Mov_VarVar(const STATEMENT& statement)
++{
++	auto dst = statement.dst->GetSymbol().get();
++	auto src1 = statement.src1->GetSymbol().get();
++
++	CTempRegisterContext tempRegisterContext;
++
++	auto src1Reg = PrepareSymbolRegisterUseFp32(tempRegisterContext, src1, CAArch32Assembler::s0);
++	CommitSymbolRegisterFp32(tempRegisterContext, dst, src1Reg);
++}
++
+ void CCodeGen_AArch32::Emit_Fp_SetRoundingMode_Cst(const STATEMENT& statement)
+ {
+ 	//TODO: Implement
+@@ -294,29 +365,33 @@ void CCodeGen_AArch32::Emit_Fp_SetRoundingMode_Cst(const STATEMENT& statement)
+ // clang-format off
+ CCodeGen_AArch32::CONSTMATCHER CCodeGen_AArch32::g_fpuConstMatchers[] = 
+ {
+-	{ OP_FP_ADD_S, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_NIL, &CCodeGen_AArch32::Emit_Fpu_MemMemMem<FPUOP_ADD> },
+-	{ OP_FP_SUB_S, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_NIL, &CCodeGen_AArch32::Emit_Fpu_MemMemMem<FPUOP_SUB> },
+-	{ OP_FP_MUL_S, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_NIL, &CCodeGen_AArch32::Emit_Fpu_MemMemMem<FPUOP_MUL> },
+-	{ OP_FP_DIV_S, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_NIL, &CCodeGen_AArch32::Emit_Fpu_MemMemMem<FPUOP_DIV> },
++	{ OP_FP_ADD_S, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_NIL, &CCodeGen_AArch32::Emit_Fpu_VarVarVar<FPUOP_ADD> },
++	{ OP_FP_SUB_S, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_NIL, &CCodeGen_AArch32::Emit_Fpu_VarVarVar<FPUOP_SUB> },
++	{ OP_FP_MUL_S, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_NIL, &CCodeGen_AArch32::Emit_Fpu_VarVarVar<FPUOP_MUL> },
++	{ OP_FP_DIV_S, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_NIL, &CCodeGen_AArch32::Emit_Fpu_VarVarVar<FPUOP_DIV> },
+ 
+-	{ OP_FP_CMP_S, MATCH_ANY, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp_Cmp_AnyMemMem },
++	{ OP_FP_CMP_S, MATCH_ANY, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp_Cmp_AnyVarVar },
+ 
+-	{ OP_FP_MIN_S, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_NIL, &CCodeGen_AArch32::Emit_FpuMd_MemMemMem<FPUMDOP_MIN> },
+-	{ OP_FP_MAX_S, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_NIL, &CCodeGen_AArch32::Emit_FpuMd_MemMemMem<FPUMDOP_MAX> },
++	{ OP_FP_MIN_S, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_NIL, &CCodeGen_AArch32::Emit_FpuMd_VarVarVar<FPUMDOP_MIN> },
++	{ OP_FP_MAX_S, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_NIL, &CCodeGen_AArch32::Emit_FpuMd_VarVarVar<FPUMDOP_MAX> },
+ 
+-	{ OP_FP_RCPL_S,  MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp_Rcpl_MemMem         },
+-	{ OP_FP_SQRT_S,  MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fpu_MemMem<FPUOP_SQRT> },
+-	{ OP_FP_RSQRT_S, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp_Rsqrt_MemMem        },
++	{ OP_FP_RCPL_S,  MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp_Rcpl_VarVar         },
++	{ OP_FP_SQRT_S,  MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fpu_VarVar<FPUOP_SQRT> },
++	{ OP_FP_RSQRT_S, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp_Rsqrt_VarVar        },
+ 
+-	{ OP_FP_CLAMP_S, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp_Clamp_MemMem },
++	{ OP_FP_CLAMP_S, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp_Clamp_VarVar },
+ 
+-	{ OP_FP_ABS_S, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fpu_MemMem<FPUOP_ABS> },
+-	{ OP_FP_NEG_S, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fpu_MemMem<FPUOP_NEG> },
++	{ OP_FP_ABS_S, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fpu_VarVar<FPUOP_ABS> },
++	{ OP_FP_NEG_S, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fpu_VarVar<FPUOP_NEG> },
+ 
+-	{ OP_FP_TOSINGLE_I32,    MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp_ToSingleI32_MemMem   },
+-	{ OP_FP_TOINT32_TRUNC_S, MATCH_FP_MEMORY32, MATCH_FP_MEMORY32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp_ToInt32TruncS_MemMem },
++	{ OP_FP_TOSINGLE_I32,    MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp_ToSingleI32_VarVar   },
++	{ OP_FP_TOINT32_TRUNC_S, MATCH_FP_VARIABLE32, MATCH_FP_VARIABLE32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp_ToInt32TruncS_VarVar },
+ 
+ 	{ OP_FP_LDCST, MATCH_FP_TEMPORARY32, MATCH_CONSTANT, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp_LdCst_TmpCst },
++	{ OP_FP_LDCST, MATCH_FP_REGISTER32,  MATCH_CONSTANT, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp_LdCst_RegCst },
++
++	{ OP_MOV, MATCH_FP_REGISTER32, MATCH_FP_VARIABLE32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp32_Mov_VarVar },
++	{ OP_MOV, MATCH_FP_MEMORY32,   MATCH_FP_REGISTER32, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp32_Mov_VarVar },
+ 
+ 	{ OP_FP_SETROUNDINGMODE, MATCH_NIL, MATCH_CONSTANT, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Fp_SetRoundingMode_Cst },
+ 
