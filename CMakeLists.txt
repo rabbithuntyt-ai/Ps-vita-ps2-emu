@@ -207,6 +207,16 @@ else()
 				-DRUNNER=$<TARGET_FILE:vitaps2_host>
 				"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
 				-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/elf_boot_test.cmake)
+		# Same picture drawn by a VU1 microprogram (VIF1, VU recompiler, PATH1)
+		add_test(NAME elf_boot_test_vu1
+			COMMAND ${CMAKE_COMMAND}
+				-DPYTHON=${Python3_EXECUTABLE}
+				-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+				-DRUNNER=$<TARGET_FILE:vitaps2_host>
+				"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
+				-DELF_ARGS=--vu1
+				-DSUFFIX=_vu1
+				-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/elf_boot_test.cmake)
 		if(TARGET gsh_hardware)
 			add_test(NAME elf_boot_test_hw
 				COMMAND ${CMAKE_COMMAND}
