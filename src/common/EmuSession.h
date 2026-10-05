@@ -92,6 +92,17 @@ public:
 	uint32_t GetGsRasterMicros();
 	float GetEeIdleRatio();
 
+	// Snapshot of the emulated CPUs for diagnosing hangs. Read without
+	// stopping the VM, so values may be slightly inconsistent.
+	struct DEBUG_STATE
+	{
+		uint32_t eePc = 0, eeRa = 0;
+		uint32_t iopPc = 0, iopRa = 0;
+		int32_t iopThread = -1;
+		uint32_t intcStat = 0, intcMask = 0, dmacStat = 0;
+	};
+	DEBUG_STATE GetDebugState();
+
 	CPS2VM* GetVm()
 	{
 		return m_vm.get();

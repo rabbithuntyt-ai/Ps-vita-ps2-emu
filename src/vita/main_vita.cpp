@@ -20,6 +20,7 @@
 #include <dirent.h>
 #include <fstream>
 #include <sstream>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -547,6 +548,12 @@ namespace
 		std::vector<ThreadProfiler::SAMPLE> threadUsage;
 		ThreadProfiler::Sample();
 
+		// Hang diagnostics: when the game stops presenting, sample where the
+		// EE runs and log the hottest addresses plus IOP/interrupt state.
+		uint64_t lastOutput = sceKernelGetProcessTimeWide();
+		std::map<uint32_t, uint32_t> stallPcs;
+		std::string stallSummary;
+
 		while(true)
 		{
 			uint32_t buttons = pad ? pad->Poll() : 0;
@@ -589,6 +596,7 @@ namespace
 				{
 					presented++;
 					newContent = true;
+					lastOutput = sceKernelGetProcessTimeWide();
 				}
 				auto display = gs->GetDisplayTexture();
 				screen.texture = display.texture;
@@ -606,6 +614,7 @@ namespace
 				{
 					presented++;
 					newContent = true;
+					lastOutput = sceKernelGetProcessTimeWide();
 					Gfx::UploadFrame(pixels.data(), width, height);
 					screen.texture = Gfx::FrameTexture();
 					screen.textureWidth = screen.textureHeight = Gfx::FRAME_TEXTURE_SIZE;
@@ -616,6 +625,17 @@ namespace
 			}
 
 			uint64_t now = sceKernelGetProcessTimeWide();
+			const uint64_t stalledFor = now - lastOutput;
+			if(stalledFor > 3000000)
+			{
+				if(stallPcs.size() < 256) stallPcs[session->GetDebugState().eePc]++;
+			}
+			else if(!stallPcs.empty() || !stallSummary.empty())
+			{
+				std::printf("stall over\n");
+				stallPcs.clear();
+				stallSummary.clear();
+			}
 			if(now - statsTime >= 1000000)
 			{
 				float seconds = static_cast<float>(now - statsTime) / 1000000.0f;
@@ -636,6 +656,23 @@ namespace
 				{
 					std::printf("auto ee cycle rate: %u%%\n", autoRate.GetRate());
 					session->SetSpeedHacks(ToSpeedHacks(settings, autoRate));
+				}
+				if(!stallPcs.empty())
+				{
+					std::vector<std::pair<uint32_t, uint32_t>> hottest(stallPcs.begin(), stallPcs.end());
+					std::sort(hottest.begin(), hottest.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+					auto debug = session->GetDebugState();
+					char text[256];
+					int length = std::snprintf(text, sizeof(text), "no output %us: EE pc %08X ra %08X  IOP pc %08X ra %08X thr %d  INTC %X/%X  DMAC %08X  EE hot:",
+					                           static_cast<unsigned int>(stalledFor / 1000000), debug.eePc, debug.eeRa, debug.iopPc,
+					                           debug.iopRa, debug.iopThread, debug.intcStat, debug.intcMask, debug.dmacStat);
+					for(size_t i = 0; i < std::min<size_t>(hottest.size(), 4) && length < 230; i++)
+					{
+						length += std::snprintf(text + length, sizeof(text) - length, " %08X(%u)", hottest[i].first, hottest[i].second);
+					}
+					stallSummary = text;
+					std::printf("%s\n", text);
+					stallPcs.clear();
 				}
 				newContent |= settings.showStats;
 			}
@@ -674,6 +711,13 @@ namespace
 				}
 				Gfx::Textf(8, 80, COLOR_GREY, 0.7f, "Audio tempo %.0f%%  underruns %u", CSH_Vita::GetTempo() * 100.0f,
 				           CSH_Vita::GetUnderruns());
+				if(!stallSummary.empty())
+				{
+					// Long line: wrap it under the overlay.
+					std::string wrapped = stallSummary;
+					for(size_t at = 90; at < wrapped.size(); at += 91) wrapped.insert(at, "\n");
+					Gfx::Text(8, 220, COLOR_WARN, 0.6f, wrapped.c_str());
+				}
 				Gfx::Text(8, 100, COLOR_ACCENT, 0.7f, "CPU per thread (100% = one core):");
 				int line = 0;
 				for(const auto& usage : threadUsage)

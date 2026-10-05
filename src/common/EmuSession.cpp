@@ -13,6 +13,8 @@
 #include "ee/PS2OS.h"
 #include "ee/Vpu.h"
 #include "ee/Ee_SubSystem.h"
+#include "iop/IopBios.h"
+#include "iop/Iop_SubSystem.h"
 #include "GSH_Software.h"
 #include "ThreadProfiler.h"
 
@@ -211,6 +213,25 @@ float CEmuSession::GetEeIdleRatio()
 	auto info = m_vm->GetCpuUtilisationInfo();
 	if(info.eeTotalTicks <= 0) return 0;
 	return static_cast<float>(info.eeIdleTicks) / static_cast<float>(info.eeTotalTicks + info.eeIdleTicks);
+}
+
+CEmuSession::DEBUG_STATE CEmuSession::GetDebugState()
+{
+	DEBUG_STATE state;
+	auto& ee = m_vm->m_ee->m_EE.m_State;
+	state.eePc = ee.nPC;
+	state.eeRa = ee.nGPR[CMIPS::RA].nV0;
+	auto& iop = m_vm->m_iop->m_cpu.m_State;
+	state.iopPc = iop.nPC;
+	state.iopRa = iop.nGPR[CMIPS::RA].nV0;
+	if(auto bios = dynamic_cast<CIopBios*>(m_vm->m_iop->m_bios.get()))
+	{
+		state.iopThread = bios->GetCurrentThreadIdRaw();
+	}
+	state.intcStat = m_vm->m_ee->m_intc.GetRegister(CINTC::INTC_STAT);
+	state.intcMask = m_vm->m_ee->m_intc.GetRegister(CINTC::INTC_MASK);
+	state.dmacStat = m_vm->m_ee->m_dmac.GetRegister(CDMAC::D_STAT);
+	return state;
 }
 
 void CEmuSession::Pause()
