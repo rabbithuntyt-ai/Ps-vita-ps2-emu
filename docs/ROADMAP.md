@@ -16,14 +16,14 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 
 ## Phase 1: Boots on hardware **(HW)**
 
-- [ ] App launches; game list renders
-- [ ] Built-in GS self test shows the triangle (validates JIT + BIOS HLE + GS on device)
-- [ ] On-device GS benchmark numbers collected
-- [ ] Memory budget confirmed (heap + JIT pool + textures fit; no crash on boot)
-- [ ] First commercial game reaches its title screen
+- [x] App launches; game list renders
+- [x] Built-in GS self test shows the triangle (validates JIT + BIOS HLE + GS on device)
+- [x] On-device GS benchmark numbers collected
+- [x] Memory budget confirmed (heap + JIT pool + textures fit; no crash on boot)
+- [x] First commercial game reaches its title screen
 - [ ] Audio plays without crackling
-- [ ] Controls, rear touch L2/R2, front touch L3/R3 work
-- [ ] Exit to game list and boot another game without restarting the app
+- [x] Controls, rear touch L2/R2, front touch L3/R3 work
+- [x] Exit to game list and boot another game without restarting the app
 - [ ] Crash handler: write a crash report (registers, PC, last log lines) to the log
 
 ## Phase 2: Measure before optimizing **(HW)**
