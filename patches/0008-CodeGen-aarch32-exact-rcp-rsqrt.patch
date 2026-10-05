@@ -1,0 +1,41 @@
+diff --git a/src/Jitter_CodeGen_AArch32_Fpu.cpp b/src/Jitter_CodeGen_AArch32_Fpu.cpp
+index b05219a..42f2fc5 100644
+--- a/src/Jitter_CodeGen_AArch32_Fpu.cpp
++++ b/src/Jitter_CodeGen_AArch32_Fpu.cpp
+@@ -154,10 +154,14 @@ void CCodeGen_AArch32::Emit_Fp_Rcpl_MemMem(const STATEMENT& statement)
+ 
+ 	CTempRegisterContext tempRegisterContext;
+ 
++	//Exact 1 / x (like other backends). The NEON estimate + one refinement
++	//step only gives ~16 bits of precision, which games can notice.
+ 	LoadMemoryFp32InRegister(tempRegisterContext, CAArch32Assembler::s0, src1);
+-	m_assembler.Vrecpe_F32(CAArch32Assembler::q1, CAArch32Assembler::q0);
+-	m_assembler.Vrecps_F32(CAArch32Assembler::q2, CAArch32Assembler::q1, CAArch32Assembler::q0);
+-	m_assembler.Vmul_F32(CAArch32Assembler::s4, CAArch32Assembler::s4, CAArch32Assembler::s8);
++	auto oneReg = tempRegisterContext.Allocate();
++	LoadConstantInRegister(oneReg, 0x3F800000);
++	m_assembler.Vmov(CAArch32Assembler::d1, oneReg, 0); //s2 = 1.0
++	tempRegisterContext.Release(oneReg);
++	m_assembler.Vdiv_F32(CAArch32Assembler::s4, CAArch32Assembler::s2, CAArch32Assembler::s0);
+ 	StoreRegisterInMemoryFp32(tempRegisterContext, dst, CAArch32Assembler::s4);
+ }
+ 
+@@ -168,11 +172,14 @@ void CCodeGen_AArch32::Emit_Fp_Rsqrt_MemMem(const STATEMENT& statement)
+ 
+ 	CTempRegisterContext tempRegisterContext;
+ 
++	//Exact 1 / sqrt(x)
+ 	LoadMemoryFp32InRegister(tempRegisterContext, CAArch32Assembler::s0, src1);
+-	m_assembler.Vrsqrte_F32(CAArch32Assembler::q1, CAArch32Assembler::q0);
+-	m_assembler.Vmul_F32(CAArch32Assembler::s8, CAArch32Assembler::s0, CAArch32Assembler::s4);
+-	m_assembler.Vrsqrts_F32(CAArch32Assembler::q3, CAArch32Assembler::q2, CAArch32Assembler::q1);
+-	m_assembler.Vmul_F32(CAArch32Assembler::s4, CAArch32Assembler::s4, CAArch32Assembler::s12);
++	auto oneReg = tempRegisterContext.Allocate();
++	LoadConstantInRegister(oneReg, 0x3F800000);
++	m_assembler.Vmov(CAArch32Assembler::d1, oneReg, 0); //s2 = 1.0
++	tempRegisterContext.Release(oneReg);
++	m_assembler.Vsqrt_F32(CAArch32Assembler::s0, CAArch32Assembler::s0);
++	m_assembler.Vdiv_F32(CAArch32Assembler::s4, CAArch32Assembler::s2, CAArch32Assembler::s0);
+ 	StoreRegisterInMemoryFp32(tempRegisterContext, dst, CAArch32Assembler::s4);
+ }
+ 

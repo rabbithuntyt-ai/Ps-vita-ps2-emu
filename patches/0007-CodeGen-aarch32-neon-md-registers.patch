@@ -1,0 +1,1405 @@
+diff --git a/include/AArch32Assembler.h b/include/AArch32Assembler.h
+index 88688d5..700db0e 100644
+--- a/include/AArch32Assembler.h
++++ b/include/AArch32Assembler.h
+@@ -303,6 +303,7 @@ public:
+ 	void Vbsl(QUAD_REGISTER, QUAD_REGISTER, QUAD_REGISTER);
+ 	void Vorn(QUAD_REGISTER, QUAD_REGISTER, QUAD_REGISTER);
+ 	void Vorr(QUAD_REGISTER, QUAD_REGISTER, QUAD_REGISTER);
++	void Vorr(DOUBLE_REGISTER, DOUBLE_REGISTER, DOUBLE_REGISTER);
+ 	void Veor(QUAD_REGISTER, QUAD_REGISTER, QUAD_REGISTER);
+ 	void Vmvn(QUAD_REGISTER, QUAD_REGISTER);
+ 	void Vshl_I16(QUAD_REGISTER, QUAD_REGISTER, uint8);
+diff --git a/include/Jitter_CodeGen.h b/include/Jitter_CodeGen.h
+index 79e5ab9..65ee554 100644
+--- a/include/Jitter_CodeGen.h
++++ b/include/Jitter_CodeGen.h
+@@ -29,6 +29,11 @@ namespace Jitter
+ 		virtual void GenerateCode(const StatementList&, unsigned int) = 0;
+ 		virtual unsigned int GetAvailableRegisterCount() const = 0;
+ 		virtual unsigned int GetAvailableMdRegisterCount() const = 0;
++		//Whether single precision values may be allocated to MD registers.
++		virtual bool CanAllocateFpInMdRegisters() const
++		{
++			return true;
++		}
+ 		virtual bool Has128BitsCallOperands() const = 0;
+ 		virtual bool CanHold128BitsReturnValueInRegisters() const = 0;
+ 		virtual bool SupportsExternalJumps() const = 0;
+diff --git a/include/Jitter_CodeGen_AArch32.h b/include/Jitter_CodeGen_AArch32.h
+index 8863058..c587fcf 100644
+--- a/include/Jitter_CodeGen_AArch32.h
++++ b/include/Jitter_CodeGen_AArch32.h
+@@ -27,6 +27,7 @@ namespace Jitter
+ 		void RegisterExternalSymbols(CObjectFile*) const override;
+ 		unsigned int GetAvailableRegisterCount() const override;
+ 		unsigned int GetAvailableMdRegisterCount() const override;
++		bool CanAllocateFpInMdRegisters() const override;
+ 		bool CanHold128BitsReturnValueInRegisters() const override;
+ 		bool Has128BitsCallOperands() const override;
+ 		bool SupportsExternalJumps() const override;
+@@ -74,6 +75,11 @@ namespace Jitter
+ 			MAX_REGISTERS = 6,
+ 		};
+ 
++		enum MAX_MDREGISTERS
++		{
++			MAX_MDREGISTERS = 8,
++		};
++
+ 		struct CONSTMATCHER
+ 		{
+ 			OPERATION op;
+@@ -155,6 +161,15 @@ namespace Jitter
+ 
+ 		void MdBlendRegisters(CAArch32Assembler::QUAD_REGISTER, CAArch32Assembler::QUAD_REGISTER, CAArch32Assembler::REGISTER, uint8);
+ 
++		void LoadMemory128InRegister(CAArch32Assembler::QUAD_REGISTER, CSymbol*);
++		void StoreRegisterInMemory128(CSymbol*, CAArch32Assembler::QUAD_REGISTER);
++		void MoveMdRegister(CAArch32Assembler::QUAD_REGISTER, CAArch32Assembler::QUAD_REGISTER);
++		CAArch32Assembler::QUAD_REGISTER PrepareSymbolRegisterDefMd(CSymbol*, CAArch32Assembler::QUAD_REGISTER);
++		CAArch32Assembler::QUAD_REGISTER PrepareSymbolRegisterUseMd(CSymbol*, CAArch32Assembler::QUAD_REGISTER);
++		CAArch32Assembler::QUAD_REGISTER PrepareSymbolRegisterUseMdCopy(CSymbol*, CAArch32Assembler::QUAD_REGISTER);
++		void CommitSymbolRegisterMd(CSymbol*, CAArch32Assembler::QUAD_REGISTER);
++		void PrepareUnpackHalves(CSymbol*, CSymbol*, uint32, CAArch32Assembler::DOUBLE_REGISTER, CAArch32Assembler::DOUBLE_REGISTER);
++
+ 		// clang-format off
+ 		//ALUOP ----------------------------------------------------------
+ 		struct ALUOP_BASE
+@@ -537,6 +552,7 @@ namespace Jitter
+ 		void Emit_Param_Mem64(const STATEMENT&);
+ 		void Emit_Param_Cst64(const STATEMENT&);
+ 		void Emit_Param_Mem128(const STATEMENT&);
++		void Emit_Param_Reg128(const STATEMENT&);
+ 
+ 		//PARAM_RET
+ 		void Emit_ParamRet_Tmp128(const STATEMENT&);
+@@ -713,56 +729,58 @@ namespace Jitter
+ 
+ 		//MDOP
+ 		template <typename>
+-		void Emit_Md_MemMem(const STATEMENT&);
++		void Emit_Md_VarVar(const STATEMENT&);
+ 		template <typename>
+-		void Emit_Md_MemMemMem(const STATEMENT&);
++		void Emit_Md_VarVarVar(const STATEMENT&);
+ 		template <typename>
+-		void Emit_Md_MemMemMemRev(const STATEMENT&);
++		void Emit_Md_VarVarVarRev(const STATEMENT&);
+ 		template <typename>
+-		void Emit_Md_Shift_MemMemCst(const STATEMENT&);
++		void Emit_Md_Shift_VarVarCst(const STATEMENT&);
+ 
+-		void Emit_Md_Mov_MemMem(const STATEMENT&);
+-		void Emit_Md_DivS_MemMemMem(const STATEMENT&);
++		void Emit_Md_Mov_VarVar(const STATEMENT&);
++		void Emit_Md_DivS_VarVarVar(const STATEMENT&);
+ 
+-		void Emit_Md_Srl256_MemMemVar(const STATEMENT&);
+-		void Emit_Md_Srl256_MemMemCst(const STATEMENT&);
++		void Emit_Md_Srl256_VarMemVar(const STATEMENT&);
++		void Emit_Md_Srl256_VarMemCst(const STATEMENT&);
+ 
+-		void Emit_Md_LoadFromRef_MemVar(const STATEMENT&);
+-		void Emit_Md_LoadFromRef_MemVarAny(const STATEMENT&);
+-		void Emit_Md_StoreAtRef_VarMem(const STATEMENT&);
+-		void Emit_Md_StoreAtRef_VarAnyMem(const STATEMENT&);
+-		void Emit_Md_LoadFromRefMasked_MemMemAnyMem(const STATEMENT&);
+-		void Emit_Md_StoreAtRefMasked_MemAnyMem(const STATEMENT&);
++		void Emit_Md_LoadFromRef_VarVar(const STATEMENT&);
++		void Emit_Md_LoadFromRef_VarVarAny(const STATEMENT&);
++		void Emit_Md_StoreAtRef_VarVar(const STATEMENT&);
++		void Emit_Md_StoreAtRef_VarAnyVar(const STATEMENT&);
++		void Emit_Md_LoadFromRefMasked_VarVarAnyVar(const STATEMENT&);
++		void Emit_Md_StoreAtRefMasked_VarAnyVar(const STATEMENT&);
+ 
+-		void Emit_Md_MovMasked_MemMemMem(const STATEMENT&);
+-		void Emit_Md_ExpandW_MemReg(const STATEMENT&);
+-		void Emit_Md_ExpandW_MemMem(const STATEMENT&);
+-		void Emit_Md_ExpandW_MemCst(const STATEMENT&);
++		void Emit_Md_MovMasked_VarVarVar(const STATEMENT&);
++		void Emit_Md_ExpandW_VarReg(const STATEMENT&);
++		void Emit_Md_ExpandW_VarMem(const STATEMENT&);
++		void Emit_Md_ExpandW_VarCst(const STATEMENT&);
+ 		void Emit_Md_ExpandW_VarVarCst(const STATEMENT&);
+-		void Emit_Md_BitSelect_MemMemMemMem(const STATEMENT&);
++		void Emit_Md_BitSelect_VarVarVarVar(const STATEMENT&);
+ 
+-		void Emit_Md_ClampS_MemMem(const STATEMENT&);
++		void Emit_Md_ClampS_VarVar(const STATEMENT&);
+ 
+-		void Emit_Md_MakeClip_VarMemMemMem(const STATEMENT&);
+-		void Emit_Md_MakeSz_VarMem(const STATEMENT&);
++		void Emit_Md_MakeClip_VarVarVarVar(const STATEMENT&);
++		void Emit_Md_MakeSz_VarVar(const STATEMENT&);
+ 
+-		void Emit_Md_PackHB_MemMemMem(const STATEMENT&);
+-		void Emit_Md_PackWH_MemMemMem(const STATEMENT&);
++		void Emit_Md_PackHB_VarVarVar(const STATEMENT&);
++		void Emit_Md_PackWH_VarVarVar(const STATEMENT&);
+ 
+ 		template <uint32>
+-		void Emit_Md_UnpackBH_MemMemMem(const STATEMENT&);
++		void Emit_Md_UnpackBH_VarVarVar(const STATEMENT&);
+ 		template <uint32>
+-		void Emit_Md_UnpackHW_MemMemMem(const STATEMENT&);
++		void Emit_Md_UnpackHW_VarVarVar(const STATEMENT&);
+ 		template <uint32>
+-		void Emit_Md_UnpackWD_MemMemMem(const STATEMENT&);
++		void Emit_Md_UnpackWD_VarVarVar(const STATEMENT&);
+ 
+-		void Emit_MergeTo256_MemMemMem(const STATEMENT&);
++		void Emit_MergeTo256_MemVarVar(const STATEMENT&);
+ 
+ 		static CONSTMATCHER g_constMatchers[];
+ 		static CONSTMATCHER g_64ConstMatchers[];
+ 		static CONSTMATCHER g_fpuConstMatchers[];
+ 		static CONSTMATCHER g_mdConstMatchers[];
+ 		static CAArch32Assembler::REGISTER g_registers[MAX_REGISTERS];
++		static CAArch32Assembler::QUAD_REGISTER g_registersMd[MAX_MDREGISTERS];
++		static CAArch32Assembler::REGISTER g_md128AddressRegister;
+ 		static CAArch32Assembler::REGISTER g_paramRegs[MAX_PARAM_REGS];
+ 		static CAArch32Assembler::REGISTER g_baseRegister;
+ 		static CAArch32Assembler::REGISTER g_callAddressRegister;
+@@ -780,6 +798,14 @@ namespace Jitter
+ 		uint32 m_stackSize = 0;
+ 		uint16 m_registerSave = 0;
+ 		uint32 m_stackLevel = 0;
++		//Stack area where 128-bit register values passed by reference to
++		//called functions are stored.
++		enum
++		{
++			PARAM128_SPILL_SLOTS = 4,
++		};
++		uint32 m_param128SpillBase = 0;
++		uint32 m_param128SpillCount = 0;
+ 		bool m_hasIntegerDiv = false;
+ 	};
+ };
+diff --git a/src/AArch32Assembler.cpp b/src/AArch32Assembler.cpp
+index 206b8c7..671857d 100644
+--- a/src/AArch32Assembler.cpp
++++ b/src/AArch32Assembler.cpp
+@@ -1134,6 +1134,15 @@ void CAArch32Assembler::Vorn(QUAD_REGISTER qd, QUAD_REGISTER qn, QUAD_REGISTER q
+ 	WriteWord(opcode);
+ }
+ 
++void CAArch32Assembler::Vorr(DOUBLE_REGISTER dd, DOUBLE_REGISTER dn, DOUBLE_REGISTER dm)
++{
++	uint32 opcode = 0xF2200110;
++	opcode |= FPSIMD_EncodeDd(dd);
++	opcode |= FPSIMD_EncodeDn(dn);
++	opcode |= FPSIMD_EncodeDm(dm);
++	WriteWord(opcode);
++}
++
+ void CAArch32Assembler::Vorr(QUAD_REGISTER qd, QUAD_REGISTER qn, QUAD_REGISTER qm)
+ {
+ 	uint32 opcode = 0xF2200150;
+diff --git a/src/Jitter_CodeGen_AArch32.cpp b/src/Jitter_CodeGen_AArch32.cpp
+index 8b165f7..6b1ef47 100644
+--- a/src/Jitter_CodeGen_AArch32.cpp
++++ b/src/Jitter_CodeGen_AArch32.cpp
+@@ -28,6 +28,23 @@ CAArch32Assembler::REGISTER CCodeGen_AArch32::g_registers[MAX_REGISTERS] =
+ 	CAArch32Assembler::r10,
+ };
+ 
++//q8-q15 (d16-d31) do not alias the single precision registers used by FPU
++//code. They are caller saved, which is fine: the register allocator never
++//keeps values in registers across calls.
++CAArch32Assembler::QUAD_REGISTER CCodeGen_AArch32::g_registersMd[MAX_MDREGISTERS] =
++{
++	CAArch32Assembler::q8,
++	CAArch32Assembler::q9,
++	CAArch32Assembler::q10,
++	CAArch32Assembler::q11,
++	CAArch32Assembler::q12,
++	CAArch32Assembler::q13,
++	CAArch32Assembler::q14,
++	CAArch32Assembler::q15,
++};
++
++CAArch32Assembler::REGISTER CCodeGen_AArch32::g_md128AddressRegister = CAArch32Assembler::r12;
++
+ CAArch32Assembler::REGISTER CCodeGen_AArch32::g_paramRegs[MAX_PARAM_REGS] =
+ {
+ 	CAArch32Assembler::r0,
+@@ -208,6 +225,7 @@ CCodeGen_AArch32::CONSTMATCHER CCodeGen_AArch32::g_constMatchers[] =
+ 	{ OP_PARAM, MATCH_NIL, MATCH_MEMORY64,   MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Param_Mem64  },
+ 	{ OP_PARAM, MATCH_NIL, MATCH_CONSTANT64, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Param_Cst64  },
+ 	{ OP_PARAM, MATCH_NIL, MATCH_MEMORY128,  MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Param_Mem128 },
++	{ OP_PARAM, MATCH_NIL, MATCH_REGISTER128, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Param_Reg128 },
+ 
+ 	{ OP_PARAM_RET, MATCH_NIL, MATCH_TEMPORARY128, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_ParamRet_Tmp128 },
+ 
+@@ -303,7 +321,14 @@ unsigned int CCodeGen_AArch32::GetAvailableRegisterCount() const
+ 
+ unsigned int CCodeGen_AArch32::GetAvailableMdRegisterCount() const
+ {
+-	return 0;
++	return MAX_MDREGISTERS;
++}
++
++bool CCodeGen_AArch32::CanAllocateFpInMdRegisters() const
++{
++	//Single precision VFP instructions can only address s0-s31 (q0-q7), not
++	//the q8-q15 registers used for MD values.
++	return false;
+ }
+ 
+ bool CCodeGen_AArch32::Has128BitsCallOperands() const
+@@ -349,6 +374,9 @@ void CCodeGen_AArch32::GenerateCode(const StatementList& statements, unsigned in
+ {
+ 	//Align stack size (must be aligned on 16 bytes boundary)
+ 	m_stackSize = (stackSize + 0xF) & ~0xF;
++	//Room for 128-bit register parameters, above the temporaries
++	m_param128SpillBase = m_stackSize;
++	m_stackSize += PARAM128_SPILL_SLOTS * 0x10;
+ 
+ 	m_registerSave = GetSavedRegisterList(GetRegisterUsage(statements));
+ 
+@@ -988,6 +1016,46 @@ void CCodeGen_AArch32::Emit_Param_Mem128(const STATEMENT& statement)
+ 	    });
+ }
+ 
++void CCodeGen_AArch32::Emit_Param_Reg128(const STATEMENT& statement)
++{
++	auto src1 = statement.src1->GetSymbol().get();
++
++	//Store the value now (the register holds it at this point of the
++	//block) and pass the address of the stored copy.
++	assert(m_param128SpillCount < PARAM128_SPILL_SLOTS);
++	uint32 slotOffset = m_param128SpillBase + (m_param128SpillCount++ * 0x10);
++	auto addrReg = g_md128AddressRegister;
++	uint8 immediate = 0, shiftAmount = 0;
++	FRAMEWORK_MAYBE_UNUSED bool encodable = TryGetAluImmediateParams(slotOffset + m_stackLevel, immediate, shiftAmount);
++	if(encodable)
++	{
++		m_assembler.Add(addrReg, CAArch32Assembler::rSP, CAArch32Assembler::MakeImmediateAluOperand(immediate, shiftAmount));
++	}
++	else
++	{
++		LoadConstantInRegister(addrReg, slotOffset + m_stackLevel);
++		m_assembler.Add(addrReg, CAArch32Assembler::rSP, addrReg);
++	}
++	m_assembler.Vst1_32x4(g_registersMd[src1->m_valueLow], addrReg);
++
++	m_params.push_back(
++	    [this, slotOffset](PARAM_STATE& paramState) {
++		    auto paramReg = PrepareParam(paramState);
++		    uint32 offset = slotOffset + m_stackLevel;
++		    uint8 imm = 0, sa = 0;
++		    if(TryGetAluImmediateParams(offset, imm, sa))
++		    {
++			    m_assembler.Add(paramReg, CAArch32Assembler::rSP, CAArch32Assembler::MakeImmediateAluOperand(imm, sa));
++		    }
++		    else
++		    {
++			    LoadConstantInRegister(paramReg, offset);
++			    m_assembler.Add(paramReg, CAArch32Assembler::rSP, paramReg);
++		    }
++		    CommitParam(paramState);
++	    });
++}
++
+ void CCodeGen_AArch32::Emit_ParamRet_Tmp128(const STATEMENT& statement)
+ {
+ 	Emit_Param_Mem128(statement);
+@@ -1003,6 +1071,7 @@ void CCodeGen_AArch32::Emit_Call(const STATEMENT& statement)
+ 
+ 	unsigned int paramCount = src2->m_valueLow;
+ 	PARAM_STATE paramState;
++	m_param128SpillCount = 0;
+ 
+ 	for(unsigned int i = 0; i < paramCount; i++)
+ 	{
+diff --git a/src/Jitter_CodeGen_AArch32_Md.cpp b/src/Jitter_CodeGen_AArch32_Md.cpp
+index 9554a07..506b88f 100644
+--- a/src/Jitter_CodeGen_AArch32_Md.cpp
++++ b/src/Jitter_CodeGen_AArch32_Md.cpp
+@@ -96,126 +96,165 @@ void CCodeGen_AArch32::MdBlendRegisters(
+ 	}
+ }
+ 
++//-----------------------------------------------------------------------------
++// 128-bit values may live in NEON registers (q8-q15, allocated by the
++// register allocator) or in memory (relative/temporary). The helpers below
++// give emitters a register for each operand either way: memory operands are
++// loaded into / stored from a work register (q0-q3, r12 for addresses).
++//-----------------------------------------------------------------------------
++
++void CCodeGen_AArch32::LoadMemory128InRegister(CAArch32Assembler::QUAD_REGISTER dstReg, CSymbol* symbol)
++{
++	LoadMemory128AddressInRegister(g_md128AddressRegister, symbol);
++	m_assembler.Vld1_32x4(dstReg, g_md128AddressRegister);
++}
++
++void CCodeGen_AArch32::StoreRegisterInMemory128(CSymbol* symbol, CAArch32Assembler::QUAD_REGISTER srcReg)
++{
++	LoadMemory128AddressInRegister(g_md128AddressRegister, symbol);
++	m_assembler.Vst1_32x4(srcReg, g_md128AddressRegister);
++}
++
++void CCodeGen_AArch32::MoveMdRegister(CAArch32Assembler::QUAD_REGISTER dstReg, CAArch32Assembler::QUAD_REGISTER srcReg)
++{
++	if(dstReg != srcReg)
++	{
++		m_assembler.Vorr(dstReg, srcReg, srcReg);
++	}
++}
++
++CAArch32Assembler::QUAD_REGISTER CCodeGen_AArch32::PrepareSymbolRegisterDefMd(CSymbol* symbol, CAArch32Assembler::QUAD_REGISTER workRegister)
++{
++	switch(symbol->m_type)
++	{
++	case SYM_REGISTER128:
++		assert(symbol->m_valueLow < MAX_MDREGISTERS);
++		return g_registersMd[symbol->m_valueLow];
++	case SYM_RELATIVE128:
++	case SYM_TEMPORARY128:
++		return workRegister;
++	default:
++		assert(false);
++		return workRegister;
++	}
++}
++
++CAArch32Assembler::QUAD_REGISTER CCodeGen_AArch32::PrepareSymbolRegisterUseMd(CSymbol* symbol, CAArch32Assembler::QUAD_REGISTER workRegister)
++{
++	switch(symbol->m_type)
++	{
++	case SYM_REGISTER128:
++		assert(symbol->m_valueLow < MAX_MDREGISTERS);
++		return g_registersMd[symbol->m_valueLow];
++	case SYM_RELATIVE128:
++	case SYM_TEMPORARY128:
++		LoadMemory128InRegister(workRegister, symbol);
++		return workRegister;
++	default:
++		assert(false);
++		return workRegister;
++	}
++}
++
++CAArch32Assembler::QUAD_REGISTER CCodeGen_AArch32::PrepareSymbolRegisterUseMdCopy(CSymbol* symbol, CAArch32Assembler::QUAD_REGISTER workRegister)
++{
++	//Value in the work register, even if the symbol lives in a register (for
++	//instructions that clobber their sources or need s/d register aliasing).
++	auto reg = PrepareSymbolRegisterUseMd(symbol, workRegister);
++	MoveMdRegister(workRegister, reg);
++	return workRegister;
++}
++
++void CCodeGen_AArch32::CommitSymbolRegisterMd(CSymbol* symbol, CAArch32Assembler::QUAD_REGISTER usedRegister)
++{
++	switch(symbol->m_type)
++	{
++	case SYM_REGISTER128:
++		MoveMdRegister(g_registersMd[symbol->m_valueLow], usedRegister);
++		break;
++	case SYM_RELATIVE128:
++	case SYM_TEMPORARY128:
++		StoreRegisterInMemory128(symbol, usedRegister);
++		break;
++	default:
++		assert(false);
++		break;
++	}
++}
++
+ template <typename MDOP>
+-void CCodeGen_AArch32::Emit_Md_MemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_VarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto src1AddrReg = CAArch32Assembler::r1;
+-	auto dstReg = CAArch32Assembler::q0;
+-	auto src1Reg = CAArch32Assembler::q1;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-	LoadMemory128AddressInRegister(src1AddrReg, src1);
+-
+-	m_assembler.Vld1_32x4(src1Reg, src1AddrReg);
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q1);
+ 	((m_assembler).*(MDOP::OpReg()))(dstReg, src1Reg);
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+ template <typename MDOP>
+-void CCodeGen_AArch32::Emit_Md_MemMemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_VarVarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto src1AddrReg = CAArch32Assembler::r1;
+-	auto src2AddrReg = CAArch32Assembler::r2;
+-	auto dstReg = CAArch32Assembler::q0;
+-	auto src1Reg = CAArch32Assembler::q1;
+-	auto src2Reg = CAArch32Assembler::q2;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-	LoadMemory128AddressInRegister(src1AddrReg, src1);
+-	LoadMemory128AddressInRegister(src2AddrReg, src2);
+-
+-	m_assembler.Vld1_32x4(src1Reg, src1AddrReg);
+-	m_assembler.Vld1_32x4(src2Reg, src2AddrReg);
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q1);
++	auto src2Reg = PrepareSymbolRegisterUseMd(src2, CAArch32Assembler::q2);
+ 	((m_assembler).*(MDOP::OpReg()))(dstReg, src1Reg, src2Reg);
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+ template <typename MDOP>
+-void CCodeGen_AArch32::Emit_Md_MemMemMemRev(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_VarVarVarRev(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto src1AddrReg = CAArch32Assembler::r1;
+-	auto src2AddrReg = CAArch32Assembler::r2;
+-	auto dstReg = CAArch32Assembler::q0;
+-	auto src1Reg = CAArch32Assembler::q1;
+-	auto src2Reg = CAArch32Assembler::q2;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-	LoadMemory128AddressInRegister(src1AddrReg, src1);
+-	LoadMemory128AddressInRegister(src2AddrReg, src2);
+-
+-	m_assembler.Vld1_32x4(src1Reg, src1AddrReg);
+-	m_assembler.Vld1_32x4(src2Reg, src2AddrReg);
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q1);
++	auto src2Reg = PrepareSymbolRegisterUseMd(src2, CAArch32Assembler::q2);
+ 	((m_assembler).*(MDOP::OpReg()))(dstReg, src2Reg, src1Reg);
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+ template <typename MDSHIFTOP>
+-void CCodeGen_AArch32::Emit_Md_Shift_MemMemCst(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_Shift_VarVarCst(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto src1AddrReg = CAArch32Assembler::r1;
+-	auto dstReg = CAArch32Assembler::q0;
+-	auto src1Reg = CAArch32Assembler::q1;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-	LoadMemory128AddressInRegister(src1AddrReg, src1);
+-
+-	m_assembler.Vld1_32x4(src1Reg, src1AddrReg);
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q1);
+ 	((m_assembler).*(MDSHIFTOP::OpReg()))(dstReg, src1Reg, src2->m_valueLow);
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_Mov_MemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_Mov_VarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto src1AddrReg = CAArch32Assembler::r1;
+-	auto tmpReg = CAArch32Assembler::q0;
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-	LoadMemory128AddressInRegister(src1AddrReg, src1);
+-	m_assembler.Vld1_32x4(tmpReg, src1AddrReg);
+-	m_assembler.Vst1_32x4(tmpReg, dstAddrReg);
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q0);
++	CommitSymbolRegisterMd(dst, src1Reg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_DivS_MemMemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_DivS_VarVarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto src1AddrReg = CAArch32Assembler::r1;
+-	auto src2AddrReg = CAArch32Assembler::r2;
++	//Lanes are accessed as single precision registers, which only exist for
++	//q0-q7: always work in q0-q2.
+ 	auto dstReg = CAArch32Assembler::q0;
+-	auto src1Reg = CAArch32Assembler::q1;
+-	auto src2Reg = CAArch32Assembler::q2;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-	LoadMemory128AddressInRegister(src1AddrReg, src1);
+-	LoadMemory128AddressInRegister(src2AddrReg, src2);
+-
+-	m_assembler.Vld1_32x4(src1Reg, src1AddrReg);
+-	m_assembler.Vld1_32x4(src2Reg, src2AddrReg);
++	auto src1Reg = PrepareSymbolRegisterUseMdCopy(src1, CAArch32Assembler::q1);
++	auto src2Reg = PrepareSymbolRegisterUseMdCopy(src2, CAArch32Assembler::q2);
+ 
+ 	//No vector floating point divide on NEON, gotta do it 4x
+ 	for(unsigned int i = 0; i < 4; i++)
+@@ -226,10 +265,10 @@ void CCodeGen_AArch32::Emit_Md_DivS_MemMemMem(const STATEMENT& statement)
+ 		m_assembler.Vdiv_F32(subDstReg, subSrc1Reg, subSrc2Reg);
+ 	}
+ 
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_Srl256_MemMemCst(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_Srl256_VarMemCst(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+@@ -238,20 +277,17 @@ void CCodeGen_AArch32::Emit_Md_Srl256_MemMemCst(const STATEMENT& statement)
+ 	assert(src1->m_type == SYM_TEMPORARY256);
+ 	assert(src2->m_type == SYM_CONSTANT);
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+ 	auto src1AddrReg = CAArch32Assembler::r1;
+-	auto dstReg = CAArch32Assembler::q0;
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
+ 
+ 	uint32 offset = (src2->m_valueLow & 0x7F) / 8;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+ 	LoadTemporary256ElementAddressInRegister(src1AddrReg, src1, offset);
+ 
+ 	m_assembler.Vld1_32x4_u(dstReg, src1AddrReg);
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_Srl256_MemMemVar(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_Srl256_VarMemVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+@@ -260,15 +296,12 @@ void CCodeGen_AArch32::Emit_Md_Srl256_MemMemVar(const STATEMENT& statement)
+ 	assert(src1->m_type == SYM_TEMPORARY256);
+ 
+ 	auto offsetRegister = CAArch32Assembler::r0;
+-	auto dstAddrReg = CAArch32Assembler::r1;
+ 	auto src1AddrReg = CAArch32Assembler::r2;
+ 	auto src2Register = PrepareSymbolRegisterUse(src2, CAArch32Assembler::r3);
+-
+-	auto dstReg = CAArch32Assembler::q0;
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
+ 
+ 	auto offsetShift = CAArch32Assembler::MakeConstantShift(CAArch32Assembler::SHIFT_LSR, 3);
+ 
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+ 	LoadTemporary256ElementAddressInRegister(src1AddrReg, src1, 0);
+ 
+ 	//Compute offset and modify address
+@@ -277,26 +310,22 @@ void CCodeGen_AArch32::Emit_Md_Srl256_MemMemVar(const STATEMENT& statement)
+ 	m_assembler.Add(src1AddrReg, src1AddrReg, offsetRegister);
+ 
+ 	m_assembler.Vld1_32x4_u(dstReg, src1AddrReg);
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_LoadFromRef_MemVar(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_LoadFromRef_VarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 
+ 	auto src1AddrReg = PrepareSymbolRegisterUseRef(src1, CAArch32Assembler::r0);
+-	auto dstAddrReg = CAArch32Assembler::r1;
+-
+-	auto dstReg = CAArch32Assembler::q0;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
+ 
+ 	m_assembler.Vld1_32x4(dstReg, src1AddrReg);
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_LoadFromRef_MemVarAny(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_LoadFromRef_VarVarAny(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+@@ -306,33 +335,26 @@ void CCodeGen_AArch32::Emit_Md_LoadFromRef_MemVarAny(const STATEMENT& statement)
+ 	assert(scale == 1);
+ 
+ 	auto src1AddrIdxReg = CAArch32Assembler::r1;
+-	auto dstAddrReg = CAArch32Assembler::r2;
+-	auto dstReg = CAArch32Assembler::q0;
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
+ 
+ 	LoadRefIndexAddress(src1AddrIdxReg, src1, CAArch32Assembler::r0, src2, CAArch32Assembler::r3, scale);
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+ 
+ 	m_assembler.Vld1_32x4(dstReg, src1AddrIdxReg);
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_StoreAtRef_VarMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_StoreAtRef_VarVar(const STATEMENT& statement)
+ {
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+ 
+ 	auto src1AddrReg = PrepareSymbolRegisterUseRef(src1, CAArch32Assembler::r0);
+-	auto src2AddrReg = CAArch32Assembler::r1;
++	auto src2Reg = PrepareSymbolRegisterUseMd(src2, CAArch32Assembler::q0);
+ 
+-	auto src2Reg = CAArch32Assembler::q0;
+-
+-	LoadMemory128AddressInRegister(src2AddrReg, src2);
+-
+-	m_assembler.Vld1_32x4(src2Reg, src2AddrReg);
+ 	m_assembler.Vst1_32x4(src2Reg, src1AddrReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_StoreAtRef_VarAnyMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_StoreAtRef_VarAnyVar(const STATEMENT& statement)
+ {
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+@@ -342,42 +364,36 @@ void CCodeGen_AArch32::Emit_Md_StoreAtRef_VarAnyMem(const STATEMENT& statement)
+ 	assert(scale == 1);
+ 
+ 	auto src1AddrIdxReg = CAArch32Assembler::r1;
+-	auto valueAddrReg = CAArch32Assembler::r2;
+-	auto valueReg = CAArch32Assembler::q0;
++	auto valueReg = PrepareSymbolRegisterUseMd(src3, CAArch32Assembler::q0);
+ 
+ 	LoadRefIndexAddress(src1AddrIdxReg, src1, CAArch32Assembler::r0, src2, CAArch32Assembler::r3, scale);
+-	LoadMemory128AddressInRegister(valueAddrReg, src3);
+ 
+-	m_assembler.Vld1_32x4(valueReg, valueAddrReg);
+ 	m_assembler.Vst1_32x4(valueReg, src1AddrIdxReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_LoadFromRefMasked_MemMemAnyMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_LoadFromRefMasked_VarVarAnyVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+-	auto src3 = statement.src3->GetSymbol().get();
++	FRAMEWORK_MAYBE_UNUSED auto src3 = statement.src3->GetSymbol().get();
+ 	auto mask = static_cast<uint8>(statement.jmpCondition);
+ 	uint8 scale = 1;
+ 
+ 	assert(dst->Equals(src3));
+ 
+ 	auto src1AddrIdxReg = CAArch32Assembler::r1;
+-	auto dstAddrReg = CAArch32Assembler::r2;
+-	auto dstReg = CAArch32Assembler::q0;
+ 	auto memReg = CAArch32Assembler::q1;
+ 
+ 	LoadRefIndexAddress(src1AddrIdxReg, src1, CAArch32Assembler::r0, src2, CAArch32Assembler::r3, scale);
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-
+ 	m_assembler.Vld1_32x4(memReg, src1AddrIdxReg);
+-	m_assembler.Vld1_32x4(dstReg, dstAddrReg);
++
++	auto dstReg = PrepareSymbolRegisterUseMd(dst, CAArch32Assembler::q0);
+ 	MdBlendRegisters(dstReg, memReg, CAArch32Assembler::r3, mask);
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_StoreAtRefMasked_MemAnyMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_StoreAtRefMasked_VarAnyVar(const STATEMENT& statement)
+ {
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+@@ -386,20 +402,17 @@ void CCodeGen_AArch32::Emit_Md_StoreAtRefMasked_MemAnyMem(const STATEMENT& state
+ 	uint8 scale = 1;
+ 
+ 	auto src1AddrIdxReg = CAArch32Assembler::r1;
+-	auto src3AddrReg = CAArch32Assembler::r2;
+-	auto src3Reg = CAArch32Assembler::q0;
+ 	auto memReg = CAArch32Assembler::q1;
+ 
+ 	LoadRefIndexAddress(src1AddrIdxReg, src1, CAArch32Assembler::r0, src2, CAArch32Assembler::r3, scale);
+-	LoadMemory128AddressInRegister(src3AddrReg, src3);
++	auto src3Reg = PrepareSymbolRegisterUseMd(src3, CAArch32Assembler::q0);
+ 
+ 	m_assembler.Vld1_32x4(memReg, src1AddrIdxReg);
+-	m_assembler.Vld1_32x4(src3Reg, src3AddrReg);
+ 	MdBlendRegisters(memReg, src3Reg, CAArch32Assembler::r3, mask);
+ 	m_assembler.Vst1_32x4(memReg, src1AddrIdxReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_MovMasked_MemMemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_MovMasked_VarVarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	FRAMEWORK_MAYBE_UNUSED auto src1 = statement.src1->GetSymbol().get();
+@@ -409,73 +422,55 @@ void CCodeGen_AArch32::Emit_Md_MovMasked_MemMemMem(const STATEMENT& statement)
+ 
+ 	auto mask = static_cast<uint8>(statement.jmpCondition);
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto src2AddrReg = CAArch32Assembler::r2;
+ 	auto tmpReg = CAArch32Assembler::r3;
+-	auto dstReg = CAArch32Assembler::q0;
+-	auto src2Reg = CAArch32Assembler::q2;
++	auto dstReg = PrepareSymbolRegisterUseMd(dst, CAArch32Assembler::q0);
++	auto src2Reg = PrepareSymbolRegisterUseMd(src2, CAArch32Assembler::q2);
+ 
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-	LoadMemory128AddressInRegister(src2AddrReg, src2);
+-
+-	m_assembler.Vld1_32x4(dstReg, dstAddrReg);
+-	m_assembler.Vld1_32x4(src2Reg, src2AddrReg);
+ 	MdBlendRegisters(dstReg, src2Reg, tmpReg, mask);
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_ExpandW_MemReg(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_ExpandW_VarReg(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto tmpReg = CAArch32Assembler::q0;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-
+-	m_assembler.Vdup(tmpReg, g_registers[src1->m_valueLow]);
+-	m_assembler.Vst1_32x4(tmpReg, dstAddrReg);
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
++	m_assembler.Vdup(dstReg, g_registers[src1->m_valueLow]);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_ExpandW_MemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_ExpandW_VarMem(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+ 	auto src1Reg = CAArch32Assembler::r1;
+-	auto tmpReg = CAArch32Assembler::q0;
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
+ 
+ 	LoadMemoryInRegister(src1Reg, src1);
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-
+-	m_assembler.Vdup(tmpReg, src1Reg);
+-	m_assembler.Vst1_32x4(tmpReg, dstAddrReg);
++	m_assembler.Vdup(dstReg, src1Reg);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_ExpandW_MemCst(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_ExpandW_VarCst(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+ 	auto src1Reg = CAArch32Assembler::r1;
+-	auto tmpReg = CAArch32Assembler::q0;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
+ 
+ 	if(src1->m_valueLow == 0)
+ 	{
+-		m_assembler.Veor(tmpReg, tmpReg, tmpReg);
++		m_assembler.Veor(dstReg, dstReg, dstReg);
+ 	}
+ 	else
+ 	{
+ 		LoadConstantInRegister(src1Reg, src1->m_valueLow);
+-		m_assembler.Vdup(tmpReg, src1Reg);
++		m_assembler.Vdup(dstReg, src1Reg);
+ 	}
+-
+-	m_assembler.Vst1_32x4(tmpReg, dstAddrReg);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+ void CCodeGen_AArch32::Emit_Md_ExpandW_VarVarCst(const STATEMENT& statement)
+@@ -487,83 +482,60 @@ void CCodeGen_AArch32::Emit_Md_ExpandW_VarVarCst(const STATEMENT& statement)
+ 	assert(src2->m_type == SYM_CONSTANT);
+ 	assert(src2->m_valueLow < 4);
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto src1AddrReg = CAArch32Assembler::r1;
+-	auto dstReg = CAArch32Assembler::q0;
+-	auto src1Reg = CAArch32Assembler::d2;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-	LoadMemory128AddressInRegister(src1AddrReg, src1, (src2->m_valueLow / 2) * 8);
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q1);
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
+ 
+-	m_assembler.Vld1_32x2(src1Reg, src1AddrReg);
+-	m_assembler.Vdup_32(dstReg, src1Reg, src2->m_valueLow & 1);
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++	//Quad register qN is made of d(N*2) and d(N*2+1); the enum values are
++	//the d register numbers.
++	auto laneReg = static_cast<CAArch32Assembler::DOUBLE_REGISTER>(src1Reg + (src2->m_valueLow / 2));
++	m_assembler.Vdup_32(dstReg, laneReg, src2->m_valueLow & 1);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_BitSelect_MemMemMemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_BitSelect_VarVarVarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+ 	auto src3 = statement.src3->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto src1AddrReg = CAArch32Assembler::r1;
+-	auto src2AddrReg = CAArch32Assembler::r2;
+-	auto src3AddrReg = CAArch32Assembler::r3;
+-
+-	auto dstReg = CAArch32Assembler::q0;
+-	auto src1Reg = CAArch32Assembler::q1;
+-	auto src2Reg = CAArch32Assembler::q2;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-	LoadMemory128AddressInRegister(src1AddrReg, src1);
+-	LoadMemory128AddressInRegister(src2AddrReg, src2);
+-	LoadMemory128AddressInRegister(src3AddrReg, src3);
+-
+-	m_assembler.Vld1_32x4(dstReg, src3AddrReg);
+-	m_assembler.Vld1_32x4(src1Reg, src1AddrReg);
+-	m_assembler.Vld1_32x4(src2Reg, src2AddrReg);
+-	m_assembler.Vbsl(dstReg, src1Reg, src2Reg);
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++	//VBSL uses its destination as the selector: build the result in q0.
++	auto resultReg = PrepareSymbolRegisterUseMdCopy(src3, CAArch32Assembler::q0);
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q1);
++	auto src2Reg = PrepareSymbolRegisterUseMd(src2, CAArch32Assembler::q2);
++	m_assembler.Vbsl(resultReg, src1Reg, src2Reg);
++	CommitSymbolRegisterMd(dst, resultReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_ClampS_MemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_ClampS_VarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto src1AddrReg = CAArch32Assembler::r1;
+ 	auto cstAddrReg = CAArch32Assembler::r2;
+-	auto dstReg = CAArch32Assembler::q0;
+-	auto cst0Reg = CAArch32Assembler::q1;
+-	auto cst1Reg = CAArch32Assembler::q2;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-	LoadMemory128AddressInRegister(src1AddrReg, src1);
++	auto cst0Reg = CAArch32Assembler::q2;
++	auto cst1Reg = CAArch32Assembler::q3;
+ 
+ 	m_assembler.Adrl(cstAddrReg, g_fpClampMask1);
+ 	m_assembler.Vld1_32x4(cst0Reg, cstAddrReg);
+ 	m_assembler.Adrl(cstAddrReg, g_fpClampMask2);
+ 	m_assembler.Vld1_32x4(cst1Reg, cstAddrReg);
+ 
+-	m_assembler.Vld1_32x4(dstReg, src1AddrReg);
+-	m_assembler.Vmin_I32(dstReg, dstReg, cst0Reg);
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q1);
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
++	m_assembler.Vmin_I32(dstReg, src1Reg, cst0Reg);
+ 	m_assembler.Vmin_U32(dstReg, dstReg, cst1Reg);
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++	CommitSymbolRegisterMd(dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_MakeClip_VarMemMemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_MakeClip_VarVarVarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+ 	auto src3 = statement.src3->GetSymbol().get();
+ 
+-	auto valueAddrReg = CAArch32Assembler::r0;
+ 	auto cstAddrReg = CAArch32Assembler::r1;
+-	auto src1Reg = CAArch32Assembler::q0;
+ 	auto boundReg = CAArch32Assembler::q1;
+ 	auto gtReg = CAArch32Assembler::q2;
+ 	auto ltReg = CAArch32Assembler::q3;
+@@ -571,21 +543,18 @@ void CCodeGen_AArch32::Emit_Md_MakeClip_VarMemMemMem(const STATEMENT& statement)
+ 	static const LITERAL128 lit1(0xFFFF180814041000UL, 0xFFFFFFFFFFFFFFFFUL);
+ 	static const LITERAL128 lit2(0x0000201008040201UL, 0x0000000000000000UL);
+ 
+-	LoadMemory128AddressInRegister(valueAddrReg, src1);
+-	m_assembler.Vld1_32x4(src1Reg, valueAddrReg);
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q0);
+ 
+ 	//src1 > src2
+ 	{
+-		LoadMemory128AddressInRegister(cstAddrReg, src2);
+-		m_assembler.Vld1_32x4(boundReg, cstAddrReg);
+-		m_assembler.Vcgt_F32(gtReg, src1Reg, boundReg);
++		auto src2Reg = PrepareSymbolRegisterUseMd(src2, boundReg);
++		m_assembler.Vcgt_F32(gtReg, src1Reg, src2Reg);
+ 	}
+ 
+ 	//src1 < src3
+ 	{
+-		LoadMemory128AddressInRegister(cstAddrReg, src3);
+-		m_assembler.Vld1_32x4(boundReg, cstAddrReg);
+-		m_assembler.Vcgt_F32(ltReg, boundReg, src1Reg);
++		auto src3Reg = PrepareSymbolRegisterUseMd(src3, boundReg);
++		m_assembler.Vcgt_F32(ltReg, src3Reg, src1Reg);
+ 	}
+ 
+ 	auto dstReg = PrepareSymbolRegisterDef(dst, CAArch32Assembler::r0);
+@@ -607,14 +576,12 @@ void CCodeGen_AArch32::Emit_Md_MakeClip_VarMemMemMem(const STATEMENT& statement)
+ 	CommitSymbolRegister(dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_MakeSz_VarMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_MakeSz_VarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 
+-	auto src1AddrReg = CAArch32Assembler::r0;
+ 	auto cstAddrReg = CAArch32Assembler::r1;
+-	auto src1Reg = CAArch32Assembler::q0;
+ 	auto signReg = CAArch32Assembler::q1;
+ 	auto zeroReg = CAArch32Assembler::q2;
+ 	auto cstReg = CAArch32Assembler::q3;
+@@ -622,8 +589,7 @@ void CCodeGen_AArch32::Emit_Md_MakeSz_VarMem(const STATEMENT& statement)
+ 	static const LITERAL128 lit1(0x0004080C1014181CUL, 0xFFFFFFFFFFFFFFFFUL);
+ 	static const LITERAL128 lit2(0x8040201008040201UL, 0x0000000000000000UL);
+ 
+-	LoadMemory128AddressInRegister(src1AddrReg, src1);
+-	m_assembler.Vld1_32x4(src1Reg, src1AddrReg);
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q0);
+ 
+ 	auto dstReg = PrepareSymbolRegisterDef(dst, CAArch32Assembler::r0);
+ 
+@@ -647,127 +613,89 @@ void CCodeGen_AArch32::Emit_Md_MakeSz_VarMem(const STATEMENT& statement)
+ 	CommitSymbolRegister(dst, dstReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_PackHB_MemMemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_PackHB_VarVarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto src1AddrReg = CAArch32Assembler::r1;
+-	auto src2AddrReg = CAArch32Assembler::r2;
+-	auto dstReg = CAArch32Assembler::q0;
+-	auto src1Reg = CAArch32Assembler::q1;
+-	auto src2Reg = CAArch32Assembler::q2;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-	LoadMemory128AddressInRegister(src1AddrReg, src1);
+-	LoadMemory128AddressInRegister(src2AddrReg, src2);
++	//Result built in q0: the destination may alias a source.
++	auto resultReg = CAArch32Assembler::q0;
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q1);
++	auto src2Reg = PrepareSymbolRegisterUseMd(src2, CAArch32Assembler::q2);
+ 
+-	m_assembler.Vld1_32x4(src1Reg, src1AddrReg);
+-	m_assembler.Vld1_32x4(src2Reg, src2AddrReg);
+-	m_assembler.Vmovn_I16(static_cast<CAArch32Assembler::DOUBLE_REGISTER>(dstReg + 1), src1Reg);
+-	m_assembler.Vmovn_I16(static_cast<CAArch32Assembler::DOUBLE_REGISTER>(dstReg + 0), src2Reg);
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++	m_assembler.Vmovn_I16(static_cast<CAArch32Assembler::DOUBLE_REGISTER>(resultReg + 1), src1Reg);
++	m_assembler.Vmovn_I16(static_cast<CAArch32Assembler::DOUBLE_REGISTER>(resultReg + 0), src2Reg);
++	CommitSymbolRegisterMd(dst, resultReg);
+ }
+ 
+-void CCodeGen_AArch32::Emit_Md_PackWH_MemMemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_PackWH_VarVarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto src1AddrReg = CAArch32Assembler::r1;
+-	auto src2AddrReg = CAArch32Assembler::r2;
+-	auto dstReg = CAArch32Assembler::q0;
+-	auto src1Reg = CAArch32Assembler::q1;
+-	auto src2Reg = CAArch32Assembler::q2;
++	auto resultReg = CAArch32Assembler::q0;
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q1);
++	auto src2Reg = PrepareSymbolRegisterUseMd(src2, CAArch32Assembler::q2);
+ 
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-	LoadMemory128AddressInRegister(src1AddrReg, src1);
+-	LoadMemory128AddressInRegister(src2AddrReg, src2);
++	m_assembler.Vmovn_I32(static_cast<CAArch32Assembler::DOUBLE_REGISTER>(resultReg + 1), src1Reg);
++	m_assembler.Vmovn_I32(static_cast<CAArch32Assembler::DOUBLE_REGISTER>(resultReg + 0), src2Reg);
++	CommitSymbolRegisterMd(dst, resultReg);
++}
+ 
+-	m_assembler.Vld1_32x4(src1Reg, src1AddrReg);
+-	m_assembler.Vld1_32x4(src2Reg, src2AddrReg);
+-	m_assembler.Vmovn_I32(static_cast<CAArch32Assembler::DOUBLE_REGISTER>(dstReg + 1), src1Reg);
+-	m_assembler.Vmovn_I32(static_cast<CAArch32Assembler::DOUBLE_REGISTER>(dstReg + 0), src2Reg);
+-	m_assembler.Vst1_32x4(dstReg, dstAddrReg);
++void CCodeGen_AArch32::PrepareUnpackHalves(CSymbol* src1, CSymbol* src2, uint32 offset,
++                                           CAArch32Assembler::DOUBLE_REGISTER src1Half, CAArch32Assembler::DOUBLE_REGISTER src2Half)
++{
++	//Copies the selected 64-bit halves of both sources into work registers
++	//(VZIP clobbers its operands).
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q2);
++	m_assembler.Vorr(src1Half, static_cast<CAArch32Assembler::DOUBLE_REGISTER>(src1Reg + offset / 8),
++	                 static_cast<CAArch32Assembler::DOUBLE_REGISTER>(src1Reg + offset / 8));
++	auto src2Reg = PrepareSymbolRegisterUseMd(src2, CAArch32Assembler::q3);
++	m_assembler.Vorr(src2Half, static_cast<CAArch32Assembler::DOUBLE_REGISTER>(src2Reg + offset / 8),
++	                 static_cast<CAArch32Assembler::DOUBLE_REGISTER>(src2Reg + offset / 8));
+ }
+ 
+ template <uint32 offset>
+-void CCodeGen_AArch32::Emit_Md_UnpackBH_MemMemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_UnpackBH_VarVarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto src1AddrReg = CAArch32Assembler::r1;
+-	auto src2AddrReg = CAArch32Assembler::r2;
+-	auto src1Reg = CAArch32Assembler::d0;
+-	auto src2Reg = CAArch32Assembler::d1;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-	LoadMemory128AddressInRegister(src1AddrReg, src1, offset);
+-	LoadMemory128AddressInRegister(src2AddrReg, src2, offset);
+-
+-	//Warning: VZIP modifies both registers
+-	m_assembler.Vld1_32x2(src1Reg, src2AddrReg);
+-	m_assembler.Vld1_32x2(src2Reg, src1AddrReg);
+-	m_assembler.Vzip_I8(src1Reg, src2Reg);
+-	m_assembler.Vst1_32x4(static_cast<CAArch32Assembler::QUAD_REGISTER>(src1Reg), dstAddrReg);
++	//q0 = { d0 = src2 half, d1 = src1 half }, interleaved by VZIP
++	PrepareUnpackHalves(src1, src2, offset, CAArch32Assembler::d1, CAArch32Assembler::d0);
++	m_assembler.Vzip_I8(CAArch32Assembler::d0, CAArch32Assembler::d1);
++	CommitSymbolRegisterMd(dst, CAArch32Assembler::q0);
+ }
+ 
+ template <uint32 offset>
+-void CCodeGen_AArch32::Emit_Md_UnpackHW_MemMemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_UnpackHW_VarVarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto src1AddrReg = CAArch32Assembler::r1;
+-	auto src2AddrReg = CAArch32Assembler::r2;
+-	auto src1Reg = CAArch32Assembler::d0;
+-	auto src2Reg = CAArch32Assembler::d1;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-	LoadMemory128AddressInRegister(src1AddrReg, src1, offset);
+-	LoadMemory128AddressInRegister(src2AddrReg, src2, offset);
+-
+-	//Warning: VZIP modifies both registers
+-	m_assembler.Vld1_32x2(src1Reg, src2AddrReg);
+-	m_assembler.Vld1_32x2(src2Reg, src1AddrReg);
+-	m_assembler.Vzip_I16(src1Reg, src2Reg);
+-	m_assembler.Vst1_32x4(static_cast<CAArch32Assembler::QUAD_REGISTER>(src1Reg), dstAddrReg);
++	PrepareUnpackHalves(src1, src2, offset, CAArch32Assembler::d1, CAArch32Assembler::d0);
++	m_assembler.Vzip_I16(CAArch32Assembler::d0, CAArch32Assembler::d1);
++	CommitSymbolRegisterMd(dst, CAArch32Assembler::q0);
+ }
+ 
+ template <uint32 offset>
+-void CCodeGen_AArch32::Emit_Md_UnpackWD_MemMemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_Md_UnpackWD_VarVarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+ 
+-	auto dstAddrReg = CAArch32Assembler::r0;
+-	auto src1AddrReg = CAArch32Assembler::r1;
+-	auto src2AddrReg = CAArch32Assembler::r2;
+-	auto src1Reg = CAArch32Assembler::d0;
+-	auto src2Reg = CAArch32Assembler::d2;
+-
+-	LoadMemory128AddressInRegister(dstAddrReg, dst);
+-	LoadMemory128AddressInRegister(src1AddrReg, src1, offset);
+-	LoadMemory128AddressInRegister(src2AddrReg, src2, offset);
+-
+-	//Warning: VZIP modifies both registers
+-	m_assembler.Vld1_32x2(src1Reg, src2AddrReg);
+-	m_assembler.Vld1_32x2(src2Reg, src1AddrReg);
+-	m_assembler.Vzip_I32(static_cast<CAArch32Assembler::QUAD_REGISTER>(src1Reg), static_cast<CAArch32Assembler::QUAD_REGISTER>(src2Reg));
+-	m_assembler.Vst1_32x4(static_cast<CAArch32Assembler::QUAD_REGISTER>(src1Reg), dstAddrReg);
++	//d0 = src2 half, d2 = src1 half; VZIP.32 q0, q1 interleaves the low halves into q0
++	PrepareUnpackHalves(src1, src2, offset, CAArch32Assembler::d2, CAArch32Assembler::d0);
++	m_assembler.Vzip_I32(CAArch32Assembler::q0, CAArch32Assembler::q1);
++	CommitSymbolRegisterMd(dst, CAArch32Assembler::q0);
+ }
+ 
+-void CCodeGen_AArch32::Emit_MergeTo256_MemMemMem(const STATEMENT& statement)
++void CCodeGen_AArch32::Emit_MergeTo256_MemVarVar(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+@@ -777,18 +705,13 @@ void CCodeGen_AArch32::Emit_MergeTo256_MemMemMem(const STATEMENT& statement)
+ 
+ 	auto dstLoAddrReg = CAArch32Assembler::r0;
+ 	auto dstHiAddrReg = CAArch32Assembler::r1;
+-	auto src1AddrReg = CAArch32Assembler::r2;
+-	auto src2AddrReg = CAArch32Assembler::r3;
+-	auto src1Reg = CAArch32Assembler::q0;
+-	auto src2Reg = CAArch32Assembler::q1;
++
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q0);
++	auto src2Reg = PrepareSymbolRegisterUseMd(src2, CAArch32Assembler::q1);
+ 
+ 	LoadTemporary256ElementAddressInRegister(dstLoAddrReg, dst, 0x00);
+ 	LoadTemporary256ElementAddressInRegister(dstHiAddrReg, dst, 0x10);
+-	LoadMemory128AddressInRegister(src1AddrReg, src1);
+-	LoadMemory128AddressInRegister(src2AddrReg, src2);
+ 
+-	m_assembler.Vld1_32x4(src1Reg, src1AddrReg);
+-	m_assembler.Vld1_32x4(src2Reg, src2AddrReg);
+ 	m_assembler.Vst1_32x4(src1Reg, dstLoAddrReg);
+ 	m_assembler.Vst1_32x4(src2Reg, dstHiAddrReg);
+ }
+@@ -796,112 +719,112 @@ void CCodeGen_AArch32::Emit_MergeTo256_MemMemMem(const STATEMENT& statement)
+ // clang-format off
+ CCodeGen_AArch32::CONSTMATCHER CCodeGen_AArch32::g_mdConstMatchers[] = 
+ {
+-	{ OP_MD_ADD_B, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_ADDB> },
+-	{ OP_MD_ADD_H, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_ADDH> },
+-	{ OP_MD_ADD_W, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_ADDW> },
++	{ OP_MD_ADD_B, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_ADDB> },
++	{ OP_MD_ADD_H, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_ADDH> },
++	{ OP_MD_ADD_W, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_ADDW> },
+ 
+-	{ OP_MD_SUB_B, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_SUBB> },
+-	{ OP_MD_SUB_H, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_SUBH> },
+-	{ OP_MD_SUB_W, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_SUBW> },
++	{ OP_MD_SUB_B, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_SUBB> },
++	{ OP_MD_SUB_H, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_SUBH> },
++	{ OP_MD_SUB_W, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_SUBW> },
+ 
+-	{ OP_MD_ADDUS_B, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_ADDBUS> },
+-	{ OP_MD_ADDUS_H, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_ADDHUS> },
+-	{ OP_MD_ADDUS_W, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_ADDWUS> },
++	{ OP_MD_ADDUS_B, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_ADDBUS> },
++	{ OP_MD_ADDUS_H, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_ADDHUS> },
++	{ OP_MD_ADDUS_W, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_ADDWUS> },
+ 
+-	{ OP_MD_ADDSS_B, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_ADDBSS> },
+-	{ OP_MD_ADDSS_H, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_ADDHSS> },
+-	{ OP_MD_ADDSS_W, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_ADDWSS> },
++	{ OP_MD_ADDSS_B, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_ADDBSS> },
++	{ OP_MD_ADDSS_H, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_ADDHSS> },
++	{ OP_MD_ADDSS_W, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_ADDWSS> },
+ 
+-	{ OP_MD_SUBUS_B, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_SUBBUS> },
+-	{ OP_MD_SUBUS_H, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_SUBHUS> },
+-	{ OP_MD_SUBUS_W, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_SUBWUS> },
++	{ OP_MD_SUBUS_B, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_SUBBUS> },
++	{ OP_MD_SUBUS_H, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_SUBHUS> },
++	{ OP_MD_SUBUS_W, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_SUBWUS> },
+ 
+-	{ OP_MD_SUBSS_B, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_SUBBSS> },
+-	{ OP_MD_SUBSS_H, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_SUBHSS> },
+-	{ OP_MD_SUBSS_W, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_SUBWSS> },
++	{ OP_MD_SUBSS_B, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_SUBBSS> },
++	{ OP_MD_SUBSS_H, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_SUBHSS> },
++	{ OP_MD_SUBSS_W, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_SUBWSS> },
+ 
+-	{ OP_MD_CLAMP_S, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL,       MATCH_NIL, &CCodeGen_AArch32::Emit_Md_ClampS_MemMem },
++	{ OP_MD_CLAMP_S, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_ClampS_VarVar },
+ 
+-	{ OP_MD_CMPEQ_B, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_CMPEQB> },
+-	{ OP_MD_CMPEQ_H, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_CMPEQH> },
+-	{ OP_MD_CMPEQ_W, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_CMPEQW> },
++	{ OP_MD_CMPEQ_B, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_CMPEQB> },
++	{ OP_MD_CMPEQ_H, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_CMPEQH> },
++	{ OP_MD_CMPEQ_W, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_CMPEQW> },
+ 
+-	{ OP_MD_CMPGT_B, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_CMPGTB> },
+-	{ OP_MD_CMPGT_H, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_CMPGTH> },
+-	{ OP_MD_CMPGT_W, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_CMPGTW> },
++	{ OP_MD_CMPGT_B, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_CMPGTB> },
++	{ OP_MD_CMPGT_H, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_CMPGTH> },
++	{ OP_MD_CMPGT_W, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_CMPGTW> },
+ 
+-	{ OP_MD_MIN_H, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_MINH> },
+-	{ OP_MD_MIN_W, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_MINW> },
++	{ OP_MD_MIN_H, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_MINH> },
++	{ OP_MD_MIN_W, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_MINW> },
+ 
+-	{ OP_MD_MAX_H, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_MAXH> },
+-	{ OP_MD_MAX_W, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_MAXW> },
++	{ OP_MD_MAX_H, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_MAXH> },
++	{ OP_MD_MAX_W, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_MAXW> },
+ 
+-	{ OP_MD_ADD_S, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_ADDS> },
+-	{ OP_MD_SUB_S, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_SUBS> },
+-	{ OP_MD_MUL_S, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_MULS> },
+-	{ OP_MD_DIV_S, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_DivS_MemMemMem       },
++	{ OP_MD_ADD_S, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_ADDS> },
++	{ OP_MD_SUB_S, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_SUBS> },
++	{ OP_MD_MUL_S, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_MULS> },
++	{ OP_MD_DIV_S, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_DivS_VarVarVar       },
+ 
+-	{ OP_MD_ABS_S, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL,       MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMem<MDOP_ABSS>      },
+-	{ OP_MD_NEG_S, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL,       MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMem<MDOP_NEGS>      },
+-	{ OP_MD_MIN_S, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<FPUMDOP_MIN> },
+-	{ OP_MD_MAX_S, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<FPUMDOP_MAX> },
++	{ OP_MD_ABS_S, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL,         MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVar<MDOP_ABSS>      },
++	{ OP_MD_NEG_S, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL,         MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVar<MDOP_NEGS>      },
++	{ OP_MD_MIN_S, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<FPUMDOP_MIN> },
++	{ OP_MD_MAX_S, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<FPUMDOP_MAX> },
+ 
+-	{ OP_MD_CMPLT_S, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMemRev<FPUMDOP_CMPGT> },
+-	{ OP_MD_CMPGT_S, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMemMem<FPUMDOP_CMPGT>    },
++	{ OP_MD_CMPLT_S, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVarRev<FPUMDOP_CMPGT> },
++	{ OP_MD_CMPGT_S, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVarVar<FPUMDOP_CMPGT>    },
+ 
+-	{ OP_MD_AND,       MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL,       &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_AND>    },
+-	{ OP_MD_BITSELECT, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, &CCodeGen_AArch32::Emit_Md_BitSelect_MemMemMemMem },
+-	{ OP_MD_OR,        MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL,       &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_OR>     },
+-	{ OP_MD_XOR,       MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL,       &CCodeGen_AArch32::Emit_Md_MemMemMem<MDOP_XOR>    },
+-	{ OP_MD_NOT,       MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL,       MATCH_NIL,       &CCodeGen_AArch32::Emit_Md_MemMem<MDOP_NOT>       },
++	{ OP_MD_AND,       MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL,         &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_AND>        },
++	{ OP_MD_BITSELECT, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, &CCodeGen_AArch32::Emit_Md_BitSelect_VarVarVarVar },
++	{ OP_MD_OR,        MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL,         &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_OR>         },
++	{ OP_MD_XOR,       MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL,         &CCodeGen_AArch32::Emit_Md_VarVarVar<MDOP_XOR>        },
++	{ OP_MD_NOT,       MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL,         MATCH_NIL,         &CCodeGen_AArch32::Emit_Md_VarVar<MDOP_NOT>           },
+ 
+-	{ OP_MD_SLLH, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Shift_MemMemCst<MDOP_SLLH> },
+-	{ OP_MD_SLLW, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Shift_MemMemCst<MDOP_SLLW> },
++	{ OP_MD_SLLH, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Shift_VarVarCst<MDOP_SLLH> },
++	{ OP_MD_SLLW, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Shift_VarVarCst<MDOP_SLLW> },
+ 
+-	{ OP_MD_SRLH, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Shift_MemMemCst<MDOP_SRLH> },
+-	{ OP_MD_SRLW, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Shift_MemMemCst<MDOP_SRLW> },
++	{ OP_MD_SRLH, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Shift_VarVarCst<MDOP_SRLH> },
++	{ OP_MD_SRLW, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Shift_VarVarCst<MDOP_SRLW> },
+ 
+-	{ OP_MD_SRAH, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Shift_MemMemCst<MDOP_SRAH> },
+-	{ OP_MD_SRAW, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Shift_MemMemCst<MDOP_SRAW> },
++	{ OP_MD_SRAH, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Shift_VarVarCst<MDOP_SRAH> },
++	{ OP_MD_SRAW, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Shift_VarVarCst<MDOP_SRAW> },
+ 
+-	{ OP_MD_SRL256, MATCH_VARIABLE128, MATCH_MEMORY256, MATCH_VARIABLE, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Srl256_MemMemVar },
+-	{ OP_MD_SRL256, MATCH_VARIABLE128, MATCH_MEMORY256, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Srl256_MemMemCst },
++	{ OP_MD_SRL256, MATCH_VARIABLE128, MATCH_MEMORY256, MATCH_VARIABLE, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Srl256_VarMemVar },
++	{ OP_MD_SRL256, MATCH_VARIABLE128, MATCH_MEMORY256, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Srl256_VarMemCst },
+ 
+-	{ OP_MD_MAKECLIP, MATCH_VARIABLE, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, &CCodeGen_AArch32::Emit_Md_MakeClip_VarMemMemMem },
+-	{ OP_MD_MAKESZ,   MATCH_VARIABLE, MATCH_MEMORY128, MATCH_NIL,       MATCH_NIL,       &CCodeGen_AArch32::Emit_Md_MakeSz_VarMem         },
++	{ OP_MD_MAKECLIP, MATCH_VARIABLE, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, &CCodeGen_AArch32::Emit_Md_MakeClip_VarVarVarVar },
++	{ OP_MD_MAKESZ,   MATCH_VARIABLE, MATCH_VARIABLE128, MATCH_NIL,         MATCH_NIL,         &CCodeGen_AArch32::Emit_Md_MakeSz_VarVar         },
+ 
+-	{ OP_MD_TOSINGLE_I32,    MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMem<MDOP_TOSINGLE_I32> },
+-	{ OP_MD_TOINT32_TRUNC_S, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MemMem<MDOP_TOINT32_S>    },
++	{ OP_MD_TOSINGLE_I32,    MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVar<MDOP_TOSINGLE_I32> },
++	{ OP_MD_TOINT32_TRUNC_S, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVar<MDOP_TOINT32_S>    },
+ 
+-	{ OP_MOV, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Mov_MemMem },
++	{ OP_MOV, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_Mov_VarVar },
+ 
+-	{ OP_LOADFROMREF, MATCH_MEMORY128, MATCH_VAR_REF, MATCH_NIL,       MATCH_NIL,       &CCodeGen_AArch32::Emit_Md_LoadFromRef_MemVar    },
+-	{ OP_LOADFROMREF, MATCH_MEMORY128, MATCH_VAR_REF, MATCH_ANY32,     MATCH_NIL,       &CCodeGen_AArch32::Emit_Md_LoadFromRef_MemVarAny },
+-	{ OP_STOREATREF,  MATCH_NIL,       MATCH_VAR_REF, MATCH_MEMORY128, MATCH_NIL,       &CCodeGen_AArch32::Emit_Md_StoreAtRef_VarMem     },
+-	{ OP_STOREATREF,  MATCH_NIL,       MATCH_VAR_REF, MATCH_ANY32,     MATCH_MEMORY128, &CCodeGen_AArch32::Emit_Md_StoreAtRef_VarAnyMem  },
++	{ OP_LOADFROMREF, MATCH_VARIABLE128, MATCH_VAR_REF, MATCH_NIL,         MATCH_NIL,         &CCodeGen_AArch32::Emit_Md_LoadFromRef_VarVar    },
++	{ OP_LOADFROMREF, MATCH_VARIABLE128, MATCH_VAR_REF, MATCH_ANY32,       MATCH_NIL,         &CCodeGen_AArch32::Emit_Md_LoadFromRef_VarVarAny },
++	{ OP_STOREATREF,  MATCH_NIL,         MATCH_VAR_REF, MATCH_VARIABLE128, MATCH_NIL,         &CCodeGen_AArch32::Emit_Md_StoreAtRef_VarVar     },
++	{ OP_STOREATREF,  MATCH_NIL,         MATCH_VAR_REF, MATCH_ANY32,       MATCH_VARIABLE128, &CCodeGen_AArch32::Emit_Md_StoreAtRef_VarAnyVar  },
+ 
+-	{ OP_MD_LOADFROMREF_MASKED, MATCH_MEMORY128, MATCH_VAR_REF, MATCH_ANY32, MATCH_MEMORY128, &CCodeGen_AArch32::Emit_Md_LoadFromRefMasked_MemMemAnyMem },
+-	{ OP_MD_STOREATREF_MASKED,  MATCH_NIL,       MATCH_VAR_REF, MATCH_ANY32, MATCH_MEMORY128, &CCodeGen_AArch32::Emit_Md_StoreAtRefMasked_MemAnyMem     },
++	{ OP_MD_LOADFROMREF_MASKED, MATCH_VARIABLE128, MATCH_VAR_REF, MATCH_ANY32, MATCH_VARIABLE128, &CCodeGen_AArch32::Emit_Md_LoadFromRefMasked_VarVarAnyVar },
++	{ OP_MD_STOREATREF_MASKED,  MATCH_NIL,         MATCH_VAR_REF, MATCH_ANY32, MATCH_VARIABLE128, &CCodeGen_AArch32::Emit_Md_StoreAtRefMasked_VarAnyVar     },
+ 
+-	{ OP_MD_MOV_MASKED, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MovMasked_MemMemMem },
++	{ OP_MD_MOV_MASKED, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_MovMasked_VarVarVar },
+ 
+-	{ OP_MD_EXPAND_W, MATCH_MEMORY128,   MATCH_REGISTER,    MATCH_NIL,      MATCH_NIL, &CCodeGen_AArch32::Emit_Md_ExpandW_MemReg    },
+-	{ OP_MD_EXPAND_W, MATCH_MEMORY128,   MATCH_MEMORY,      MATCH_NIL,      MATCH_NIL, &CCodeGen_AArch32::Emit_Md_ExpandW_MemMem    },
+-	{ OP_MD_EXPAND_W, MATCH_MEMORY128,   MATCH_CONSTANT,    MATCH_NIL,      MATCH_NIL, &CCodeGen_AArch32::Emit_Md_ExpandW_MemCst    },
++	{ OP_MD_EXPAND_W, MATCH_VARIABLE128, MATCH_REGISTER,    MATCH_NIL,      MATCH_NIL, &CCodeGen_AArch32::Emit_Md_ExpandW_VarReg    },
++	{ OP_MD_EXPAND_W, MATCH_VARIABLE128, MATCH_MEMORY,      MATCH_NIL,      MATCH_NIL, &CCodeGen_AArch32::Emit_Md_ExpandW_VarMem    },
++	{ OP_MD_EXPAND_W, MATCH_VARIABLE128, MATCH_CONSTANT,    MATCH_NIL,      MATCH_NIL, &CCodeGen_AArch32::Emit_Md_ExpandW_VarCst    },
+ 	{ OP_MD_EXPAND_W, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_ExpandW_VarVarCst },
+ 
+-	{ OP_MD_PACK_HB, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_PackHB_MemMemMem },
+-	{ OP_MD_PACK_WH, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_PackWH_MemMemMem },
++	{ OP_MD_PACK_HB, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_PackHB_VarVarVar },
++	{ OP_MD_PACK_WH, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_PackWH_VarVarVar },
+ 
+-	{ OP_MD_UNPACK_LOWER_BH, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_UnpackBH_MemMemMem<0> },
+-	{ OP_MD_UNPACK_LOWER_HW, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_UnpackHW_MemMemMem<0> },
+-	{ OP_MD_UNPACK_LOWER_WD, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_UnpackWD_MemMemMem<0> },
++	{ OP_MD_UNPACK_LOWER_BH, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_UnpackBH_VarVarVar<0> },
++	{ OP_MD_UNPACK_LOWER_HW, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_UnpackHW_VarVarVar<0> },
++	{ OP_MD_UNPACK_LOWER_WD, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_UnpackWD_VarVarVar<0> },
+ 
+-	{ OP_MD_UNPACK_UPPER_BH, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_UnpackBH_MemMemMem<8> },
+-	{ OP_MD_UNPACK_UPPER_HW, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_UnpackHW_MemMemMem<8> },
+-	{ OP_MD_UNPACK_UPPER_WD, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_MEMORY128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_UnpackWD_MemMemMem<8> },
++	{ OP_MD_UNPACK_UPPER_BH, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_UnpackBH_VarVarVar<8> },
++	{ OP_MD_UNPACK_UPPER_HW, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_UnpackHW_VarVarVar<8> },
++	{ OP_MD_UNPACK_UPPER_WD, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_UnpackWD_VarVarVar<8> },
+ 
+-	{ OP_MERGETO256, MATCH_MEMORY256, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_MergeTo256_MemMemMem },
++	{ OP_MERGETO256, MATCH_MEMORY256, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, &CCodeGen_AArch32::Emit_MergeTo256_MemVarVar },
+ 
+ 	{ OP_MOV, MATCH_NIL, MATCH_NIL, MATCH_NIL, MATCH_NIL, nullptr },
+ };
+diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
+index b416ed6..52792c7 100644
+--- a/src/Jitter_RegAlloc.cpp
++++ b/src/Jitter_RegAlloc.cpp
+@@ -202,11 +202,12 @@ void CJitter::AssociateSymbolsToRegisters(SymbolRegAllocInfo& symbolRegAllocs) c
+ 		}
+ 	}
+ 
++	bool fpInMdRegisters = m_codeGen->CanAllocateFpInMdRegisters();
+ 	auto isRegisterAllocatable =
+-	    [](SYM_TYPE symbolType) {
++	    [fpInMdRegisters](SYM_TYPE symbolType) {
+ 		    return (symbolType == SYM_RELATIVE) || (symbolType == SYM_TEMPORARY) ||
+ 		           (symbolType == SYM_REL_REFERENCE) || (symbolType == SYM_TMP_REFERENCE) ||
+-		           (symbolType == SYM_FP_RELATIVE32) || (symbolType == SYM_FP_TEMPORARY32) ||
++		           (fpInMdRegisters && ((symbolType == SYM_FP_RELATIVE32) || (symbolType == SYM_FP_TEMPORARY32))) ||
+ 		           (symbolType == SYM_RELATIVE128) || (symbolType == SYM_TEMPORARY128);
+ 	    };
+ 

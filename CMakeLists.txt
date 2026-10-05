@@ -184,6 +184,15 @@ else()
 	target_link_libraries(audio_stretch_tests PRIVATE vitaps2_common)
 	add_test(NAME audio_stretch_tests COMMAND audio_stretch_tests)
 
+	# Play!'s recompiler test suites: CodeGen (JIT backend, including the
+	# AArch32 backend under qemu on ARM cross builds) and VU microcode.
+	if(TARGET CodeGenTestSuite)
+		set_target_properties(CodeGenTestSuite PROPERTIES EXCLUDE_FROM_ALL FALSE)
+		add_test(NAME codegen_tests COMMAND CodeGenTestSuite)
+	endif()
+	add_subdirectory(${PLAY_DIR}/tools/VuTest ${CMAKE_CURRENT_BINARY_DIR}/VuTest)
+	target_include_directories(VuTest PRIVATE ${PLAY_DIR}/Source/app_shared)
+
 	add_executable(jit_pool_tests tests/jit_pool_tests.cpp)
 	target_include_directories(jit_pool_tests PRIVATE src/common)
 	add_test(NAME jit_pool_tests COMMAND jit_pool_tests)

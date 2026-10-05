@@ -116,6 +116,12 @@ cmake --build build-vita -j
 
 or with Docker: `docker run --rm -v $PWD:/src -w /src vitasdk/vitasdk:latest sh -c 'cmake -S . -B build-vita -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake && cmake --build build-vita -j'`
 
+### ARM Linux under qemu — the Vita's recompiler on a PC
+
+`cmake/toolchains/armhf-linux.cmake` cross-builds everything for a Cortex-A9
+and runs the tests through `qemu-arm`, including Play!'s AArch32 recompiler
+(the code path used on the Vita). See the file header for the packages.
+
 ### Host (Linux/macOS) — development and tests
 
 The host build uses the exact same core and software GS, headless:
@@ -140,6 +146,9 @@ Tests:
 * `gs_hardware_tests` — GPU renderer vs. software renderer on the same
   scenes (Mesa OSMesa, needs `libosmesa6-dev`).
 * `ui_render_test` — menu/overlay drawing layer.
+* `codegen_tests`, `VuTest` — Play!'s recompiler and VU test suites.
+* `idct_tests`, `ipu_tests`, `audio_stretch_tests` — movie decoding and audio
+  time stretching.
 * `elf_boot_test`, `elf_boot_test_hw` — generates a PS2 program (`tools/make_test_elf.py`), boots
   it through the full emulator and checks the rendered frame.
 
