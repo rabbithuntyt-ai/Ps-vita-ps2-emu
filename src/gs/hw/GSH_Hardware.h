@@ -74,6 +74,8 @@ public:
 		uint32 targetDownloads = 0;
 		uint32 targetUploads = 0;
 		uint32 textureUploads = 0;
+		uint32 downloadedPixels = 0;
+		uint32 uploadedPixels = 0;
 		uint32 approximateBlends = 0; //state changes with a blend GL cannot express
 	};
 
@@ -86,6 +88,10 @@ public:
 	STATS GetLastFrameStats() const
 	{
 		return m_lastFrameStats;
+	}
+	STATS GetCurrentFrameStats() const
+	{
+		return m_stats;
 	}
 
 protected:
@@ -110,7 +116,12 @@ private:
 		GLuint framebuffer = 0;
 		GLuint colorTexture = 0;
 		GLuint depthBuffer = 0;
-		bool gpuDirty = false; //rendered pixels not yet in GS memory
+		// Rows [0, validRows) of the GPU copy are current; more rows are
+		// filled from GS memory when drawing, display or sampling needs them.
+		uint32 validRows = 0;
+		// Pixels rendered by the GPU and not yet written back to GS memory.
+		bool gpuDirty = false;
+		uint32 dirtyX0 = 0, dirtyY0 = 0, dirtyX1 = 0, dirtyY1 = 0;
 		uint32 lastUse = 0;
 	};
 
@@ -132,8 +143,14 @@ private:
 
 	TARGET* FindTarget(uint32 fbp, uint32 fbw, uint32 psm, bool create, uint32 minHeight);
 	void DeleteTarget(TARGET&);
-	bool RangesOverlap(const TARGET&, uint32 start, uint32 size) const;
-	uint32 TargetBytes(const TARGET&) const;
+	void RemoveTargetsOverlapping(const TARGET* except, uint32 start, uint32 size);
+	void EnsureValidRows(TARGET&, uint32 rows);
+	void MarkTargetDirty(TARGET&, int32 x0, int32 y0, int32 x1, int32 y1);
+	// GS memory spanned by a range of rows (whole page rows).
+	void RowsToBytes(const TARGET&, uint32 rowBegin, uint32 rowEnd, uint32& start, uint32& end) const;
+	// Rows of the target stored in a range of GS memory.
+	bool BytesToRows(const TARGET&, uint32 start, uint32 size, uint32& rowBegin, uint32& rowEnd) const;
+	bool RowsOverlap(const TARGET&, uint32 rowBegin, uint32 rowEnd, uint32 start, uint32 size) const;
 
 	void UploadTarget(TARGET&, uint32 x, uint32 y, uint32 width, uint32 height);
 	void DownloadTarget(TARGET&);
@@ -172,7 +189,10 @@ private:
 
 	DISPLAY_TEXTURE m_display;
 	GLuint m_displayUploadTexture = 0;
+	GLuint m_feedbackTexture = 0;
+	uint32 m_feedbackWidth = 0, m_feedbackHeight = 0;
 	std::vector<uint32> m_frameBuffer;
+	std::vector<uint32> m_transferPixels;
 	STATS m_stats;
 	STATS m_lastFrameStats;
 };

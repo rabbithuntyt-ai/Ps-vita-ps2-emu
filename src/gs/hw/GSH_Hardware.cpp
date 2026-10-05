@@ -158,6 +158,9 @@ void CGSH_Hardware::ReleaseImpl()
 	}
 	m_glTextures.clear();
 	if(m_displayUploadTexture) glDeleteTextures(1, &m_displayUploadTexture);
+	if(m_feedbackTexture) glDeleteTextures(1, &m_feedbackTexture);
+	m_feedbackTexture = 0;
+	m_feedbackWidth = m_feedbackHeight = 0;
 	m_displayUploadTexture = 0;
 }
 
@@ -187,18 +190,34 @@ void CGSH_Hardware::MarkNewFrame()
 // Render targets
 //-----------------------------------------------------------------------------
 
-uint32 CGSH_Hardware::TargetBytes(const TARGET& target) const
+void CGSH_Hardware::RowsToBytes(const TARGET& target, uint32 rowBegin, uint32 rowEnd, uint32& start, uint32& end) const
 {
 	GS_SURFACE surface;
 	surface.Init(target.psm, target.fbp, target.fbw);
-	uint32 rows = (target.height + surface.phMask) >> surface.phShift;
-	return rows * std::max<uint32>(surface.pagesPerRow, 1) * 8192;
+	uint32 rowBytes = std::max<uint32>(surface.pagesPerRow, 1) * 8192;
+	start = target.fbp + (rowBegin >> surface.phShift) * rowBytes;
+	end = target.fbp + ((rowEnd + surface.phMask) >> surface.phShift) * rowBytes;
 }
 
-bool CGSH_Hardware::RangesOverlap(const TARGET& target, uint32 start, uint32 size) const
+bool CGSH_Hardware::BytesToRows(const TARGET& target, uint32 start, uint32 size, uint32& rowBegin, uint32& rowEnd) const
 {
-	uint32 targetStart = target.fbp;
-	uint32 targetEnd = target.fbp + TargetBytes(target);
+	GS_SURFACE surface;
+	surface.Init(target.psm, target.fbp, target.fbw);
+	uint32 pagesPerRow = std::max<uint32>(surface.pagesPerRow, 1);
+	uint32 end = start + size;
+	if(end <= target.fbp) return false;
+	uint32 firstPage = (start > target.fbp) ? (start - target.fbp) / 8192 : 0;
+	uint32 lastPage = (end - target.fbp + 8191) / 8192;
+	rowBegin = std::min((firstPage / pagesPerRow) << surface.phShift, target.height);
+	rowEnd = std::min(((lastPage + pagesPerRow - 1) / pagesPerRow) << surface.phShift, target.height);
+	return rowBegin < rowEnd;
+}
+
+bool CGSH_Hardware::RowsOverlap(const TARGET& target, uint32 rowBegin, uint32 rowEnd, uint32 start, uint32 size) const
+{
+	if(rowBegin >= rowEnd) return false;
+	uint32 targetStart = 0, targetEnd = 0;
+	RowsToBytes(target, rowBegin, rowEnd, targetStart, targetEnd);
 	uint32 end = start + size;
 	return (start < targetEnd) && (targetStart < end);
 }
@@ -210,6 +229,24 @@ void CGSH_Hardware::DeleteTarget(TARGET& target)
 	if(target.colorTexture) glDeleteTextures(1, &target.colorTexture);
 	if(target.depthBuffer) glDeleteRenderbuffers(1, &target.depthBuffer);
 	target.framebuffer = target.colorTexture = target.depthBuffer = 0;
+}
+
+void CGSH_Hardware::RemoveTargetsOverlapping(const TARGET* except, uint32 start, uint32 size)
+{
+	for(auto it = m_targets.begin(); it != m_targets.end();)
+	{
+		TARGET& other = **it;
+		if((&other != except) && RowsOverlap(other, 0, other.validRows, start, size))
+		{
+			if(other.gpuDirty) DownloadTarget(other);
+			DeleteTarget(other);
+			it = m_targets.erase(it);
+		}
+		else
+		{
+			++it;
+		}
+	}
 }
 
 CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 psm, bool create, uint32 minHeight)
@@ -240,23 +277,12 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 	target->psm = psm;
 	target->width = std::min<uint32>(fbw * 64, 1024);
 	target->height = RoundUpTargetHeight(std::max<uint32>(minHeight, 448));
-	uint32 size = TargetBytes(*target);
 
-	// Anything already overlapping this memory goes back to GS memory first,
-	// then the new target starts from GS memory contents.
-	for(auto it = m_targets.begin(); it != m_targets.end();)
-	{
-		if(RangesOverlap(**it, fbp, size))
-		{
-			if((*it)->gpuDirty) DownloadTarget(**it);
-			DeleteTarget(**it);
-			it = m_targets.erase(it);
-		}
-		else
-		{
-			++it;
-		}
-	}
+	// Targets whose contents live in this memory go back to GS memory first
+	// (the new one is filled from GS memory as rows get used).
+	uint32 start = 0, end = 0;
+	RowsToBytes(*target, 0, target->height, start, end);
+	RemoveTargetsOverlapping(nullptr, start, end - start);
 
 	glGenTextures(1, &target->colorTexture);
 	glBindTexture(GL_TEXTURE_2D, target->colorTexture);
@@ -281,10 +307,21 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 
 	target->lastUse = ++m_useCounter;
 	m_targets.push_back(std::move(target));
-	TARGET* result = m_targets.back().get();
-	UploadTarget(*result, 0, 0, result->width, result->height);
 	m_stateApplied = false;
-	return result;
+	return m_targets.back().get();
+}
+
+void CGSH_Hardware::EnsureValidRows(TARGET& target, uint32 rows)
+{
+	rows = std::min(rows, target.height);
+	if(rows <= target.validRows) return;
+	uint32 begin = target.validRows;
+	// Other targets holding newer data for these rows go back to memory.
+	uint32 start = 0, end = 0;
+	RowsToBytes(target, begin, rows, start, end);
+	RemoveTargetsOverlapping(&target, start, end - start);
+	UploadTarget(target, 0, begin, target.width, rows - begin);
+	target.validRows = rows;
 }
 
 void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 width, uint32 height)
@@ -294,51 +331,94 @@ void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 wi
 	width = std::min(width, target.width - x0);
 	height = std::min(height, target.height - y0);
 	if((width == 0) || (height == 0)) return;
+	FlushBatch();
 
 	GS_SURFACE surface;
 	surface.Init(target.psm, target.fbp, target.fbw);
 	bool is16 = IsPsm16(target.psm);
 	bool is24 = GsMemory::IsPsm24(target.psm);
-	std::vector<uint32> pixels(width * height);
+	m_transferPixels.resize(width * height);
+	uint32* pixels = m_transferPixels.data();
 	for(uint32 y = 0; y < height; y++)
 	{
 		uint32 rowBase = surface.RowBase(y0 + y);
 		const uint32* rowTable = surface.RowTable(y0 + y);
-		for(uint32 x = 0; x < width; x++)
+		uint32* dst = pixels + y * width;
+		if(is16)
 		{
-			uint32 offset = surface.Offset(rowBase, rowTable, x0 + x);
-			uint32 color = is16 ? GsMemory::Color16To32(*reinterpret_cast<const uint16*>(m_pRAM + offset))
-			                    : *reinterpret_cast<const uint32*>(m_pRAM + offset);
-			uint32 alpha = is24 ? 0x80 : (color >> 24);
-			pixels[x + y * width] = (color & 0x00FFFFFF) | (static_cast<uint32>(GsAlphaToTarget(alpha)) << 24);
+			for(uint32 x = 0; x < width; x++)
+			{
+				uint32 offset = surface.Offset(rowBase, rowTable, x0 + x);
+				uint32 color = GsMemory::Color16To32(*reinterpret_cast<const uint16*>(m_pRAM + offset));
+				dst[x] = (color & 0x00FFFFFF) | (static_cast<uint32>(GsAlphaToTarget(color >> 24)) << 24);
+			}
+		}
+		else
+		{
+			for(uint32 x = 0; x < width; x++)
+			{
+				uint32 offset = surface.Offset(rowBase, rowTable, x0 + x);
+				uint32 color = *reinterpret_cast<const uint32*>(m_pRAM + offset);
+				uint32 alpha = is24 ? 0x80 : (color >> 24);
+				dst[x] = (color & 0x00FFFFFF) | (static_cast<uint32>(GsAlphaToTarget(alpha)) << 24);
+			}
 		}
 	}
 	glBindTexture(GL_TEXTURE_2D, target.colorTexture);
-	glTexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+	glTexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 	m_stats.targetUploads++;
+	m_stats.uploadedPixels += width * height;
 	m_stateApplied = false;
+}
+
+void CGSH_Hardware::MarkTargetDirty(TARGET& target, int32 x0, int32 y0, int32 x1, int32 y1)
+{
+	const auto& s = m_state;
+	x0 = std::max<int32>({x0, s.scax0, 0});
+	y0 = std::max<int32>({y0, s.scay0, 0});
+	x1 = std::min<int32>({x1, s.scax1 + 1, static_cast<int32>(target.width)});
+	y1 = std::min<int32>({y1, s.scay1 + 1, static_cast<int32>(target.validRows)});
+	if((x0 >= x1) || (y0 >= y1)) return;
+	if(!target.gpuDirty)
+	{
+		target.gpuDirty = true;
+		target.dirtyX0 = x0;
+		target.dirtyY0 = y0;
+		target.dirtyX1 = x1;
+		target.dirtyY1 = y1;
+		return;
+	}
+	target.dirtyX0 = std::min<uint32>(target.dirtyX0, x0);
+	target.dirtyY0 = std::min<uint32>(target.dirtyY0, y0);
+	target.dirtyX1 = std::max<uint32>(target.dirtyX1, x1);
+	target.dirtyY1 = std::max<uint32>(target.dirtyY1, y1);
 }
 
 void CGSH_Hardware::DownloadTarget(TARGET& target)
 {
+	if(!target.gpuDirty) return;
 	FlushBatch();
-	std::vector<uint32> pixels(target.width * target.height);
+	uint32 x0 = target.dirtyX0, y0 = target.dirtyY0;
+	uint32 width = target.dirtyX1 - x0, height = target.dirtyY1 - y0;
+	m_transferPixels.resize(width * height);
+	uint32* pixels = m_transferPixels.data();
 	glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
-	glReadPixels(0, 0, target.width, target.height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+	glReadPixels(x0, y0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 
 	GS_SURFACE surface;
 	surface.Init(target.psm, target.fbp, target.fbw);
 	bool is16 = IsPsm16(target.psm);
 	bool is24 = GsMemory::IsPsm24(target.psm);
-	for(uint32 y = 0; y < target.height; y++)
+	for(uint32 y = 0; y < height; y++)
 	{
-		uint32 rowBase = surface.RowBase(y);
-		const uint32* rowTable = surface.RowTable(y);
-		for(uint32 x = 0; x < target.width; x++)
+		uint32 rowBase = surface.RowBase(y0 + y);
+		const uint32* rowTable = surface.RowTable(y0 + y);
+		const uint32* src = pixels + y * width;
+		for(uint32 x = 0; x < width; x++)
 		{
-			uint32 color = pixels[x + y * target.width];
+			uint32 color = src[x];
 			uint32 gsColor = (color & 0x00FFFFFF) | (TargetAlphaToGs(color >> 24) << 24);
-			uint32 offset = surface.Offset(rowBase, rowTable, x);
+			uint32 offset = surface.Offset(rowBase, rowTable, x0 + x);
 			if(is16)
 			{
 				*reinterpret_cast<uint16*>(m_pRAM + offset) = static_cast<uint16>(GsMemory::Color32To16(gsColor));
@@ -354,9 +434,12 @@ void CGSH_Hardware::DownloadTarget(TARGET& target)
 			}
 		}
 	}
-	m_textureCache.MarkBytesWritten(target.fbp, TargetBytes(target));
+	uint32 start = 0, end = 0;
+	RowsToBytes(target, y0, y0 + height, start, end);
+	m_textureCache.MarkBytesWritten(start, end - start);
 	target.gpuDirty = false;
 	m_stats.targetDownloads++;
+	m_stats.downloadedPixels += width * height;
 	m_stateApplied = false;
 }
 
@@ -364,7 +447,7 @@ void CGSH_Hardware::DownloadTargetsOverlapping(uint32 start, uint32 size)
 {
 	for(auto& target : m_targets)
 	{
-		if(target->gpuDirty && RangesOverlap(*target, start, size)) DownloadTarget(*target);
+		if(target->gpuDirty && RowsOverlap(*target, target->dirtyY0, target->dirtyY1, start, size)) DownloadTarget(*target);
 	}
 }
 
@@ -372,7 +455,10 @@ void CGSH_Hardware::UploadTargetsOverlapping(uint32 start, uint32 size)
 {
 	for(auto& target : m_targets)
 	{
-		if(RangesOverlap(*target, start, size)) UploadTarget(*target, 0, 0, target->width, target->height);
+		uint32 rowBegin = 0, rowEnd = 0;
+		if(!BytesToRows(*target, start, size, rowBegin, rowEnd)) continue;
+		rowEnd = std::min(rowEnd, target->validRows);
+		if(rowBegin < rowEnd) UploadTarget(*target, 0, rowBegin, target->width, rowEnd - rowBegin);
 	}
 }
 
@@ -402,16 +488,21 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 
 	for(auto& target : m_targets)
 	{
-		if(!RangesOverlap(*target, start, size)) continue;
+		uint32 rowBegin = 0, rowEnd = 0;
+		if(!BytesToRows(*target, start, size, rowBegin, rowEnd)) continue;
+		rowEnd = std::min(rowEnd, target->validRows);
+		if(rowBegin >= rowEnd) continue;
 		bool sameLayout = (target->fbp == bltBuf.GetDstPtr()) && (target->fbw == bltBuf.nDstWidth) &&
 		                  (PsmClass(target->psm) == PsmClass(bltBuf.nDstPsm)) && IsColorPsm(bltBuf.nDstPsm);
 		if(sameLayout)
 		{
-			UploadTarget(*target, trxPos.nDSAX, trxPos.nDSAY, trxReg.nRRW, trxReg.nRRH);
+			uint32 y0 = std::min<uint32>(trxPos.nDSAY, rowEnd);
+			uint32 y1 = std::min<uint32>(trxPos.nDSAY + trxReg.nRRH, rowEnd);
+			if(y0 < y1) UploadTarget(*target, trxPos.nDSAX, y0, trxReg.nRRW, y1 - y0);
 		}
 		else
 		{
-			UploadTarget(*target, 0, 0, target->width, target->height);
+			UploadTarget(*target, 0, rowBegin, target->width, rowEnd - rowBegin);
 		}
 	}
 	m_stateApplied = false;
@@ -513,18 +604,28 @@ void CGSH_Hardware::BindTexture()
 		uint32 offsetX = (page % pagesPerRow) << surface.pwShift;
 		uint32 offsetY = (page / pagesPerRow) << surface.phShift;
 		if(offsetY >= target->height) continue;
+		EnsureValidRows(*target, offsetY + s.th);
 
 		GLuint texture = target->colorTexture;
 		if(target.get() == m_currentTarget)
 		{
-			// Sampling the target being drawn: work on a copy.
-			static GLuint feedbackCopy = 0;
-			if(!feedbackCopy) glGenTextures(1, &feedbackCopy);
-			glBindTexture(GL_TEXTURE_2D, feedbackCopy);
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, target->width, target->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+			// Sampling the target being drawn: work on a copy of the
+			// sampled region.
+			FlushBatch();
+			if(!m_feedbackTexture || (m_feedbackWidth != target->width) || (m_feedbackHeight != target->height))
+			{
+				if(!m_feedbackTexture) glGenTextures(1, &m_feedbackTexture);
+				glBindTexture(GL_TEXTURE_2D, m_feedbackTexture);
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, target->width, target->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+				m_feedbackWidth = target->width;
+				m_feedbackHeight = target->height;
+			}
+			glBindTexture(GL_TEXTURE_2D, m_feedbackTexture);
 			glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
-			glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, target->width, target->height);
-			texture = feedbackCopy;
+			uint32 copyW = std::min(s.tw, target->width - std::min(offsetX, target->width));
+			uint32 copyH = std::min(s.th, target->height - offsetY);
+			glCopyTexSubImage2D(GL_TEXTURE_2D, 0, offsetX, offsetY, offsetX, offsetY, copyW, copyH);
+			texture = m_feedbackTexture;
 		}
 		glBindTexture(GL_TEXTURE_2D, texture);
 		m_textureAlphaDoubled = true;
@@ -599,18 +700,18 @@ void CGSH_Hardware::ApplyState()
 	m_drawNothing = s.zte && (s.ztst == DEPTH_TEST_NEVER);
 	if(m_drawNothing) return;
 
+	m_currentTarget = nullptr;
 	TARGET* target = FindTarget(s.fbp, s.fbw, s.fpsm, true, static_cast<uint32>(std::max(s.scay1, 0)) + 1);
 	if(!target)
 	{
 		m_drawNothing = true;
 		return;
 	}
+	EnsureValidRows(*target, static_cast<uint32>(std::max(s.scay1, 0)) + 1);
 	m_currentTarget = target;
 
-	// Texture first: binding may download targets or copy the current one.
+	// Texture next: binding may download targets or copy the current one.
 	BindTexture();
-	m_currentTarget = target;
-	target->gpuDirty = true;
 
 	glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
 	glViewport(0, 0, target->width, target->height);
@@ -924,6 +1025,19 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 	}
 	break;
 	}
+	if(m_currentTarget)
+	{
+		int32 minX = vertices[0].x, maxX = vertices[0].x, minY = vertices[0].y, maxY = vertices[0].y;
+		uint32 count = (kind == CSoftwareRasterizer::PRIMITIVE_POINT) ? 1 : (kind == CSoftwareRasterizer::PRIMITIVE_TRIANGLE) ? 3 : 2;
+		for(uint32 i = 1; i < count; i++)
+		{
+			minX = std::min(minX, vertices[i].x);
+			maxX = std::max(maxX, vertices[i].x);
+			minY = std::min(minY, vertices[i].y);
+			maxY = std::max(maxY, vertices[i].y);
+		}
+		MarkTargetDirty(*m_currentTarget, minX >> 4, minY >> 4, (maxX >> 4) + 2, (maxY >> 4) + 2);
+	}
 	if(m_batch.size() >= 3 * 4096) FlushBatch();
 }
 
@@ -976,6 +1090,7 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 		TARGET* target = FindTarget(layer.bufPtr, bufWidth, layer.psm, false, 0);
 		if(target)
 		{
+			EnsureValidRows(*target, layer.offsetY + height);
 			m_display.texture = target->colorTexture;
 			m_display.textureWidth = target->width;
 			m_display.textureHeight = target->height;

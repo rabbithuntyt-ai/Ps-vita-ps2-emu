@@ -134,6 +134,11 @@ namespace
 		{
 			m_gs.FeedImageData(data, size);
 		}
+		CGSH_Hardware::STATS Stats() const
+		{
+			return m_gs.GetCurrentFrameStats();
+		}
+
 		// The displayed image came from a GPU render target (not GS memory).
 		bool PresentedRenderTarget() const
 		{
@@ -407,6 +412,35 @@ namespace
 		gs.Present();
 	}
 
+	// Typical game memory layout: a 640x448 frame immediately followed by
+	// textures that are re-uploaded and sampled while the frame is drawn.
+	void SceneTexturesAfterFrame(IDriver& gs)
+	{
+		Setup(gs);
+		Clear(gs, Rgbaq(0x10, 0x10, 0x30, 0x80));
+		const uint32 texPtr = 140 * 8192; //first page after 448 lines of a 640 wide CT32 frame
+		for(uint32 round = 0; round < 3; round++)
+		{
+			std::vector<uint32> image(64 * 64);
+			for(uint32 i = 0; i < image.size(); i++) image[i] = 0x80000000 | ((i * (round + 3)) & 0xFF) | ((round * 0x50) << 8);
+			uint64 bitbltbuf = (static_cast<uint64>(texPtr / 256) << 32) | (1ULL << 48) | (static_cast<uint64>(CGSHandler::PSMCT32) << 56);
+			gs.Write(GS_REG_BITBLTBUF, bitbltbuf);
+			gs.Write(GS_REG_TRXPOS, 0);
+			gs.Write(GS_REG_TRXREG, 64 | (64ULL << 32));
+			gs.Write(GS_REG_TRXDIR, 0);
+			gs.Transfer(reinterpret_cast<const uint8*>(image.data()), static_cast<uint32>(image.size() * 4));
+
+			gs.Write(GS_REG_TEX0_1, Tex0(texPtr, 1, CGSHandler::PSMCT32, 6, 6, true, CGSHandler::TEX0_FUNCTION_DECAL));
+			gs.Write(GS_REG_TEX1_1, 0);
+			gs.Write(GS_REG_PRIM, CGSHandler::PRIM_SPRITE | (1 << 4) | (1 << 8));
+			gs.Write(GS_REG_UV, Uv(0, 0));
+			gs.Write(GS_REG_XYZ2, Xyz(OffX(50 + round * 150), OffX(50), 0));
+			gs.Write(GS_REG_UV, Uv(64 << 4, 64 << 4));
+			gs.Write(GS_REG_XYZ2, Xyz(OffX(178 + round * 150), OffX(178), 0));
+		}
+		gs.Present();
+	}
+
 	// Rendering, then a host->local upload over part of the frame, then more
 	// rendering on top: GPU and memory copies must stay coherent.
 	void SceneTransfer(IDriver& gs)
@@ -595,6 +629,7 @@ int main(int argc, char** argv)
 	    {"render to texture", SceneRenderToTexture, 0.5},
 	    {"render target alpha", SceneRenderTargetAlpha, 0.5},
 	    {"transfer", SceneTransfer, 0.5},
+	    {"textures after frame", SceneTexturesAfterFrame, 0.5},
 	};
 	std::vector<SCENE> allScenes(std::begin(scenes), std::end(scenes));
 	static std::vector<std::string> randomNames;
@@ -626,6 +661,18 @@ int main(int argc, char** argv)
 			failures++;
 		}
 		if(!CompareFrames(scene.name, software.frame, hardware.frame, scene.maxMismatchPercent)) failures++;
+		if(!std::strcmp(scene.name, "textures after frame"))
+		{
+			// The frame must never round-trip through GS memory, and texture
+			// uploads must not re-upload it.
+			auto stats = hardware.Stats();
+			std::printf("       readback %u px, upload %u px\n", stats.downloadedPixels, stats.uploadedPixels);
+			if((stats.downloadedPixels != 0) || (stats.uploadedPixels > 640 * 448))
+			{
+				std::printf("  FAIL %s: unexpected GS memory synchronization\n", scene.name);
+				failures++;
+			}
+		}
 		if(dumpDir)
 		{
 			std::string name = scene.name;
