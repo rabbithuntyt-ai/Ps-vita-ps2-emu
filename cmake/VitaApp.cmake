@@ -29,7 +29,8 @@ target_link_libraries(vitaps2
 	jpeg
 	z
 	m
-	pthread
+	# pthread comes from Threads::Threads (PlayCore); linking it again duplicates
+	# the whole-archive pthread objects.
 	SceAppMgr_stub
 	SceAppUtil_stub
 	SceAudio_stub
