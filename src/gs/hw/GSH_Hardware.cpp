@@ -624,35 +624,67 @@ void CGSH_Hardware::ApplyState()
 		GLenum func = (s.ztst == DEPTH_TEST_ALWAYS) ? GL_ALWAYS : (s.ztst == DEPTH_TEST_GEQUAL) ? GL_GEQUAL : GL_GREATER;
 		glDepthFunc(func);
 		glDepthMask(s.zmsk ? GL_FALSE : GL_TRUE);
+		m_depthFunc = func;
+		m_depthWrite = !s.zmsk;
 	}
 	else
 	{
 		glDisable(GL_DEPTH_TEST);
 		glDepthMask(GL_FALSE);
+		m_depthFunc = GL_ALWAYS;
+		m_depthWrite = false;
 	}
 
 	//Alpha test
 	if(s.ate && (s.atst != ALPHA_TEST_ALWAYS) && (s.afail == ALPHA_TEST_FAIL_KEEP))
 	{
-		static const GLenum funcs[] = {GL_NEVER, GL_ALWAYS, GL_LESS, GL_LEQUAL, GL_EQUAL, GL_GEQUAL, GL_GREATER, GL_NOTEQUAL};
+		// Fragment alpha is the GS alpha doubled (a * 2 / 255). Thresholds sit
+		// half a step between representable values so that comparisons
+		// against AREF are exact.
+		float lower = std::max(static_cast<float>(s.aref) * 2.0f - 1.0f, 0.0f) / 255.0f;
+		float upper = std::min(static_cast<float>(s.aref) * 2.0f + 1.0f, 255.0f) / 255.0f;
+		float exact = std::min(static_cast<float>(s.aref) * 2.0f, 255.0f) / 255.0f;
+		GLenum func = GL_ALWAYS;
+		float ref = 0;
+		// Alphas above 0x80 saturate at 1.0: for AREF >= 0x80 assume the
+		// common case of alphas <= 0x80.
+		bool high = s.aref >= 0x80;
+		switch(s.atst & 7)
+		{
+		case ALPHA_TEST_NEVER: func = GL_NEVER; break;
+		case ALPHA_TEST_LESS: func = (s.aref > 0x80) ? GL_ALWAYS : GL_LESS, ref = lower; break;
+		case ALPHA_TEST_LEQUAL: func = high ? GL_ALWAYS : GL_LESS, ref = upper; break;
+		case ALPHA_TEST_EQUAL: func = (s.aref > 0x80) ? GL_NEVER : GL_EQUAL, ref = exact; break;
+		case ALPHA_TEST_GEQUAL: func = (s.aref > 0x80) ? GL_NEVER : GL_GREATER, ref = lower; break;
+		case ALPHA_TEST_GREATER: func = high ? GL_NEVER : GL_GREATER, ref = upper; break;
+		case ALPHA_TEST_NOTEQUAL: func = (s.aref > 0x80) ? GL_ALWAYS : GL_NOTEQUAL, ref = exact; break;
+		}
 		glEnable(GL_ALPHA_TEST);
-		glAlphaFunc(funcs[s.atst & 7], std::min(static_cast<float>(s.aref) / 128.0f, 1.0f));
+		glAlphaFunc(func, ref);
 	}
 	else
 	{
 		glDisable(GL_ALPHA_TEST);
 		// Fail modes other than KEEP still write color; approximate by not
 		// writing depth for the whole primitive.
-		if(s.ate && (s.afail == ALPHA_TEST_FAIL_FBONLY || s.afail == ALPHA_TEST_FAIL_RGBONLY)) glDepthMask(GL_FALSE);
+		if(s.ate && (s.afail == ALPHA_TEST_FAIL_FBONLY || s.afail == ALPHA_TEST_FAIL_RGBONLY))
+		{
+			glDepthMask(GL_FALSE);
+			m_depthWrite = false;
+		}
 	}
 
 	//Color mask
 	bool is24 = GsMemory::IsPsm24(s.fpsm);
-	glColorMask((s.fbmsk & 0x000000FF) != 0x000000FF, (s.fbmsk & 0x0000FF00) != 0x0000FF00,
-	            (s.fbmsk & 0x00FF0000) != 0x00FF0000, !is24 && ((s.fbmsk & 0xFF000000) != 0xFF000000));
+	m_colorMask[0] = (s.fbmsk & 0x000000FF) != 0x000000FF;
+	m_colorMask[1] = (s.fbmsk & 0x0000FF00) != 0x0000FF00;
+	m_colorMask[2] = (s.fbmsk & 0x00FF0000) != 0x00FF0000;
+	m_colorMask[3] = !is24 && ((s.fbmsk & 0xFF000000) != 0xFF000000);
+	glColorMask(m_colorMask[0], m_colorMask[1], m_colorMask[2], m_colorMask[3]);
 
 	//Blending: (A - B) * C + D
 	m_fixAlpha = false;
+	m_alphaPass = false;
 	if(s.alphaBlend)
 	{
 		enum
@@ -663,7 +695,14 @@ void CGSH_Hardware::ApplyState()
 		};
 		uint32 a = s.blendA, b = s.blendB, d = s.blendD;
 		bool dstAlpha = (s.blendC == ALPHABLEND_C_AD);
-		m_fixAlpha = (s.blendC == ALPHABLEND_C_FIX);
+		// FIX is fed through the fragment alpha (vitaGL has no blend
+		// color), which the alpha test needs when it is enabled: the test
+		// wins and the blend uses the source alpha instead.
+		bool alphaTestActive = s.ate && (s.atst != ALPHA_TEST_ALWAYS) && (s.afail == ALPHA_TEST_FAIL_KEEP);
+		m_fixAlpha = (s.blendC == ALPHABLEND_C_FIX) && !alphaTestActive;
+		// FIX travels in the fragment alpha, but the GS writes the source
+		// alpha: a second, alpha-only pass writes it.
+		m_alphaPass = m_fixAlpha && m_colorMask[3];
 		GLenum c = dstAlpha ? GL_DST_ALPHA : GL_SRC_ALPHA;
 		GLenum oneMinusC = dstAlpha ? GL_ONE_MINUS_DST_ALPHA : GL_ONE_MINUS_SRC_ALPHA;
 		GLenum src = GL_ONE, dst = GL_ZERO, equation = GL_FUNC_ADD;
@@ -707,9 +746,11 @@ void CGSH_Hardware::ApplyState()
 			else if(d == CD) src = GL_ZERO, dst = oneMinusC;
 			else src = GL_ZERO, dst = GL_ZERO;
 		}
+		if(!IsBlendExact(a, b, d)) m_stats.approximateBlends++;
 		glEnable(GL_BLEND);
-		glBlendEquation(equation);
-		glBlendFunc(src, dst);
+		// The GS blends color only; the source alpha is written as is.
+		glBlendEquationSeparate(equation, GL_FUNC_ADD);
+		glBlendFuncSeparate(src, dst, GL_ONE, GL_ZERO);
 	}
 	else
 	{
@@ -733,10 +774,18 @@ void CGSH_Hardware::ApplyState()
 		glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_RGB, textured ? GL_TEXTURE : GL_PRIMARY_COLOR);
 		glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, 1.0f);
 	}
-	if(m_fixAlpha)
+	SetupAlphaCombiner(m_fixAlpha);
+}
+
+void CGSH_Hardware::SetupAlphaCombiner(bool fix)
+{
+	const auto& s = m_state;
+	bool textured = s.textured;
+	bool decal = textured && (s.tfx == TEX0_FUNCTION_DECAL);
+	if(fix)
 	{
-		float fix = std::min(static_cast<float>(s.blendFix) / 128.0f, 1.0f);
-		float envColor[4] = {0, 0, 0, fix};
+		float fixValue = std::min(static_cast<float>(s.blendFix) / 128.0f, 1.0f);
+		float envColor[4] = {0, 0, 0, fixValue};
 		glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, envColor);
 		glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_REPLACE);
 		glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_ALPHA, GL_CONSTANT);
@@ -886,6 +935,27 @@ void CGSH_Hardware::FlushBatch()
 	glColorPointer(4, GL_UNSIGNED_BYTE, stride, &m_batch[0].r);
 	glTexCoordPointer(2, GL_FLOAT, stride, &m_batch[0].s);
 	glDrawArrays(m_batchMode, 0, static_cast<GLsizei>(m_batch.size()));
+	if(m_alphaPass)
+	{
+		glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+		glDisable(GL_BLEND);
+		SetupAlphaCombiner(false);
+		// Depth written by the first pass: the same fragments pass EQUAL.
+		if(m_depthWrite)
+		{
+			glDepthFunc(GL_EQUAL);
+			glDepthMask(GL_FALSE);
+		}
+		glDrawArrays(m_batchMode, 0, static_cast<GLsizei>(m_batch.size()));
+		glColorMask(m_colorMask[0], m_colorMask[1], m_colorMask[2], m_colorMask[3]);
+		glEnable(GL_BLEND);
+		SetupAlphaCombiner(true);
+		if(m_depthWrite)
+		{
+			glDepthFunc(m_depthFunc);
+			glDepthMask(GL_TRUE);
+		}
+	}
 	m_batch.clear();
 	m_stats.drawCalls++;
 }

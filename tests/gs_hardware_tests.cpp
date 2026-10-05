@@ -9,8 +9,10 @@
 #include <GL/osmesa.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <functional>
+#include <random>
 #include <string>
 #include <vector>
 #include "EmuSession.h"
@@ -171,6 +173,7 @@ namespace
 		gs.Write(GS_REG_XYOFFSET_1, (2048ULL << 4) | ((2048ULL << 4) << 32));
 		gs.Write(GS_REG_TEST_1, 0);
 		gs.Write(GS_REG_PRMODECONT, 1);
+		gs.Write(GS_REG_COLCLAMP, 1); //games clamp; wrapping is not emulated on the GPU
 		SetupDisplay(gs);
 	}
 
@@ -423,6 +426,85 @@ namespace
 		gs.Present();
 	}
 
+	// Random states and primitives within what the GPU renderer supports
+	// (no fog, no region clamp, alpha test fail mode KEEP).
+	void SceneRandom(IDriver& gs, uint32 seed)
+	{
+		std::mt19937 rng(seed);
+		auto rand = [&](uint32 n) { return rng() % n; };
+		Setup(gs);
+		gs.Write(GS_REG_ZBUF_1, 150 | (0ULL << 24) | (0ULL << 32));
+		gs.Write(GS_REG_TEST_1, (1ULL << 16) | (1ULL << 17));
+		Clear(gs, Rgbaq(rand(256), rand(256), rand(256), 0x80));
+
+		// Above the Z buffer (page 150, 640x448x32 bits ends at 0x244000).
+		const uint32 texPtr = 0x280000, clutPtr = 0x300000;
+		WriteTexture32(gs, texPtr);
+		for(uint32 y = 0; y < 64; y++)
+			for(uint32 x = 0; x < 64; x++)
+				GsMemory::WriteRaw(gs.Ram(), CGSHandler::PSMT8, 0x2C0000, 1, x, y, (x * 3 + y * 5) & 0xFF);
+		for(uint32 i = 0; i < 256; i++)
+			GsMemory::WriteRaw(gs.Ram(), CGSHandler::PSMCT32, clutPtr, 1, i & 15, i >> 4, ((i * 0x9E3779B1) & 0x00FFFFFF) | ((i & 0x7F) << 24));
+
+		// HW_RANDOM_NO=<letters> disables features to isolate differences:
+		// b=blending a=alpha test z=depth test (ALWAYS) t=texturing p=perspective
+		const char* disabled = std::getenv("HW_RANDOM_NO");
+		auto off = [&](char c) { return disabled && std::strchr(disabled, c); };
+		const char* env = std::getenv("HW_RANDOM_BATCHES");
+		uint32 batches = env ? std::atoi(env) : 12;
+		for(uint32 batch = 0; batch < batches; batch++)
+		{
+			uint32 ztst = 1 + rand(3);
+			if(off('z')) ztst = 1;
+			uint64 test = (1ULL << 16) | (static_cast<uint64>(ztst) << 17);
+			if((rand(3) == 0) && !off('a')) test |= 1 | (static_cast<uint64>(rand(8)) << 1) | (static_cast<uint64>(rand(256)) << 4); //ATE, ATST, AREF, AFAIL=KEEP
+			gs.Write(GS_REG_TEST_1, test);
+			uint32 blendA = rand(3), blendB = rand(3), blendC = rand(3), blendD = rand(3);
+			if((test & 1) && (blendC == 2)) blendC = rand(2); //FIX + alpha test: unsupported combination
+			while(!CGSH_Hardware::IsBlendExact(blendA, blendB, blendD)) blendD = rand(3);
+			if(std::getenv("HW_NO_FIX") && (blendC == 2)) blendC = rand(2);
+			gs.Write(GS_REG_ALPHA_1, blendA | (blendB << 2) | (blendC << 4) | (blendD << 6) | (static_cast<uint64>(rand(129)) << 32));
+			bool textured = (rand(3) != 0) && !off('t');
+			bool indexed = rand(2);
+			uint32 tfx = rand(2) ? CGSHandler::TEX0_FUNCTION_MODULATE : CGSHandler::TEX0_FUNCTION_DECAL;
+			bool tcc = rand(2);
+			bool bilinear = rand(2);
+			gs.Write(GS_REG_TEX0_1, indexed ? Tex0(0x2C0000, 1, CGSHandler::PSMT8, 6, 6, tcc, tfx, clutPtr, true)
+			                                : Tex0(texPtr, 1, CGSHandler::PSMCT32, 6, 6, tcc, tfx));
+			gs.Write(GS_REG_TEX1_1, bilinear ? ((1ULL << 5) | (1ULL << 6)) : 0);
+			gs.Write(GS_REG_CLAMP_1, rand(2) ? 0 : (1 | (1 << 2)));
+			bool sprite = rand(3) == 0;
+			bool fst = sprite || rand(2) || off('p');
+			bool abe = rand(2) && !off('b');
+			uint64 prim = (sprite ? CGSHandler::PRIM_SPRITE : CGSHandler::PRIM_TRIANGLE) | (rand(2) << 3) | (textured << 4) |
+			              (abe << 6) | (fst << 8);
+			gs.Write(GS_REG_PRIM, prim);
+			if(std::getenv("HW_RANDOM_VERBOSE") && (dynamic_cast<CHardwareDriver*>(&gs) != nullptr))
+				std::printf("    seed %u: %s tex=%d idx=%d tfx=%u tcc=%d bil=%d fst=%d abe=%d ABCD=%u%u%u%u ate=%d atst=%u aref=%u ztst=%u iip=%d\n",
+				            seed, sprite ? "sprite" : "tri", textured, indexed, tfx, int(tcc), int(bilinear), fst, int((prim >> 6) & 1),
+				            blendA, blendB, blendC, blendD, int(test & 1), unsigned((test >> 1) & 7), unsigned((test >> 4) & 0xFF), ztst, int((prim >> 3) & 1));
+			uint32 count = sprite ? 2 * (1 + rand(3)) : 3 * (1 + rand(3));
+			for(uint32 v = 0; v < count; v++)
+			{
+				// Gouraud colors are interpolated perspective correctly on the GPU
+				// (the GS interpolates them affinely): keep Q ratios realistic.
+				bool gouraud = (prim >> 3) & 1;
+				float q = fst ? 1.0f : gouraud ? 0.9f + rand(100) / 500.0f : 0.5f + rand(100) / 100.0f;
+				gs.Write(GS_REG_RGBAQ, RgbaqQ(rand(256), rand(256), rand(256), rand(0x81), q));
+				uint32 u = rand(64 * 16), vv = rand(64 * 16);
+				float sCoord = rand(100) / 100.0f, tCoord = rand(100) / 100.0f;
+				if(fst) gs.Write(GS_REG_UV, Uv(u, vv));
+				else gs.Write(GS_REG_ST, St(sCoord * q, tCoord * q));
+				// Distinct at 24-bit depth precision.
+				uint32 x = rand(640), y = rand(448);
+				gs.Write(GS_REG_XYZ2, Xyz(OffX(x), OffX(y), rand(1 << 16) << 16));
+				if(std::getenv("HW_RANDOM_VERTICES") && (dynamic_cast<CHardwareDriver*>(&gs) != nullptr))
+					std::printf("      v%u: xy %u,%u uv %.2f,%.2f st %.2f,%.2f q %.2f\n", v, x, y, u / 16.0f, vv / 16.0f, sCoord, tCoord, q);
+			}
+		}
+		gs.Present();
+	}
+
 	//-------------------------------------------------------------------------
 
 	struct SCENE
@@ -514,10 +596,21 @@ int main(int argc, char** argv)
 	    {"render target alpha", SceneRenderTargetAlpha, 0.5},
 	    {"transfer", SceneTransfer, 0.5},
 	};
+	std::vector<SCENE> allScenes(std::begin(scenes), std::end(scenes));
+	static std::vector<std::string> randomNames;
+	const uint32 randomCount = (argc > 2) ? std::atoi(argv[2]) : 20;
+	randomNames.reserve(randomCount);
+	for(uint32 i = 0; i < randomCount; i++)
+	{
+		randomNames.push_back("random " + std::to_string(i));
+		allScenes.push_back({randomNames.back().c_str(), [i](IDriver& gs) { SceneRandom(gs, 1000 + i); }, 3.0});
+	}
 
 	int failures = 0;
-	for(const auto& scene : scenes)
+	const char* only = std::getenv("HW_ONLY");
+	for(const auto& scene : allScenes)
 	{
+		if(only && std::strcmp(only, scene.name)) continue;
 		CSoftwareDriver software;
 		scene.run(software);
 		CHardwareDriver hardware;

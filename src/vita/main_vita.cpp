@@ -567,8 +567,8 @@ namespace
 				if(gpu)
 				{
 					auto stats = GetHardwareGs(session.get())->GetLastFrameStats();
-					Gfx::Textf(8, 60, COLOR_GREY, 0.7f, "GPU draws %u  tex up %u  rt dl %u up %u", stats.drawCalls,
-					           stats.textureUploads, stats.targetDownloads, stats.targetUploads);
+					Gfx::Textf(8, 60, COLOR_GREY, 0.7f, "GPU draws %u  tex %u  rt dl %u up %u  ~blend %u", stats.drawCalls,
+					           stats.textureUploads, stats.targetDownloads, stats.targetUploads, stats.approximateBlends);
 				}
 				else
 				{

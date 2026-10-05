@@ -74,7 +74,15 @@ public:
 		uint32 targetDownloads = 0;
 		uint32 targetUploads = 0;
 		uint32 textureUploads = 0;
+		uint32 approximateBlends = 0; //state changes with a blend GL cannot express
 	};
+
+	// (A - B) * C + D with A, B, D in {Cs, Cd, 0}: fixed-function blending
+	// cannot express D == A when A is a color and A != B (e.g. Cs * (1 + As)).
+	static bool IsBlendExact(uint32 a, uint32 b, uint32 d)
+	{
+		return (a == b) || (a == ALPHABLEND_ABD_ZERO) || (d != a);
+	}
 	STATS GetLastFrameStats() const
 	{
 		return m_lastFrameStats;
@@ -133,6 +141,7 @@ private:
 	void UploadTargetsOverlapping(uint32 start, uint32 size);
 
 	void ApplyState();
+	void SetupAlphaCombiner(bool fix);
 	void BindTexture();
 	void FlushBatch();
 	void AddVertex(const CSoftwareRasterizer::VERTEX&);
@@ -154,6 +163,10 @@ private:
 	// Texture coordinate transform for render target textures.
 	float m_texScaleS = 1, m_texScaleT = 1, m_texOffsetS = 0, m_texOffsetT = 0;
 	bool m_fixAlpha = false;
+	bool m_alphaPass = false;
+	bool m_colorMask[4] = {true, true, true, true};
+	GLenum m_depthFunc = GL_ALWAYS;
+	bool m_depthWrite = false;
 	// Render target textures store alpha doubled (0x80 -> 255).
 	bool m_textureAlphaDoubled = false;
 
