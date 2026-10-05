@@ -87,20 +87,37 @@ Android, iOS, macOS, Linux, Windows and the web. Decisive properties:
 Not verified: running on real Vita hardware (no device available to the
 author of this commit). Expect the first hardware runs to need fixes.
 
-## 5. Performance roadmap
+## 5. Performance: done and next
 
-The software GS is written for correctness first. Ordered by expected payoff:
+Done (measured with `gs_benchmark`, verified with `gs_diff_tests` and
+`gs_parallel_tests`):
 
-1. **Profile on hardware** (EE JIT vs. VU1 vs. GS split).
-2. **GS on its own core with a tiled, multi-threaded rasterizer** — the Vita
-   has 3 usable cores; Play! already runs the GS on a separate thread.
-3. **Specialized span functions** (templated on PSM/test/blend state, the way
-   GSdx's software renderer does) and NEON for texturing/blending.
-4. **VU1 → ARM JIT tuning**: Play! already recompiles VU microcode; check the
-   AArch32 `Md` (128-bit) paths use NEON well on Cortex-A9.
-5. **GXM hardware renderer** for games whose effects don't need GS-memory
-   accuracy, with the software path as a fallback.
-6. **Per-game speed hacks** (EE cycle rate, VU skipping, frame skip) — Play!
-   exposes EE frequency scaling.
-7. **Static recompilation** for selected titles (PS2Recomp-style), reusing
+1. **Span rasterizer rewrite** — exact integer scanline extents, fixed-point
+   attribute stepping, span loops specialized on texturing / filtering / depth
+   mode / framebuffer format / blending; state copied to locals because GS RAM
+   stores (through `uint8*`) alias everything. 2.6–14x per workload.
+2. **Decoded texture cache** — RGBA decode once (lazy 8x8 tiles; small textures
+   decoded whole and indexed directly), invalidated by 8KB page write stamps,
+   CLUT hash and TEXA. Fixed a feedback bug along the way (a primitive sampling
+   its own render target now invalidates the texture for later primitives).
+3. **Multi-threaded GS** — batched primitives, interleaved scanline ownership,
+   bit-identical to single threaded. Hazard flushes for transfers, CLUT loads,
+   display, render-to-texture, layout changes; serial execution for aliased
+   frame/Z memory and feedback. ~1.7x with 2 threads (Vita config), ~2.3x with 3.
+4. **Speed hacks** (per game): EE cycle-rate underclock, interlaced half-line
+   rendering (halves fill cost), frame skip.
+5. **Cheap fixes** — display readout through precomputed addressing; GS state
+   rebuilt only when registers change.
+
+Next, in expected order of payoff:
+
+1. **Profile on hardware**: EE JIT vs VU1 vs GS split decides everything else.
+2. **NEON span kernels** for the hottest specializations (4 pixels per
+   iteration for flat/gouraud fills and CT32 texture modulate/blend).
+3. **Perspective division per 8 pixels** (affine in between) or NEON reciprocal
+   estimates instead of a VFP divide per pixel.
+4. **Play! AArch32 JIT review** on Cortex-A9: 128-bit MMI/VU paths and
+   register allocation.
+5. **GXM hardware renderer** for games that don't depend on GS-memory accuracy.
+6. **Static recompilation** (PS2Recomp-style) for showcase titles, reusing
    this GS.
