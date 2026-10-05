@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 
 namespace
 {
@@ -119,6 +120,7 @@ namespace
 
 CSoftwareRasterizer::CSoftwareRasterizer()
 {
+	GS_SURFACE::InitTables();
 	SelectSpanFunction();
 }
 
@@ -197,6 +199,7 @@ void CSoftwareRasterizer::SetState(const STATE& state)
 
 bool CSoftwareRasterizer::EnsureTexture()
 {
+	if(m_laneMode) return true;
 	if(!m_state.textured) return true;
 	if(!m_texture || (m_texture->GetDecodeStamp() != m_textureCache.GetStamp()))
 	{
@@ -220,6 +223,7 @@ bool CSoftwareRasterizer::EnsureTexture()
 
 void CSoftwareRasterizer::MarkWritten(int32 x0, int32 y0, int32 x1, int32 y1)
 {
+	if(m_laneMode) return;
 	const auto& s = m_state;
 	auto markSurface = [&](const GS_SURFACE& surface, bool fast) {
 		if(!fast)
@@ -233,7 +237,14 @@ void CSoftwareRasterizer::MarkWritten(int32 x0, int32 y0, int32 x1, int32 y1)
 		uint32 colLast = static_cast<uint32>(x1) >> surface.pwShift;
 		for(uint32 row = rowFirst; row <= rowLast; row++)
 		{
-			m_textureCache.MarkPagesWritten(surface.FirstPage() + row * surface.pagesPerRow + colFirst, colLast - colFirst + 1);
+			uint32 first = surface.FirstPage() + row * surface.pagesPerRow + colFirst;
+			uint32 count = colLast - colFirst + 1;
+			m_textureCache.MarkPagesWritten(first, count);
+			for(uint32 i = 0; i < count && i < 512; i++)
+			{
+				uint32 page = (first + i) & 511;
+				m_pendingPages[page >> 5] |= 1u << (page & 31);
+			}
 		}
 	};
 	markSurface(m_frame, m_frameFast);
@@ -678,8 +689,8 @@ void CSoftwareRasterizer::DrawPixel(int32 x, int32 y, INTERP& it, bool linear)
 	const auto& s = m_state;
 	if((x < s.scax0) || (x > s.scax1) || (y < s.scay0) || (y > s.scay1)) return;
 	if(!RowEnabled(y)) return;
-	MarkWritten(x, y, x, y);
 	if(!EnsureTexture()) return;
+	MarkWritten(x, y, x, y);
 	(this->*(linear ? m_spanLinear : m_span))(y, x, x, it);
 }
 
@@ -783,8 +794,8 @@ void CSoftwareRasterizer::DrawTriangle(const VERTEX& va, const VERTEX& vb, const
 	int32 maxY = std::min((std::max({v0->y, v1->y, v2->y})) >> 4, s.scay1);
 	if((minX > maxX) || (minY > maxY)) return;
 
-	MarkWritten(minX, minY, maxX, maxY);
 	if(!EnsureTexture()) return;
+	MarkWritten(minX, minY, maxX, maxY);
 
 	// Edges, as A*x + B(y) + bias >= 0 over pixel x (sampled at x*16).
 	struct EDGE
@@ -940,8 +951,8 @@ void CSoftwareRasterizer::DrawSprite(const VERTEX& va, const VERTEX& vb)
 	int32 endY = std::min(CeilFixed(y1) - 1, s.scay1);
 	if((startX > endX) || (startY > endY)) return;
 
-	MarkWritten(startX, startY, endX, endY);
 	if(!EnsureTexture()) return;
+	MarkWritten(startX, startY, endX, endY);
 
 	float dudx = (u1 - u0) / static_cast<float>(x1 - x0);
 	float dvdy = (v1 - v0) / static_cast<float>(y1 - y0);
@@ -963,4 +974,126 @@ void CSoftwareRasterizer::DrawSprite(const VERTEX& va, const VERTEX& vb)
 		}
 		(this->*m_spanLinear)(y, startX, endX, it);
 	}
+}
+
+//-----------------------------------------------------------------------------
+// Multi-threaded rendering support
+//-----------------------------------------------------------------------------
+
+bool CSoftwareRasterizer::ComputeBounds(PRIMITIVE_KIND kind, const VERTEX* v, int32& x0, int32& y0, int32& x1, int32& y1) const
+{
+	const auto& s = m_state;
+	switch(kind)
+	{
+	case PRIMITIVE_POINT:
+		x0 = x1 = (v[0].x + 8) >> 4;
+		y0 = y1 = (v[0].y + 8) >> 4;
+		break;
+	case PRIMITIVE_LINE:
+		x0 = std::min((v[0].x + 8) >> 4, (v[1].x + 8) >> 4);
+		x1 = std::max((v[0].x + 8) >> 4, (v[1].x + 8) >> 4);
+		y0 = std::min((v[0].y + 8) >> 4, (v[1].y + 8) >> 4);
+		y1 = std::max((v[0].y + 8) >> 4, (v[1].y + 8) >> 4);
+		break;
+	case PRIMITIVE_TRIANGLE:
+		x0 = CeilFixed(std::min({v[0].x, v[1].x, v[2].x}));
+		x1 = std::max({v[0].x, v[1].x, v[2].x}) >> 4;
+		y0 = CeilFixed(std::min({v[0].y, v[1].y, v[2].y}));
+		y1 = std::max({v[0].y, v[1].y, v[2].y}) >> 4;
+		break;
+	case PRIMITIVE_SPRITE:
+		x0 = CeilFixed(std::min(v[0].x, v[1].x));
+		x1 = CeilFixed(std::max(v[0].x, v[1].x)) - 1;
+		y0 = CeilFixed(std::min(v[0].y, v[1].y));
+		y1 = CeilFixed(std::max(v[0].y, v[1].y)) - 1;
+		break;
+	}
+	x0 = std::max(x0, s.scax0);
+	y0 = std::max(y0, s.scay0);
+	x1 = std::min(x1, s.scax1);
+	y1 = std::min(y1, s.scay1);
+	return (x0 <= x1) && (y0 <= y1);
+}
+
+bool CSoftwareRasterizer::Prepare(PRIMITIVE_KIND kind, const VERTEX* vertices)
+{
+	if(m_drawNothing) return false;
+	int32 x0, y0, x1, y1;
+	if(!ComputeBounds(kind, vertices, x0, y0, x1, y1)) return false;
+	// Texture first: a primitive sampling its own render target reads memory
+	// as it was before the primitive; the write stamp then invalidates the
+	// texture for the primitives that follow.
+	if(!EnsureTexture()) return false;
+	MarkWritten(x0, y0, x1, y1);
+	return true;
+}
+
+CSoftwareRasterizer::PREPARED_STATE CSoftwareRasterizer::GetPreparedState() const
+{
+	PREPARED_STATE prepared;
+	prepared.state = m_state;
+	prepared.texture = m_texture;
+	prepared.texels = m_texels;
+	prepared.texelsGeneration = m_texelsGeneration;
+	return prepared;
+}
+
+void CSoftwareRasterizer::ApplyPrepared(const PREPARED_STATE& prepared)
+{
+	SetState(prepared.state);
+	m_texture = prepared.texture;
+	m_texels = prepared.texels;
+	m_texelsGeneration = prepared.texelsGeneration;
+}
+
+void CSoftwareRasterizer::SetLane(uint32 index, uint32 count)
+{
+	m_laneMode = true;
+	m_laneIndex = index;
+	m_laneCount = std::max<uint32>(count, 1);
+}
+
+bool CSoftwareRasterizer::PendingWritesOverlapTexture() const
+{
+	if(!m_state.textured) return false;
+	uint32 first = 0, count = 0;
+	CTextureCache::GetPageRange(m_textureKey, first, count);
+	for(uint32 i = 0; i < count; i++)
+	{
+		uint32 page = (first + i) & 511;
+		if(m_pendingPages[page >> 5] & (1u << (page & 31))) return true;
+	}
+	return false;
+}
+
+uint64 CSoftwareRasterizer::GetLayoutKey() const
+{
+	const auto& s = m_state;
+	bool depthUsed = s.zte;
+	uint64 key = static_cast<uint64>(s.fbp >> 13) | (static_cast<uint64>(s.fbw) << 9) | (static_cast<uint64>(s.fpsm) << 15);
+	if(depthUsed) key |= (static_cast<uint64>(s.zbp >> 13) << 21) | (static_cast<uint64>(s.zpsm & 0xF) << 30) | (1ULL << 34);
+	return key;
+}
+
+bool CSoftwareRasterizer::IsLayoutAliased() const
+{
+	const auto& s = m_state;
+	if(!s.zte) return false;
+	if(!m_frameFast || !m_depthFast) return true;
+	auto range = [&](const GS_SURFACE& surface, uint32& first, uint32& count) {
+		uint32 rows = (static_cast<uint32>(std::max(s.scay1, 0)) >> surface.phShift) + 1;
+		first = surface.FirstPage();
+		count = std::min<uint32>(rows * std::max<uint32>(surface.pagesPerRow, 1) + 1, 512);
+	};
+	uint32 f0, fc, z0, zc;
+	range(m_frame, f0, fc);
+	range(m_depth, z0, zc);
+	//Wrapping intervals on a 512 page ring
+	auto contains = [](uint32 start, uint32 count, uint32 page) { return ((page - start) & 511) < count; };
+	return contains(f0, fc, z0) || contains(z0, zc, f0);
+}
+
+void CSoftwareRasterizer::ClearPendingWrites()
+{
+	m_pendingPages.fill(0);
 }

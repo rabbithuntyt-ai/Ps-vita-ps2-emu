@@ -11,12 +11,24 @@ namespace GsTest
 	class CTestGs : public CGSH_Software
 	{
 	public:
-		CTestGs()
+		explicit CTestGs(uint32 rasterizerThreads = 1)
 		    : CGSH_Software(false)
 		{
+			SetRasterizerThreads(rasterizerThreads);
 			ResetBase();
 			InitializeImpl();
 			ResetImpl();
+		}
+
+		~CTestGs() override
+		{
+			ReleaseImpl();
+		}
+
+		// Completes rendering that may still be batched (multi-threaded mode).
+		void Sync()
+		{
+			MarkNewFrame();
 		}
 
 		void Write(uint8 reg, uint64 value)

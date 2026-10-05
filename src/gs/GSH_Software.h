@@ -3,7 +3,9 @@
 #include <functional>
 #include <vector>
 #include "gs/GSHandler.h"
+#include <memory>
 #include "SoftwareRasterizer.h"
+#include "ParallelRasterizer.h"
 
 // GS handler backed by CSoftwareRasterizer. All drawing happens in the
 // emulated GS local memory; on each flip the displayed buffer is converted to
@@ -18,7 +20,15 @@ public:
 	explicit CGSH_Software(bool gsThreaded = true);
 	~CGSH_Software() override = default;
 
-	static FactoryFunction GetFactoryFunction(FrameSink sink, bool gsThreaded = true);
+	struct OPTIONS
+	{
+		bool gsThreaded = true;
+		uint32 rasterizerThreads = 1;
+		bool interlacedRendering = false;
+		uint32 frameSkip = 0;
+	};
+
+	static FactoryFunction GetFactoryFunction(FrameSink sink, const OPTIONS&);
 
 	void SetFrameSink(FrameSink);
 
@@ -38,6 +48,9 @@ public:
 	void SetInterlacedRendering(bool);
 	// Skip drawing of N frames out of N+1 (0 = draw everything).
 	void SetFrameSkip(uint32);
+	// Number of threads rasterizing (including the GS thread). 1 = single threaded.
+	// Must be called before Initialize().
+	void SetRasterizerThreads(uint32);
 
 protected:
 	void InitializeImpl() override;
@@ -53,10 +66,14 @@ private:
 	void VertexKick(uint8, uint64);
 	void BeginPrimitive(uint64);
 	void BuildState();
+	void Submit(CSoftwareRasterizer::PRIMITIVE_KIND, const CSoftwareRasterizer::VERTEX*);
+	void FlushRendering();
 	void UpdateRowFilter();
 	CSoftwareRasterizer::VERTEX ConvertVertex(const VERTEX&) const;
 
 	CSoftwareRasterizer m_rasterizer;
+	std::unique_ptr<CParallelRasterizer> m_parallel;
+	uint32 m_rasterizerThreads = 1;
 	FrameSink m_frameSink;
 	std::vector<uint32> m_frameBuffer;
 

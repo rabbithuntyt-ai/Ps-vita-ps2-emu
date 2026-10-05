@@ -43,12 +43,34 @@ set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
 
 add_subdirectory(${PLAY_DIR}/Source ${CMAKE_CURRENT_BINARY_DIR}/PlayCore EXCLUDE_FROM_ALL)
 
+# The Vita's ELF converter (vita-elf-create) rejects PIC relocations such as
+# R_ARM_BASE_PREL, but several bundled libraries (zlib, lzma, zstd) force
+# POSITION_INDEPENDENT_CODE on. Turn it off for every target.
+if(VITA)
+	function(vitaps2_disable_pic directory)
+		get_property(targets DIRECTORY ${directory} PROPERTY BUILDSYSTEM_TARGETS)
+		foreach(target ${targets})
+			get_target_property(type ${target} TYPE)
+			if(NOT type STREQUAL "INTERFACE_LIBRARY")
+				set_target_properties(${target} PROPERTIES POSITION_INDEPENDENT_CODE OFF)
+			endif()
+		endforeach()
+		get_property(subdirectories DIRECTORY ${directory} PROPERTY SUBDIRECTORIES)
+		foreach(subdirectory ${subdirectories})
+			vitaps2_disable_pic(${subdirectory})
+		endforeach()
+	endfunction()
+	vitaps2_disable_pic(${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+
 # Portable software GS renderer (no GPU API dependency).
 add_library(gsh_software STATIC
 	src/gs/GSH_Software.cpp
 	src/gs/GSH_Software.h
 	src/gs/SoftwareRasterizer.cpp
 	src/gs/SoftwareRasterizer.h
+	src/gs/ParallelRasterizer.cpp
+	src/gs/ParallelRasterizer.h
 	src/gs/TextureCache.cpp
 	src/gs/TextureCache.h
 	src/gs/GsSurface.h
@@ -88,6 +110,11 @@ else()
 	target_include_directories(gs_diff_tests PRIVATE tests)
 	target_link_libraries(gs_diff_tests PRIVATE vitaps2_common)
 	add_test(NAME gs_diff_tests COMMAND gs_diff_tests)
+
+	add_executable(gs_parallel_tests tests/gs_parallel_tests.cpp)
+	target_include_directories(gs_parallel_tests PRIVATE tests)
+	target_link_libraries(gs_parallel_tests PRIVATE vitaps2_common)
+	add_test(NAME gs_parallel_tests COMMAND gs_parallel_tests)
 
 	add_executable(jit_pool_tests tests/jit_pool_tests.cpp)
 	target_include_directories(jit_pool_tests PRIVATE src/common)

@@ -13,6 +13,7 @@
 // decoded. CLUT and TEXA are part of the cache key.
 
 #include <array>
+#include <atomic>
 #include <memory>
 #include <vector>
 #include "Types.h"
@@ -44,7 +45,9 @@ public:
 		inline uint32 Fetch(uint32 u, uint32 v)
 		{
 			uint32 tile = (v >> 3) * m_tilesW + (u >> 3);
-			if(!m_tileValid[tile]) DecodeTile(u >> 3, v >> 3);
+			// Tiles may be decoded concurrently by several rasterizer threads;
+			// they all write identical values, the flag publishes them.
+			if(!m_tileValid[tile].load(std::memory_order_acquire)) DecodeTile(u >> 3, v >> 3);
 			return m_texels[v * m_key.tw + u];
 		}
 
@@ -58,6 +61,16 @@ public:
 		uint32 GetDecodeStamp() const
 		{
 			return m_decodeStamp;
+		}
+
+		uint32 GetFirstPage() const
+		{
+			return m_firstPage;
+		}
+
+		uint32 GetPageCount() const
+		{
+			return m_pageCount;
 		}
 
 		// Incremented whenever the decoded contents are thrown away.
@@ -86,7 +99,8 @@ public:
 		GS_SURFACE m_surface;
 		bool m_hasSurface = false;
 		std::vector<uint32> m_texels;
-		std::vector<uint8> m_tileValid;
+		std::unique_ptr<std::atomic<uint8>[]> m_tileValid;
+		uint32 m_tileCount = 0;
 		uint32 m_tilesW = 0;
 		uint32 m_firstPage = 0;
 		uint32 m_pageCount = 0;
@@ -103,8 +117,17 @@ public:
 	void MarkBytesWritten(uint32 start, uint32 size);
 	void MarkAllWritten();
 
+	// GS memory pages (8KB) a texture may read, as a possibly wrapping range.
+	static void GetPageRange(const KEY&, uint32& firstPage, uint32& pageCount);
+
 	// Returns a texture valid for the current memory contents.
 	CTexture* Get(const KEY&);
+
+	// While batches of primitives referencing textures are pending (multi-
+	// threaded rendering), evicted textures must stay alive until the batch is
+	// done: they are retired instead of destroyed until ReleaseRetired().
+	void SetDeferredRelease(bool);
+	void ReleaseRetired();
 
 	// True if a write happened since the given texture was last validated.
 	bool IsStale(const CTexture*) const;
@@ -134,6 +157,8 @@ private:
 	std::array<uint32, PAGE_COUNT> m_pageStamps = {};
 	uint32 m_stamp = 1;
 	uint64 m_useCounter = 0;
-	uint32 m_decodedTiles = 0;
+	std::atomic<uint32> m_decodedTiles{0};
 	std::vector<std::unique_ptr<CTexture>> m_textures;
+	std::vector<std::unique_ptr<CTexture>> m_retired;
+	bool m_deferredRelease = false;
 };

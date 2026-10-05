@@ -68,11 +68,16 @@ CEmuSession::CEmuSession(const CONFIG& config)
 	m_vm->ReloadFrameRateLimit();
 
 	auto frames = &m_frames;
+	CGSH_Software::OPTIONS gsOptions;
+	gsOptions.gsThreaded = config.gsThreaded;
+	gsOptions.rasterizerThreads = config.rasterizerThreads;
+	gsOptions.interlacedRendering = config.interlacedRendering;
+	gsOptions.frameSkip = config.frameSkip;
 	m_vm->CreateGSHandler(CGSH_Software::GetFactoryFunction(
 	    [frames](const uint32* pixels, uint32 width, uint32 height) {
 		    frames->Publish(pixels, width, height);
 	    },
-	    config.gsThreaded));
+	    gsOptions));
 
 	if(config.padFactory) m_vm->CreatePadHandler(config.padFactory);
 	if(config.soundFactory) m_vm->CreateSoundHandler(config.soundFactory);

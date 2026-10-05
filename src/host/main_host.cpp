@@ -3,6 +3,7 @@
 // of emulated frames and writes the last displayed frame to a PPM file.
 //
 //   vitaps2_host <game.elf|game.iso> [--frames N] [--timeout SECONDS] [--out frame.ppm]
+//                [--gs-threads N] [--interlaced] [--frameskip N]
 //
 // Exit code is 0 when at least one frame was presented.
 
@@ -51,11 +52,17 @@ int main(int argc, char** argv)
 	uint64_t targetFrames = 120;
 	int timeoutSeconds = 60;
 	std::string outPath = "frame.ppm";
+	uint32_t gsThreads = 1;
+	bool interlaced = false;
+	uint32_t frameSkip = 0;
 	for(int i = 2; i < argc; i++)
 	{
 		if(!std::strcmp(argv[i], "--frames") && (i + 1 < argc)) targetFrames = std::strtoull(argv[++i], nullptr, 10);
 		else if(!std::strcmp(argv[i], "--timeout") && (i + 1 < argc)) timeoutSeconds = std::atoi(argv[++i]);
 		else if(!std::strcmp(argv[i], "--out") && (i + 1 < argc)) outPath = argv[++i];
+		else if(!std::strcmp(argv[i], "--gs-threads") && (i + 1 < argc)) gsThreads = std::atoi(argv[++i]);
+		else if(!std::strcmp(argv[i], "--interlaced")) interlaced = true;
+		else if(!std::strcmp(argv[i], "--frameskip") && (i + 1 < argc)) frameSkip = std::atoi(argv[++i]);
 	}
 
 	const char* home = std::getenv("HOME");
@@ -65,6 +72,9 @@ int main(int argc, char** argv)
 	config.dataPath = dataPath;
 	config.resourcesPath = ".";
 	config.limitFrameRate = false;
+	config.rasterizerThreads = gsThreads;
+	config.interlacedRendering = interlaced;
+	config.frameSkip = frameSkip;
 
 	try
 	{

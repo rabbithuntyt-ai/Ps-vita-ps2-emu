@@ -11,6 +11,24 @@
 
 struct GS_SURFACE
 {
+	// Play! builds each format's page table lazily, with a non-atomic flag.
+	// Build them all up front so that rasterizer threads only ever read them.
+	static void InitTables()
+	{
+		static const bool initialized = []() {
+			CGsPixelFormats::CPixelIndexor<CGsPixelFormats::STORAGEPSMCT32>::GetPageOffsets();
+			CGsPixelFormats::CPixelIndexor<CGsPixelFormats::STORAGEPSMZ32>::GetPageOffsets();
+			CGsPixelFormats::CPixelIndexor<CGsPixelFormats::STORAGEPSMCT16>::GetPageOffsets();
+			CGsPixelFormats::CPixelIndexor<CGsPixelFormats::STORAGEPSMCT16S>::GetPageOffsets();
+			CGsPixelFormats::CPixelIndexor<CGsPixelFormats::STORAGEPSMZ16>::GetPageOffsets();
+			CGsPixelFormats::CPixelIndexor<CGsPixelFormats::STORAGEPSMZ16S>::GetPageOffsets();
+			CGsPixelFormats::CPixelIndexor<CGsPixelFormats::STORAGEPSMT8>::GetPageOffsets();
+			CGsPixelFormats::CPixelIndexor<CGsPixelFormats::STORAGEPSMT4>::GetPageOffsets();
+			return true;
+		}();
+		(void)initialized;
+	}
+
 	uint32 base = 0;        //bytes (nibbles for PSMT4)
 	uint32 pagesPerRow = 1; //pages per row of the buffer
 	const uint32* table = nullptr;

@@ -165,6 +165,9 @@ namespace
 		config.resourcesPath = "app0:";
 		config.limitFrameRate = true;
 		config.gsThreaded = true;
+		// Vita: 3 cores for apps. Core usage: EE/IOP/VU (Play! VM thread), GS
+		// thread, one extra rasterizer worker.
+		config.rasterizerThreads = 2;
 		config.padFactory = CPH_Vita::GetFactoryFunction(&pad);
 		config.soundFactory = &CSH_Vita::HandlerFactory;
 

@@ -104,11 +104,56 @@ public:
 	// Interlace-style rendering: only rasterize rows where (y & mask) == value.
 	// mask = 0 renders everything.
 	void SetRowFilter(uint32 mask, uint32 value);
+	uint32 GetRowMask() const
+	{
+		return m_rowMask;
+	}
+	uint32 GetRowValue() const
+	{
+		return m_rowValue;
+	}
 
 	void DrawPoint(const VERTEX&);
 	void DrawLine(const VERTEX&, const VERTEX&);
 	void DrawTriangle(const VERTEX&, const VERTEX&, const VERTEX&);
 	void DrawSprite(const VERTEX&, const VERTEX&);
+
+	// Multi-threaded rendering ------------------------------------------------
+	// The owning thread calls Prepare() for each primitive: it does all shared
+	// bookkeeping (memory write tracking, texture resolution) and returns false
+	// if the primitive draws nothing. Lanes (one rasterizer per thread) then
+	// draw the primitive with ApplyPrepared() + Draw*(), touching only their
+	// own rows and never the shared texture cache structures.
+	enum PRIMITIVE_KIND
+	{
+		PRIMITIVE_POINT,
+		PRIMITIVE_LINE,
+		PRIMITIVE_TRIANGLE,
+		PRIMITIVE_SPRITE,
+	};
+
+	struct PREPARED_STATE
+	{
+		STATE state;
+		CTextureCache::CTexture* texture = nullptr;
+		const uint32* texels = nullptr;
+		uint32 texelsGeneration = 0;
+	};
+
+	bool Prepare(PRIMITIVE_KIND, const VERTEX* vertices);
+	PREPARED_STATE GetPreparedState() const;
+	void ApplyPrepared(const PREPARED_STATE&);
+	// Lane mode: only rows where (y % count) == index are drawn and no shared
+	// bookkeeping is done.
+	void SetLane(uint32 index, uint32 count);
+	// Pages written by primitives prepared since the last call (bit per 8KB page).
+	bool PendingWritesOverlapTexture() const;
+	// Row ownership only guarantees exclusive memory for one buffer layout.
+	// The layout key changes when the frame or depth buffer format/address
+	// does; IsLayoutAliased() tells if frame and depth memory overlap.
+	uint64 GetLayoutKey() const;
+	bool IsLayoutAliased() const;
+	void ClearPendingWrites();
 
 	// Converts any color PSM to RGBA8888 for display/readback.
 	static uint32 ReadColor32(uint8* ram, uint32 psm, uint32 bufPtr, uint32 bufWidth, uint32 x, uint32 y);
@@ -147,8 +192,10 @@ private:
 	void MarkWritten(int32 x0, int32 y0, int32 x1, int32 y1);
 	bool RowEnabled(int32 y) const
 	{
-		return (static_cast<uint32>(y) & m_rowMask) == m_rowValue;
+		return ((static_cast<uint32>(y) & m_rowMask) == m_rowValue) &&
+		       ((m_laneCount == 1) || ((static_cast<uint32>(y) % m_laneCount) == m_laneIndex));
 	}
+	bool ComputeBounds(PRIMITIVE_KIND, const VERTEX*, int32& x0, int32& y0, int32& x1, int32& y1) const;
 
 
 	uint8* m_ram = nullptr;
@@ -175,4 +222,9 @@ private:
 
 	uint32 m_rowMask = 0;
 	uint32 m_rowValue = 0;
+
+	bool m_laneMode = false;
+	uint32 m_laneIndex = 0;
+	uint32 m_laneCount = 1;
+	std::array<uint32, 16> m_pendingPages = {}; //512 bits
 };

@@ -49,7 +49,10 @@ bool CTextureCache::IsStale(const CTexture* texture) const
 
 void CTextureCache::Reset(CTexture& texture)
 {
-	std::fill(texture.m_tileValid.begin(), texture.m_tileValid.end(), 0);
+	for(uint32 i = 0; i < texture.m_tileCount; i++)
+	{
+		texture.m_tileValid[i].store(0, std::memory_order_relaxed);
+	}
 	texture.m_decodeStamp = m_stamp;
 	texture.m_generation++;
 }
@@ -83,6 +86,7 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 	{
 		auto lru = std::min_element(m_textures.begin(), m_textures.end(),
 		                            [](const auto& a, const auto& b) { return a->m_lastUse < b->m_lastUse; });
+		if(m_deferredRelease) m_retired.push_back(std::move(*lru));
 		m_textures.erase(lru);
 	}
 
@@ -93,17 +97,16 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 	texture->m_tilesW = (key.tw + 7) / 8;
 	uint32 tilesH = (key.th + 7) / 8;
 	texture->m_texels.resize(key.tw * key.th);
-	texture->m_tileValid.assign(texture->m_tilesW * tilesH, 0);
+	texture->m_tileCount = texture->m_tilesW * tilesH;
+	texture->m_tileValid = std::make_unique<std::atomic<uint8>[]>(texture->m_tileCount);
+	for(uint32 i = 0; i < texture->m_tileCount; i++)
+	{
+		texture->m_tileValid[i].store(0, std::memory_order_relaxed);
+	}
 	texture->m_lastUse = m_useCounter;
 	texture->m_decodeStamp = m_stamp;
 
-	//Pages spanned by the texture (conservative: whole page rows).
-	auto& surface = texture->m_surface;
-	uint32 pageRows = (key.th + surface.phMask) >> surface.phShift;
-	uint32 pagesPerRow = std::max<uint32>(surface.pagesPerRow, 1);
-	uint32 widthPages = (key.tw + surface.pwMask) >> surface.pwShift;
-	texture->m_firstPage = (key.tbp >> GS_SURFACE::PAGE_SHIFT) & (PAGE_COUNT - 1);
-	texture->m_pageCount = std::min<uint32>(pagesPerRow * pageRows + widthPages + 1, PAGE_COUNT);
+	GetPageRange(key, texture->m_firstPage, texture->m_pageCount);
 
 	//Snapshot the CLUT (the key holds its hash, so contents are fixed for this entry).
 	if(CGsPixelFormats::IsPsmIDTEX(key.tpsm))
@@ -117,6 +120,34 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 
 	m_textures.push_back(std::move(texture));
 	return m_textures.back().get();
+}
+
+void CTextureCache::SetDeferredRelease(bool deferred)
+{
+	m_deferredRelease = deferred;
+	if(!deferred) ReleaseRetired();
+}
+
+void CTextureCache::ReleaseRetired()
+{
+	m_retired.clear();
+}
+
+void CTextureCache::GetPageRange(const KEY& key, uint32& firstPage, uint32& pageCount)
+{
+	//Conservative: whole page rows.
+	GS_SURFACE surface;
+	if(!surface.Init(key.tpsm, key.tbp, key.tbw))
+	{
+		firstPage = 0;
+		pageCount = PAGE_COUNT;
+		return;
+	}
+	uint32 pageRows = (key.th + surface.phMask) >> surface.phShift;
+	uint32 pagesPerRow = std::max<uint32>(surface.pagesPerRow, 1);
+	uint32 widthPages = (key.tw + surface.pwMask) >> surface.pwShift;
+	firstPage = (key.tbp >> GS_SURFACE::PAGE_SHIFT) & (PAGE_COUNT - 1);
+	pageCount = std::min<uint32>(pagesPerRow * pageRows + widthPages + 1, PAGE_COUNT);
 }
 
 uint32 CTextureCache::CTexture::Expand16(uint32 color16) const
@@ -236,18 +267,18 @@ void CTextureCache::CTexture::DecodeTile(uint32 tileX, uint32 tileY)
 			row[u] = DecodeTexel(u, v);
 		}
 	}
-	m_tileValid[tileY * m_tilesW + tileX] = 1;
+	m_tileValid[tileY * m_tilesW + tileX].store(1, std::memory_order_release);
 	m_cache->m_decodedTiles++;
 }
 
 void CTextureCache::CTexture::DecodeAll()
 {
-	uint32 tilesH = static_cast<uint32>(m_tileValid.size()) / m_tilesW;
+	uint32 tilesH = m_tileCount / m_tilesW;
 	for(uint32 ty = 0; ty < tilesH; ty++)
 	{
 		for(uint32 tx = 0; tx < m_tilesW; tx++)
 		{
-			if(!m_tileValid[ty * m_tilesW + tx]) DecodeTile(tx, ty);
+			if(!m_tileValid[ty * m_tilesW + tx].load(std::memory_order_acquire)) DecodeTile(tx, ty);
 		}
 	}
 }

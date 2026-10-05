@@ -147,13 +147,15 @@ namespace
 int main(int argc, char** argv)
 {
 	double secondsPerWorkload = (argc > 1) ? std::atof(argv[1]) : 1.0;
+	uint32 threads = (argc > 2) ? std::atoi(argv[2]) : 1;
+	std::printf("rasterizer threads: %u\n", threads);
 	CEmuSession::SetDataPaths("vitaps2_test_data", ".");
 
 	double total = 0;
 	int count = 0;
 	for(auto& workload : MakeWorkloads())
 	{
-		CTestGs gs;
+		CTestGs gs(threads);
 		SetupContext(gs);
 		UploadTextures(gs);
 		workload.setup(gs);
@@ -164,6 +166,7 @@ int main(int argc, char** argv)
 		do
 		{
 			pixels += workload.draw(gs);
+			gs.Sync();
 			elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 		} while(elapsed < secondsPerWorkload);
 

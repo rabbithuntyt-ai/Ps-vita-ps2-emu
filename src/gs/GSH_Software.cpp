@@ -3,6 +3,7 @@
 #include "gs/GsTransferRange.h"
 #include "xxhash.h"
 #include <cstring>
+#include <cstdlib>
 
 CGSH_Software::CGSH_Software(bool gsThreaded)
     : CGSHandler(gsThreaded)
@@ -10,11 +11,14 @@ CGSH_Software::CGSH_Software(bool gsThreaded)
 	m_primitiveMode <<= 0;
 }
 
-CGSHandler::FactoryFunction CGSH_Software::GetFactoryFunction(FrameSink sink, bool gsThreaded)
+CGSHandler::FactoryFunction CGSH_Software::GetFactoryFunction(FrameSink sink, const OPTIONS& options)
 {
-	return [sink, gsThreaded]() {
-		auto handler = new CGSH_Software(gsThreaded);
+	return [sink, options]() {
+		auto handler = new CGSH_Software(options.gsThreaded);
 		handler->SetFrameSink(sink);
+		handler->SetRasterizerThreads(options.rasterizerThreads);
+		handler->SetInterlacedRendering(options.interlacedRendering);
+		handler->SetFrameSkip(options.frameSkip);
 		return handler;
 	};
 }
@@ -28,6 +32,44 @@ void CGSH_Software::InitializeImpl()
 {
 	m_rasterizer.SetMemory(m_pRAM, m_pCLUT);
 	m_rasterizer.SetClutHash(XXH3_64bits(m_pCLUT, CLUTSIZE));
+	if(m_rasterizerThreads > 1)
+	{
+		m_parallel = std::make_unique<CParallelRasterizer>(m_rasterizer, m_pRAM, m_pCLUT, m_rasterizerThreads);
+	}
+}
+
+void CGSH_Software::SetRasterizerThreads(uint32 threads)
+{
+	m_rasterizerThreads = std::max<uint32>(threads, 1);
+}
+
+void CGSH_Software::FlushRendering()
+{
+	if(m_parallel) m_parallel->Flush();
+}
+
+void CGSH_Software::Submit(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoftwareRasterizer::VERTEX* vertices)
+{
+	if(m_parallel)
+	{
+		m_parallel->Submit(kind, vertices);
+		return;
+	}
+	switch(kind)
+	{
+	case CSoftwareRasterizer::PRIMITIVE_POINT:
+		m_rasterizer.DrawPoint(vertices[0]);
+		break;
+	case CSoftwareRasterizer::PRIMITIVE_LINE:
+		m_rasterizer.DrawLine(vertices[0], vertices[1]);
+		break;
+	case CSoftwareRasterizer::PRIMITIVE_TRIANGLE:
+		m_rasterizer.DrawTriangle(vertices[0], vertices[1], vertices[2]);
+		break;
+	case CSoftwareRasterizer::PRIMITIVE_SPRITE:
+		m_rasterizer.DrawSprite(vertices[0], vertices[1]);
+		break;
+	}
 }
 
 void CGSH_Software::SetInterlacedRendering(bool enabled)
@@ -43,11 +85,13 @@ void CGSH_Software::SetFrameSkip(uint32 frameSkip)
 
 void CGSH_Software::UpdateRowFilter()
 {
+	FlushRendering();
 	m_rasterizer.SetRowFilter(m_interlaced ? 1 : 0, m_frameCounter & 1);
 }
 
 void CGSH_Software::MarkNewFrame()
 {
+	FlushRendering();
 	m_frameCounter++;
 	m_skipThisFrame = (m_frameSkip != 0) && ((m_frameCounter % (m_frameSkip + 1)) != 0);
 	UpdateRowFilter();
@@ -56,6 +100,7 @@ void CGSH_Software::MarkNewFrame()
 
 void CGSH_Software::TransferWrite(const uint8* data, uint32 length)
 {
+	FlushRendering();
 	CGSHandler::TransferWrite(data, length);
 	auto bltBuf = make_convertible<BITBLTBUF>(m_nReg[GS_REG_BITBLTBUF]);
 	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
@@ -66,12 +111,17 @@ void CGSH_Software::TransferWrite(const uint8* data, uint32 length)
 
 void CGSH_Software::SyncCLUT(const TEX0& tex0)
 {
+	// A CLUT load reads GS memory, which pending primitives may still write.
+	if(tex0.nCLD != 0) FlushRendering();
 	CGSHandler::SyncCLUT(tex0);
 	m_rasterizer.SetClutHash(XXH3_64bits(m_pCLUT, CLUTSIZE));
+	if(m_parallel) m_parallel->OnStateChanged();
 }
 
 void CGSH_Software::ReleaseImpl()
 {
+	FlushRendering();
+	m_parallel.reset();
 }
 
 void CGSH_Software::ResetImpl()
@@ -82,6 +132,7 @@ void CGSH_Software::ResetImpl()
 	m_pendingPrimValue = 0;
 	m_primitiveCount = 0;
 	m_stateDirty = true;
+	FlushRendering();
 	m_rasterizer.NotifyAllMemoryWritten();
 }
 
@@ -190,35 +241,35 @@ void CGSH_Software::VertexKick(uint8 registerId, uint64 data)
 	switch(m_primitiveType)
 	{
 	case PRIM_POINT:
-		if(drawingKick) m_rasterizer.DrawPoint(ConvertVertex(m_vtxBuffer[0]));
+		if(drawingKick) { CSoftwareRasterizer::VERTEX v[1] = {ConvertVertex(m_vtxBuffer[0])}; Submit(CSoftwareRasterizer::PRIMITIVE_POINT, v); }
 		m_vtxCount = 1;
 		break;
 	case PRIM_LINE:
-		if(drawingKick) m_rasterizer.DrawLine(ConvertVertex(m_vtxBuffer[1]), ConvertVertex(m_vtxBuffer[0]));
+		if(drawingKick) { CSoftwareRasterizer::VERTEX v[2] = {ConvertVertex(m_vtxBuffer[1]), ConvertVertex(m_vtxBuffer[0])}; Submit(CSoftwareRasterizer::PRIMITIVE_LINE, v); }
 		m_vtxCount = 2;
 		break;
 	case PRIM_LINESTRIP:
-		if(drawingKick) m_rasterizer.DrawLine(ConvertVertex(m_vtxBuffer[1]), ConvertVertex(m_vtxBuffer[0]));
+		if(drawingKick) { CSoftwareRasterizer::VERTEX v[2] = {ConvertVertex(m_vtxBuffer[1]), ConvertVertex(m_vtxBuffer[0])}; Submit(CSoftwareRasterizer::PRIMITIVE_LINE, v); }
 		m_vtxBuffer[1] = m_vtxBuffer[0];
 		m_vtxCount = 1;
 		break;
 	case PRIM_TRIANGLE:
-		if(drawingKick) m_rasterizer.DrawTriangle(ConvertVertex(m_vtxBuffer[2]), ConvertVertex(m_vtxBuffer[1]), ConvertVertex(m_vtxBuffer[0]));
+		if(drawingKick) { CSoftwareRasterizer::VERTEX v[3] = {ConvertVertex(m_vtxBuffer[2]), ConvertVertex(m_vtxBuffer[1]), ConvertVertex(m_vtxBuffer[0])}; Submit(CSoftwareRasterizer::PRIMITIVE_TRIANGLE, v); }
 		m_vtxCount = 3;
 		break;
 	case PRIM_TRIANGLESTRIP:
-		if(drawingKick) m_rasterizer.DrawTriangle(ConvertVertex(m_vtxBuffer[2]), ConvertVertex(m_vtxBuffer[1]), ConvertVertex(m_vtxBuffer[0]));
+		if(drawingKick) { CSoftwareRasterizer::VERTEX v[3] = {ConvertVertex(m_vtxBuffer[2]), ConvertVertex(m_vtxBuffer[1]), ConvertVertex(m_vtxBuffer[0])}; Submit(CSoftwareRasterizer::PRIMITIVE_TRIANGLE, v); }
 		m_vtxBuffer[2] = m_vtxBuffer[1];
 		m_vtxBuffer[1] = m_vtxBuffer[0];
 		m_vtxCount = 1;
 		break;
 	case PRIM_TRIANGLEFAN:
-		if(drawingKick) m_rasterizer.DrawTriangle(ConvertVertex(m_vtxBuffer[2]), ConvertVertex(m_vtxBuffer[1]), ConvertVertex(m_vtxBuffer[0]));
+		if(drawingKick) { CSoftwareRasterizer::VERTEX v[3] = {ConvertVertex(m_vtxBuffer[2]), ConvertVertex(m_vtxBuffer[1]), ConvertVertex(m_vtxBuffer[0])}; Submit(CSoftwareRasterizer::PRIMITIVE_TRIANGLE, v); }
 		m_vtxBuffer[1] = m_vtxBuffer[0];
 		m_vtxCount = 1;
 		break;
 	case PRIM_SPRITE:
-		if(drawingKick) m_rasterizer.DrawSprite(ConvertVertex(m_vtxBuffer[1]), ConvertVertex(m_vtxBuffer[0]));
+		if(drawingKick) { CSoftwareRasterizer::VERTEX v[2] = {ConvertVertex(m_vtxBuffer[1]), ConvertVertex(m_vtxBuffer[0])}; Submit(CSoftwareRasterizer::PRIMITIVE_SPRITE, v); }
 		m_vtxCount = 2;
 		break;
 	}
@@ -326,6 +377,7 @@ void CGSH_Software::BuildState()
 	state.aem = texa.nAEM != 0;
 
 	m_rasterizer.SetState(state);
+	if(m_parallel) m_parallel->OnStateChanged();
 }
 
 void CGSH_Software::ProcessHostToLocalTransfer()
@@ -336,11 +388,13 @@ void CGSH_Software::ProcessHostToLocalTransfer()
 
 void CGSH_Software::ProcessLocalToHostTransfer()
 {
+	FlushRendering();
 	// Reads are served by CGSHandler straight from GS RAM.
 }
 
 void CGSH_Software::ProcessLocalToLocalTransfer()
 {
+	FlushRendering();
 	auto bltBuf = make_convertible<BITBLTBUF>(m_nReg[GS_REG_BITBLTBUF]);
 	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
 	auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
@@ -378,6 +432,7 @@ void CGSH_Software::ProcessClutTransfer(uint32, uint32)
 
 void CGSH_Software::FlipImpl(const DISPLAY_INFO& dispInfo)
 {
+	FlushRendering();
 	const auto& layer = dispInfo.layers[0];
 	if(m_frameSink && layer.enabled && (dispInfo.width != 0) && (dispInfo.height != 0))
 	{

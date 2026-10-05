@@ -21,6 +21,9 @@ public:
 		std::string resourcesPath;        // read-only: GameConfig.xml etc.
 		bool limitFrameRate = true;
 		bool gsThreaded = true;
+		uint32_t rasterizerThreads = 1;   // threads rasterizing (GS thread included)
+		bool interlacedRendering = false; // speed hack: draw alternate lines per frame
+		uint32_t frameSkip = 0;           // speed hack: skip N of N+1 frames
 		CPadHandler::FactoryFunction padFactory;
 		CSoundHandler::FactoryFunction soundFactory;
 	};
