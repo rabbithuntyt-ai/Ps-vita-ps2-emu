@@ -39,10 +39,37 @@ needed**) on the Vita through its 32-bit ARM JIT, with a new portable
 | L / R | L1 / R1 |
 | Rear touch left / right half | L2 / R2 |
 | Front touch bottom-left / bottom-right corner | L3 / R3 |
-| SELECT + START | back to game list |
+| SELECT + START | pause menu: speed hacks, aspect, overlay, quit |
 | SELECT + L | toggle performance overlay |
 
+Settings chosen in the pause menu are saved per game in
+`ux0:data/VitaPS2/settings/`.
+
 On PS TV, a DualShock 3/4's L2/R2/L3/R3 work directly.
+
+## Performance work
+
+The renderer is built for the Vita's Cortex-A9 (see `gs_benchmark`):
+
+* **Span-based rasterizer**: exact integer scanline extents, fixed-point
+  stepping, span loops specialized per state (texture/filter/depth/format/blend).
+* **Decoded texture cache**: textures decoded to RGBA once (lazily per 8x8
+  tile), invalidated by GS memory page stamps, CLUT hash and TEXA.
+* **Multi-threaded GS**: primitives are batched and rasterized by several
+  threads that own interleaved scanlines — output is bit-identical to single
+  threaded rendering (verified by `gs_parallel_tests`, ThreadSanitizer clean).
+* **Speed hacks** (pause menu, per game): EE cycle rate (underclock), interlaced
+  half-line rendering, frame skip.
+
+| Workload (host x86, 1 thread → 3 threads) | Mpix/s |
+|---|---|
+| Clear / flat fill | 64 → ~930 |
+| Textured sprite, 8-bit CLUT | 31 → 216 |
+| Bilinear + alpha blend | 15 → 64 |
+| Gouraud + Z | 21 → 152 |
+| Perspective textured + blend + Z (3D) | 11 → 63 |
+
+(left column: first implementation; right: current with 3 threads)
 
 ## Building
 
@@ -77,6 +104,11 @@ Tests:
 
 * `gs_software_tests` — rasterizer and GS pipeline unit tests.
 * `jit_pool_tests` — executable memory pool allocator.
+* `gs_diff_tests` — optimized rasterizer vs. the simple reference
+  implementation on random states and primitives.
+* `gs_parallel_tests` — multi-threaded rendering is bit-identical to single
+  threaded rendering.
+* `gs_benchmark [seconds] [threads]` — renderer throughput.
 * `elf_boot_test` — generates a PS2 program (`tools/make_test_elf.py`), boots
   it through the full emulator and checks the rendered frame.
 

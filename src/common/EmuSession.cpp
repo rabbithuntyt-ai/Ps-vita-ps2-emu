@@ -79,6 +79,9 @@ CEmuSession::CEmuSession(const CONFIG& config)
 	    },
 	    gsOptions));
 
+	m_speedHacks.interlacedRendering = config.interlacedRendering;
+	m_speedHacks.frameSkip = config.frameSkip;
+
 	if(config.padFactory) m_vm->CreatePadHandler(config.padFactory);
 	if(config.soundFactory) m_vm->CreateSoundHandler(config.soundFactory);
 
@@ -121,7 +124,26 @@ void CEmuSession::Boot(const std::string& path)
 		throw std::runtime_error("Unsupported file type: " + path);
 	}
 	m_booted = true;
+	SetSpeedHacks(m_speedHacks); //Reset() restored the EE clock
 	m_vm->Resume();
+}
+
+void CEmuSession::SetSpeedHacks(const SPEED_HACKS& hacks)
+{
+	m_speedHacks = hacks;
+	bool wasRunning = IsRunning();
+	if(wasRunning) m_vm->Pause();
+	uint32_t percent = std::clamp<uint32_t>(hacks.eeCycleRatePercent, 25, 300);
+	m_vm->SetEeFrequencyScale(percent, 100);
+	if(wasRunning) m_vm->Resume();
+
+	if(auto gs = static_cast<CGSH_Software*>(m_vm->GetGSHandler()))
+	{
+		gs->SendGSCall([gs, hacks]() {
+			gs->SetInterlacedRendering(hacks.interlacedRendering);
+			gs->SetFrameSkip(hacks.frameSkip);
+		});
+	}
 }
 
 void CEmuSession::Pause()

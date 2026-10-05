@@ -4,13 +4,17 @@
 // ux0:data/VitaPS2/games. Configuration, memory cards and logs live in
 // ux0:data/VitaPS2.
 //
-// In game:  SELECT + START  -> back to the game list
+// In game:  SELECT + START  -> pause menu (speed hacks, display, quit)
 //           SELECT + L      -> toggle the performance overlay
+//
+// Settings are remembered per game in ux0:data/VitaPS2/settings.
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <fstream>
+#include <sstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -39,6 +43,7 @@ namespace
 {
 	constexpr const char* DATA_PATH = "ux0:data/VitaPS2";
 	constexpr const char* GAMES_PATH = "ux0:data/VitaPS2/games";
+	constexpr const char* SETTINGS_PATH = "ux0:data/VitaPS2/settings";
 	constexpr size_t JIT_POOL_SIZE = 40 * 1024 * 1024;
 
 	constexpr unsigned int COLOR_WHITE = RGBA8(255, 255, 255, 255);
@@ -80,6 +85,157 @@ namespace
 			vita2d_end_drawing();
 			vita2d_swap_buffers();
 		}
+	}
+
+	struct GAME_SETTINGS
+	{
+		uint32_t eeCycleRate = 100;
+		bool interlaced = false;
+		uint32_t frameSkip = 0;
+		bool showStats = true;
+		bool stretch = false; //fill the 16:9 screen instead of 4:3
+	};
+
+	std::string SettingsPathFor(const std::string& gamePath)
+	{
+		auto slash = gamePath.find_last_of('/');
+		return std::string(SETTINGS_PATH) + "/" + gamePath.substr(slash + 1) + ".ini";
+	}
+
+	GAME_SETTINGS LoadSettings(const std::string& gamePath)
+	{
+		GAME_SETTINGS settings;
+		std::ifstream file(SettingsPathFor(gamePath));
+		std::string line;
+		while(std::getline(file, line))
+		{
+			auto eq = line.find('=');
+			if(eq == std::string::npos) continue;
+			std::string key = line.substr(0, eq);
+			uint32_t value = static_cast<uint32_t>(std::strtoul(line.c_str() + eq + 1, nullptr, 10));
+			if(key == "ee_cycle_rate") settings.eeCycleRate = value;
+			else if(key == "interlaced") settings.interlaced = value != 0;
+			else if(key == "frame_skip") settings.frameSkip = value;
+			else if(key == "show_stats") settings.showStats = value != 0;
+			else if(key == "stretch") settings.stretch = value != 0;
+		}
+		return settings;
+	}
+
+	void SaveSettings(const std::string& gamePath, const GAME_SETTINGS& settings)
+	{
+		std::ofstream file(SettingsPathFor(gamePath));
+		file << "ee_cycle_rate=" << settings.eeCycleRate << "\n"
+		     << "interlaced=" << (settings.interlaced ? 1 : 0) << "\n"
+		     << "frame_skip=" << settings.frameSkip << "\n"
+		     << "show_stats=" << (settings.showStats ? 1 : 0) << "\n"
+		     << "stretch=" << (settings.stretch ? 1 : 0) << "\n";
+	}
+
+	CEmuSession::SPEED_HACKS ToSpeedHacks(const GAME_SETTINGS& settings)
+	{
+		CEmuSession::SPEED_HACKS hacks;
+		hacks.eeCycleRatePercent = settings.eeCycleRate;
+		hacks.interlacedRendering = settings.interlaced;
+		hacks.frameSkip = settings.frameSkip;
+		return hacks;
+	}
+
+	void DrawScreen(vita2d_texture* screen, uint32_t width, uint32_t height, bool stretch)
+	{
+		if(width == 0 || height == 0) return;
+		float dstH = 544.0f;
+		float dstW = stretch ? 960.0f : dstH * 4.0f / 3.0f;
+		vita2d_draw_texture_part_scale(screen, (960.0f - dstW) / 2.0f, 0, 0, 0, width, height, dstW / width, dstH / height);
+	}
+
+	// Returns true if the player chose to quit to the game list.
+	bool RunPauseMenu(CEmuSession& session, GAME_SETTINGS& settings, vita2d_texture* screen, uint32_t width, uint32_t height)
+	{
+		static const uint32_t eeRates[] = {50, 60, 75, 90, 100, 130};
+		enum ITEM
+		{
+			ITEM_RESUME,
+			ITEM_EE_RATE,
+			ITEM_INTERLACED,
+			ITEM_FRAMESKIP,
+			ITEM_STRETCH,
+			ITEM_STATS,
+			ITEM_QUIT,
+			ITEM_COUNT
+		};
+		session.Pause();
+		int selected = 0;
+		uint32_t previous = ~0u;
+		bool quit = false;
+		while(true)
+		{
+			auto input = ReadInput(previous);
+			if(input.pressed & SCE_CTRL_DOWN) selected = (selected + 1) % ITEM_COUNT;
+			if(input.pressed & SCE_CTRL_UP) selected = (selected + ITEM_COUNT - 1) % ITEM_COUNT;
+			int delta = (input.pressed & SCE_CTRL_RIGHT) ? 1 : (input.pressed & SCE_CTRL_LEFT) ? -1 : 0;
+			if(input.pressed & SCE_CTRL_CROSS) delta = 1;
+			if(input.pressed & SCE_CTRL_CIRCLE) break;
+			if(delta != 0)
+			{
+				switch(selected)
+				{
+				case ITEM_RESUME:
+					if(input.pressed & SCE_CTRL_CROSS) goto done;
+					break;
+				case ITEM_EE_RATE:
+				{
+					int index = 0;
+					for(int i = 0; i < 6; i++)
+						if(eeRates[i] == settings.eeCycleRate) index = i;
+					index = std::clamp(index + delta, 0, 5);
+					settings.eeCycleRate = eeRates[index];
+				}
+				break;
+				case ITEM_INTERLACED: settings.interlaced = !settings.interlaced; break;
+				case ITEM_FRAMESKIP: settings.frameSkip = static_cast<uint32_t>(std::clamp<int>(static_cast<int>(settings.frameSkip) + delta, 0, 3)); break;
+				case ITEM_STRETCH: settings.stretch = !settings.stretch; break;
+				case ITEM_STATS: settings.showStats = !settings.showStats; break;
+				case ITEM_QUIT:
+					if(input.pressed & SCE_CTRL_CROSS)
+					{
+						quit = true;
+						goto done;
+					}
+					break;
+				}
+			}
+
+			{
+				char lines[ITEM_COUNT][96];
+				std::snprintf(lines[ITEM_RESUME], 96, "Resume");
+				std::snprintf(lines[ITEM_EE_RATE], 96, "EE cycle rate: %u%%  (lower = faster, may slow game logic)", settings.eeCycleRate);
+				std::snprintf(lines[ITEM_INTERLACED], 96, "Interlaced rendering: %s  (half the GS work)", settings.interlaced ? "On" : "Off");
+				std::snprintf(lines[ITEM_FRAMESKIP], 96, "Frame skip: %u", settings.frameSkip);
+				std::snprintf(lines[ITEM_STRETCH], 96, "Aspect: %s", settings.stretch ? "Stretch 16:9" : "4:3");
+				std::snprintf(lines[ITEM_STATS], 96, "Performance overlay: %s", settings.showStats ? "On" : "Off");
+				std::snprintf(lines[ITEM_QUIT], 96, "Quit to game list");
+
+				vita2d_start_drawing();
+				vita2d_clear_screen();
+				DrawScreen(screen, width, height, settings.stretch);
+				vita2d_draw_rectangle(120, 90, 720, 360, RGBA8(10, 12, 24, 220));
+				vita2d_pgf_draw_text(g_font, 150, 130, COLOR_ACCENT, 1.2f, "Paused");
+				for(int i = 0; i < ITEM_COUNT; i++)
+				{
+					int y = 180 + i * 34;
+					if(i == selected) vita2d_draw_rectangle(140, y - 24, 680, 32, RGBA8(40, 60, 110, 255));
+					vita2d_pgf_draw_text(g_font, 155, y, (i == selected) ? COLOR_WHITE : COLOR_GREY, 0.95f, lines[i]);
+				}
+				vita2d_pgf_draw_text(g_font, 150, 435, COLOR_GREY, 0.8f, "LEFT/RIGHT: change   X: select   O: resume");
+				vita2d_end_drawing();
+				vita2d_swap_buffers();
+			}
+		}
+	done:
+		session.SetSpeedHacks(ToSpeedHacks(settings));
+		if(!quit) session.Resume();
+		return quit;
 	}
 
 	std::vector<std::string> ScanGames()
@@ -171,10 +327,16 @@ namespace
 		config.padFactory = CPH_Vita::GetFactoryFunction(&pad);
 		config.soundFactory = &CSH_Vita::HandlerFactory;
 
+		GAME_SETTINGS settings = LoadSettings(path);
+		config.interlacedRendering = settings.interlaced;
+		config.frameSkip = settings.frameSkip;
+
 		std::unique_ptr<CEmuSession> session;
 		try
 		{
 			session = std::make_unique<CEmuSession>(config);
+			auto hacks = ToSpeedHacks(settings);
+			session->SetSpeedHacks(hacks);
 			session->Boot(path);
 		}
 		catch(const std::exception& e)
@@ -191,7 +353,6 @@ namespace
 		std::vector<uint32_t> pixels;
 		uint32_t width = 0, height = 0;
 		uint64_t serial = 0;
-		bool showStats = true;
 		uint32_t previousButtons = ~0u;
 
 		uint64_t statsTime = sceKernelGetProcessTimeWide();
@@ -203,8 +364,19 @@ namespace
 			uint32_t buttons = pad ? pad->Poll() : 0;
 			uint32_t pressed = buttons & ~previousButtons;
 			previousButtons = buttons;
-			if((buttons & SCE_CTRL_SELECT) && (buttons & SCE_CTRL_START)) break;
-			if((buttons & SCE_CTRL_SELECT) && (pressed & SCE_CTRL_L1)) showStats = !showStats;
+			if((buttons & SCE_CTRL_SELECT) && (pressed & SCE_CTRL_START))
+			{
+				bool quit = RunPauseMenu(*session, settings, screen, width, height);
+				SaveSettings(path, settings);
+				if(quit) break;
+				previousButtons = ~0u;
+				continue;
+			}
+			if((buttons & SCE_CTRL_SELECT) && (pressed & SCE_CTRL_L1))
+			{
+				settings.showStats = !settings.showStats;
+				SaveSettings(path, settings);
+			}
 
 			if(session->GetFrames().Fetch(serial, pixels, width, height))
 			{
@@ -231,15 +403,8 @@ namespace
 
 			vita2d_start_drawing();
 			vita2d_clear_screen();
-			if(width != 0 && height != 0)
-			{
-				// Fit to the 960x544 screen keeping a 4:3 picture.
-				float dstH = 544.0f;
-				float dstW = dstH * 4.0f / 3.0f;
-				vita2d_draw_texture_part_scale(screen, (960.0f - dstW) / 2.0f, 0, 0, 0, width, height,
-				                               dstW / width, dstH / height);
-			}
-			if(showStats)
+			DrawScreen(screen, width, height, settings.stretch);
+			if(settings.showStats)
 			{
 				vita2d_draw_rectangle(0, 0, 330, 58, RGBA8(0, 0, 0, 160));
 				vita2d_pgf_draw_textf(g_font, 8, 22, COLOR_WHITE, 0.8f, "VM %.1f fps  out %.1f fps  %ux%u",
@@ -273,6 +438,7 @@ int main()
 
 	sceIoMkdir(DATA_PATH, 0777);
 	sceIoMkdir(GAMES_PATH, 0777);
+	sceIoMkdir(SETTINGS_PATH, 0777);
 
 	if(!VitaJit_Init(JIT_POOL_SIZE))
 	{

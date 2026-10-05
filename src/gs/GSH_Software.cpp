@@ -440,13 +440,34 @@ void CGSH_Software::FlipImpl(const DISPLAY_INFO& dispInfo)
 		uint32 height = std::min<uint32>(dispInfo.height, 1024);
 		m_frameBuffer.resize(width * height);
 		uint32 bufWidth = layer.bufWidth / 64;
+		GS_SURFACE surface;
+		bool fast = surface.Init(layer.psm, layer.bufPtr, bufWidth) && !surface.nibbles;
+		bool is16 = GsMemory::IsPsm16(layer.psm);
+		bool is32 = (layer.psm == PSMCT32) || (layer.psm == PSMCT24) || (layer.psm == PSMCT24_UNK) || (layer.psm == PSMCT32_UNK);
 		for(uint32 y = 0; y < height; y++)
 		{
-			for(uint32 x = 0; x < width; x++)
+			uint32* dst = m_frameBuffer.data() + y * width;
+			uint32 sy = (layer.offsetY + y) & 2047;
+			if(fast && (is16 || is32))
 			{
-				uint32 color = CSoftwareRasterizer::ReadColor32(m_pRAM, layer.psm, layer.bufPtr, bufWidth,
-				                                                layer.offsetX + x, layer.offsetY + y);
-				m_frameBuffer[x + y * width] = color | 0xFF000000;
+				uint32 rowBase = surface.RowBase(sy);
+				const uint32* rowTable = surface.RowTable(sy);
+				for(uint32 x = 0; x < width; x++)
+				{
+					uint32 offset = surface.Offset(rowBase, rowTable, (layer.offsetX + x) & 2047);
+					uint32 color = is16 ? GsMemory::Color16To32(*reinterpret_cast<const uint16*>(m_pRAM + offset))
+					                    : *reinterpret_cast<const uint32*>(m_pRAM + offset);
+					dst[x] = color | 0xFF000000;
+				}
+			}
+			else
+			{
+				for(uint32 x = 0; x < width; x++)
+				{
+					uint32 color = CSoftwareRasterizer::ReadColor32(m_pRAM, layer.psm, layer.bufPtr, bufWidth,
+					                                                layer.offsetX + x, sy);
+					dst[x] = color | 0xFF000000;
+				}
 			}
 		}
 		m_frameSink(m_frameBuffer.data(), width, height);

@@ -28,6 +28,13 @@ public:
 		CSoundHandler::FactoryFunction soundFactory;
 	};
 
+	struct SPEED_HACKS
+	{
+		uint32_t eeCycleRatePercent = 100; // <100 underclocks the EE: less work per frame
+		bool interlacedRendering = false;  // draw alternate lines per frame
+		uint32_t frameSkip = 0;            // skip N of N+1 frames
+	};
+
 	explicit CEmuSession(const CONFIG&);
 	~CEmuSession();
 
@@ -44,6 +51,13 @@ public:
 	void Pause();
 	void Resume();
 	bool IsRunning() const;
+
+	// Can be called at any time; applied safely on the emulation threads.
+	void SetSpeedHacks(const SPEED_HACKS&);
+	const SPEED_HACKS& GetSpeedHacks() const
+	{
+		return m_speedHacks;
+	}
 
 	CFrameMailbox& GetFrames()
 	{
@@ -70,4 +84,5 @@ private:
 	std::atomic<uint64_t> m_vmFrames{0};
 	Framework::CSignal<void()>::Connection m_newFrameConnection;
 	bool m_booted = false;
+	SPEED_HACKS m_speedHacks;
 };
