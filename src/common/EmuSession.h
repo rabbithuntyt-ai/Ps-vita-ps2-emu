@@ -70,6 +70,11 @@ public:
 		return m_vmFrames.load();
 	}
 
+	// Profiling: GS rasterization time of the last frame, and the share of EE
+	// cycles the game spent idling (waiting for vsync etc.) in the current frame.
+	uint32_t GetGsRasterMicros();
+	float GetEeIdleRatio();
+
 	CPS2VM* GetVm()
 	{
 		return m_vm.get();

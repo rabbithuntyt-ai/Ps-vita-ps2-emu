@@ -26,6 +26,7 @@
 #include <vita2d.h>
 
 #include "EmuSession.h"
+#include "GsBenchmark.h"
 #include "JitMemory.h"
 #include "PH_Vita.h"
 #include "SH_Vita.h"
@@ -44,6 +45,10 @@ namespace
 	constexpr const char* DATA_PATH = "ux0:data/VitaPS2";
 	constexpr const char* GAMES_PATH = "ux0:data/VitaPS2/games";
 	constexpr const char* SETTINGS_PATH = "ux0:data/VitaPS2/settings";
+	constexpr const char* LOG_PATH = "ux0:data/VitaPS2/log.txt";
+	constexpr const char* BENCHMARK_PATH = "ux0:data/VitaPS2/benchmark.txt";
+	constexpr const char* BUILTIN_TEST = "app0:gs_test.elf";
+	constexpr const char* BUILTIN_TEST_NAME = "[Built-in] GS self test";
 	constexpr size_t JIT_POOL_SIZE = 40 * 1024 * 1024;
 
 	constexpr unsigned int COLOR_WHITE = RGBA8(255, 255, 255, 255);
@@ -255,7 +260,53 @@ namespace
 			closedir(dir);
 		}
 		std::sort(games.begin(), games.end());
+		games.insert(games.begin(), BUILTIN_TEST_NAME);
 		return games;
+	}
+
+	// Runs the renderer benchmark on the device and shows/saves the results.
+	void RunBenchmarkScreen()
+	{
+		std::vector<std::string> lines;
+		auto draw = [&](const char* status) {
+			vita2d_start_drawing();
+			vita2d_clear_screen();
+			vita2d_pgf_draw_text(g_font, 30, 45, COLOR_ACCENT, 1.3f, "GS benchmark (Mpix/s)");
+			for(size_t i = 0; i < lines.size(); i++)
+			{
+				vita2d_pgf_draw_text(g_font, 30, 90 + static_cast<int>(i) * 28, COLOR_WHITE, 0.9f, lines[i].c_str());
+			}
+			vita2d_pgf_draw_text(g_font, 30, 520, COLOR_GREY, 0.9f, status);
+			vita2d_end_drawing();
+			vita2d_swap_buffers();
+		};
+
+		FILE* file = std::fopen(BENCHMARK_PATH, "w");
+		for(uint32_t threads : {1u, 2u, 3u})
+		{
+			char header[64];
+			std::snprintf(header, sizeof(header), "-- %u rasterizer thread(s) --", threads);
+			lines.push_back(header);
+			if(file) std::fprintf(file, "%s\n", header);
+			draw("Running... (about 20 seconds)");
+			RunGsBenchmark(1.0, threads, [&](const GS_BENCHMARK_RESULT& result) {
+				char line[128];
+				std::snprintf(line, sizeof(line), "%-46s %7.1f  (%5.1f frames/s)", result.name.c_str(), result.mpixelsPerSecond, result.framesPerSecond);
+				lines.push_back(line);
+				if(file) std::fprintf(file, "%s\n", line);
+				std::printf("benchmark: %s\n", line);
+				draw("Running... (about 20 seconds)");
+			});
+		}
+		if(file) std::fclose(file);
+
+		uint32_t previous = ~0u;
+		while(true)
+		{
+			auto input = ReadInput(previous);
+			if(input.pressed & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE)) break;
+			draw("Saved to ux0:data/VitaPS2/benchmark.txt - press X to go back");
+		}
 	}
 
 	// Returns the full path of the selected game, or an empty string to quit.
@@ -277,7 +328,11 @@ namespace
 				if(input.pressed & SCE_CTRL_UP) selected = (selected + count - 1) % count;
 				if(input.pressed & SCE_CTRL_RIGHT) selected = std::min(selected + visible, count - 1);
 				if(input.pressed & SCE_CTRL_LEFT) selected = std::max(selected - visible, 0);
-				if(input.pressed & SCE_CTRL_CROSS) return std::string(GAMES_PATH) + "/" + games[selected];
+				if(input.pressed & SCE_CTRL_CROSS)
+				{
+					if(games[selected] == BUILTIN_TEST_NAME) return BUILTIN_TEST;
+					return std::string(GAMES_PATH) + "/" + games[selected];
+				}
 			}
 			if(input.pressed & SCE_CTRL_TRIANGLE)
 			{
@@ -285,6 +340,11 @@ namespace
 				selected = 0;
 			}
 			if(input.pressed & SCE_CTRL_START) return std::string();
+			if(input.pressed & SCE_CTRL_SELECT)
+			{
+				RunBenchmarkScreen();
+				previous = ~0u;
+			}
 
 			if(selected < scroll) scroll = selected;
 			if(selected >= scroll + visible) scroll = selected - visible + 1;
@@ -307,7 +367,7 @@ namespace
 				vita2d_pgf_draw_text(g_font, 30, y, (i == selected) ? COLOR_WHITE : COLOR_GREY, 1.0f, games[i].c_str());
 			}
 			vita2d_pgf_draw_text(g_font, 30, 530, COLOR_GREY, 0.85f,
-			                     "X: boot   TRIANGLE: refresh   START: quit   In game: SELECT+START = menu, SELECT+L = stats");
+			                     "X: boot  TRIANGLE: refresh  SELECT: GS benchmark  START: quit  |  In game: SELECT+START menu");
 			vita2d_end_drawing();
 			vita2d_swap_buffers();
 		}
@@ -406,10 +466,12 @@ namespace
 			DrawScreen(screen, width, height, settings.stretch);
 			if(settings.showStats)
 			{
-				vita2d_draw_rectangle(0, 0, 330, 58, RGBA8(0, 0, 0, 160));
+				vita2d_draw_rectangle(0, 0, 360, 82, RGBA8(0, 0, 0, 160));
 				vita2d_pgf_draw_textf(g_font, 8, 22, COLOR_WHITE, 0.8f, "VM %.1f fps  out %.1f fps  %ux%u",
 				                      vmFps, presentFps, width, height);
-				vita2d_pgf_draw_textf(g_font, 8, 46, COLOR_GREY, 0.8f, "JIT %u/%u KB",
+				vita2d_pgf_draw_textf(g_font, 8, 46, COLOR_GREY, 0.8f, "GS %.1f ms/frame  EE idle %.0f%%",
+				                      session->GetGsRasterMicros() / 1000.0f, session->GetEeIdleRatio() * 100.0f);
+				vita2d_pgf_draw_textf(g_font, 8, 70, COLOR_GREY, 0.8f, "JIT %u/%u KB",
 				                      static_cast<unsigned int>(VitaJit_GetUsedBytes() / 1024),
 				                      static_cast<unsigned int>(VitaJit_GetCapacity() / 1024));
 			}
@@ -425,6 +487,12 @@ namespace
 
 int main()
 {
+	sceIoMkdir(DATA_PATH, 0777);
+	// Everything printed (ours and Play!'s) goes to a log file for bug reports.
+	if(std::freopen(LOG_PATH, "w", stdout)) setvbuf(stdout, nullptr, _IOLBF, 0);
+	if(std::freopen(LOG_PATH, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
+	std::printf("VitaPS2 starting\n");
+
 	scePowerSetArmClockFrequency(444);
 	scePowerSetBusClockFrequency(222);
 	scePowerSetGpuClockFrequency(222);

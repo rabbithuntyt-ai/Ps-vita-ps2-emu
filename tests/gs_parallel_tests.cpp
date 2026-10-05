@@ -7,7 +7,7 @@
 #include <cstring>
 #include <random>
 #include "EmuSession.h"
-#include "TestGs.h"
+#include "GsDriver.h"
 
 using namespace GsTest;
 

@@ -146,6 +146,19 @@ void CEmuSession::SetSpeedHacks(const SPEED_HACKS& hacks)
 	}
 }
 
+uint32_t CEmuSession::GetGsRasterMicros()
+{
+	auto gs = static_cast<CGSH_Software*>(m_vm->GetGSHandler());
+	return gs ? gs->GetLastFrameRasterMicros() : 0;
+}
+
+float CEmuSession::GetEeIdleRatio()
+{
+	auto info = m_vm->GetCpuUtilisationInfo();
+	if(info.eeTotalTicks <= 0) return 0;
+	return static_cast<float>(info.eeIdleTicks) / static_cast<float>(info.eeTotalTicks + info.eeIdleTicks);
+}
+
 void CEmuSession::Pause()
 {
 	m_vm->Pause();

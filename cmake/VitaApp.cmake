@@ -56,4 +56,5 @@ vita_create_vpk(${VITA_APP_NAME}.vpk ${VITA_TITLEID} eboot.bin
 	FILE sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
 	FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
 	FILE ${PLAY_DIR}/GameConfig.xml GameConfig.xml
+	FILE assets/gs_test.elf gs_test.elf
 )

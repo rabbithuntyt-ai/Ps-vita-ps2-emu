@@ -2,6 +2,7 @@
 #include "GsMemory.h"
 #include "gs/GsTransferRange.h"
 #include "xxhash.h"
+#include <chrono>
 #include <cstring>
 #include <cstdlib>
 
@@ -43,9 +44,20 @@ void CGSH_Software::SetRasterizerThreads(uint32 threads)
 	m_rasterizerThreads = std::max<uint32>(threads, 1);
 }
 
+namespace
+{
+	inline uint64 NowMicros()
+	{
+		return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	}
+}
+
 void CGSH_Software::FlushRendering()
 {
-	if(m_parallel) m_parallel->Flush();
+	if(!m_parallel) return;
+	uint64 start = NowMicros();
+	m_parallel->Flush();
+	m_frameRasterMicros += NowMicros() - start;
 }
 
 void CGSH_Software::Submit(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoftwareRasterizer::VERTEX* vertices)
@@ -92,6 +104,8 @@ void CGSH_Software::UpdateRowFilter()
 void CGSH_Software::MarkNewFrame()
 {
 	FlushRendering();
+	m_lastFrameRasterMicros = static_cast<uint32>(std::min<uint64>(m_frameRasterMicros, 0xFFFFFFFF));
+	m_frameRasterMicros = 0;
 	m_frameCounter++;
 	m_skipThisFrame = (m_frameSkip != 0) && ((m_frameCounter % (m_frameSkip + 1)) != 0);
 	UpdateRowFilter();

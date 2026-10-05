@@ -1,4 +1,5 @@
 /build*/
 *.ppm
 *.elf
+!assets/*.elf
 __pycache__/

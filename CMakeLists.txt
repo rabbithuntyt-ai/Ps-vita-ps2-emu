@@ -75,6 +75,9 @@ add_library(gsh_software STATIC
 	src/gs/TextureCache.h
 	src/gs/GsSurface.h
 	src/gs/GsMemory.h
+	src/gs/GsDriver.h
+	src/gs/GsBenchmark.cpp
+	src/gs/GsBenchmark.h
 )
 target_include_directories(gsh_software PUBLIC src/gs ${PLAY_DIR}/Source)
 target_link_libraries(gsh_software PUBLIC PlayCore)

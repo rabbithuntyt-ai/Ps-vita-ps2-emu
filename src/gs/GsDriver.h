@@ -1,6 +1,7 @@
 #pragma once
 
-// Shared helpers to drive CGSH_Software directly with GS register writes.
+// Helpers to drive CGSH_Software directly with GS register writes (tests,
+// benchmark). CTestGs runs the GS without its own thread.
 
 #include <cstring>
 #include "GSH_Software.h"

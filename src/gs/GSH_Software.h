@@ -3,6 +3,7 @@
 #include <functional>
 #include <vector>
 #include "gs/GSHandler.h"
+#include <atomic>
 #include <memory>
 #include "SoftwareRasterizer.h"
 #include "ParallelRasterizer.h"
@@ -40,6 +41,12 @@ public:
 	uint32 GetPrimitiveCount() const
 	{
 		return m_primitiveCount;
+	}
+
+	// Time the GS spent rasterizing during the last completed frame (us).
+	uint32 GetLastFrameRasterMicros() const
+	{
+		return m_lastFrameRasterMicros.load();
 	}
 
 	// Speed hacks -------------------------------------------------------------
@@ -91,4 +98,6 @@ private:
 	uint32 m_frameSkip = 0;
 	uint32 m_frameCounter = 0;
 	bool m_skipThisFrame = false;
+	uint64 m_frameRasterMicros = 0;
+	std::atomic<uint32> m_lastFrameRasterMicros{0};
 };

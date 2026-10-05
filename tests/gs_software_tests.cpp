@@ -10,7 +10,7 @@
 #include "GSH_Software.h"
 #include "GsMemory.h"
 #include "EmuSession.h"
-#include "TestGs.h"
+#include "GsDriver.h"
 
 using namespace GsTest;
 
