@@ -4,8 +4,8 @@ An experimental PlayStation 2 emulator for the PlayStation Vita / PS TV.
 
 VitaPS2 runs the [Play!](https://github.com/jpd002/Play-) emulation core (EE and
 IOP recompilers, VU, SPU2, high-level emulated BIOS, so **no BIOS dump is
-needed**) on the Vita through its 32-bit ARM JIT, with a new portable
-**software Graphics Synthesizer** renderer and a native Vita frontend.
+needed**) on the Vita through its 32-bit ARM JIT, with new **GPU** and **software**
+Graphics Synthesizer renderers and a native vitaGL frontend.
 
 > **Set expectations:** the Vita's Cortex-A9 is roughly 10x slower than what
 > full-speed PS2 emulation needs on ARM. Commercial 3D games will run far
@@ -18,7 +18,8 @@ needed**) on the Vita through its 32-bit ARM JIT, with a new portable
 |---|---|
 | EE / IOP / VU / SPU2 / HLE BIOS | Play! core, unchanged except 3 small patches |
 | JIT on Vita (`sceKernelAllocMemBlockForVM` pool) | Implemented, needs hardware testing |
-| Software GS renderer | Implemented and unit tested (see below) |
+| GPU GS renderer (vitaGL, default) | Implemented, tested against the software renderer on the host; needs hardware testing |
+| Software GS renderer (accuracy fallback) | Implemented and unit tested (see below) |
 | Vita frontend (game list, display, controls, audio) | Implemented, needs hardware testing |
 | Host build + automated tests | Passing |
 | VPK build | CI with the official VitaSDK Docker image |
@@ -27,8 +28,12 @@ needed**) on the Vita through its 32-bit ARM JIT, with a new portable
 
 1. Requires HENkaku/Ensō with **Unsafe Homebrew enabled** (HENkaku Settings):
    the recompiler needs executable memory.
-2. Install `VitaPS2.vpk` (from the CI artifacts) with VitaShell.
-3. Copy games (`.iso`, `.cso`, `.chd`, `.isz`, `.cue`, `.mds`, `.bin`) or
+2. Requires the runtime shader compiler `ur0:data/libshacccg.suprx` (used by
+   vitaGL; many Vita ports need it). Extract it once with
+   [ShaRKBR33D](https://github.com/Rinnegatamante/ShaRKBR33D). VitaPS2 shows an
+   explanation screen if it is missing.
+3. Install `VitaPS2.vpk` (from the CI artifacts) with VitaShell.
+4. Copy games (`.iso`, `.cso`, `.chd`, `.isz`, `.cue`, `.mds`, `.bin`) or
    homebrew (`.elf`) to `ux0:data/VitaPS2/games/`.
 
 ### Controls
@@ -39,7 +44,7 @@ needed**) on the Vita through its 32-bit ARM JIT, with a new portable
 | L / R | L1 / R1 |
 | Rear touch left / right half | L2 / R2 |
 | Front touch bottom-left / bottom-right corner | L3 / R3 |
-| SELECT + START | pause menu: speed hacks, aspect, overlay, quit |
+| SELECT + START | pause menu: renderer, speed hacks, aspect, overlay, quit |
 | SELECT + L | toggle performance overlay |
 
 Settings chosen in the pause menu are saved per game in
@@ -49,7 +54,29 @@ On PS TV, a DualShock 3/4's L2/R2/L3/R3 work directly.
 
 ## Performance work
 
-The renderer is built for the Vita's Cortex-A9 (see `gs_benchmark`):
+### GPU renderer (default)
+
+Measured on hardware, the A9 can rasterize only 1-5 Mpix/s of textured,
+blended PS2 primitives in software, far below what 3D games draw. The GPU
+renderer (`src/gs/hw/`) translates GS primitives into fixed-function OpenGL
+draws (vitaGL on the Vita):
+
+* GS framebuffers live in GPU render targets; GS memory is synchronized only
+  when the CPU side needs it (transfers, CLUT loads, textures of a different
+  layout), so typical frames never leave the GPU.
+* Textures are decoded with the software renderer's texture cache and cached
+  as GL textures; render-to-texture effects sample render targets directly.
+* GS blending `(A-B)*C+D`, alpha/depth tests, color masks and texture
+  functions map onto GL blend equations and the texture combiner (0x80 = 1.0
+  handled through combiner scales). Perspective (STQ) uses clip-space
+  `w = 1/Q`.
+* The GS runs on the main thread (which owns the GL context), freeing a CPU
+  core compared to the software renderer.
+* Host tests render scenes with both renderers through Mesa and compare them.
+
+### Software renderer (Pause menu -> Renderer)
+
+Built for the Vita's Cortex-A9 (see `gs_benchmark`):
 
 * **Span-based rasterizer**: exact integer scanline extents, fixed-point
   stepping, span loops specialized per state (texture/filter/depth/format/blend).
@@ -98,6 +125,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/vitaps2_host game.iso --frames 300 --out frame.ppm
+./build/vitaps2_host game.iso --frames 300 --out frame.ppm --hw   # GPU renderer via Mesa
 ```
 
 Tests:
@@ -109,7 +137,10 @@ Tests:
 * `gs_parallel_tests` — multi-threaded rendering is bit-identical to single
   threaded rendering.
 * `gs_benchmark [seconds] [threads]` — renderer throughput.
-* `elf_boot_test` — generates a PS2 program (`tools/make_test_elf.py`), boots
+* `gs_hardware_tests` — GPU renderer vs. software renderer on the same
+  scenes (Mesa OSMesa, needs `libosmesa6-dev`).
+* `ui_render_test` — menu/overlay drawing layer.
+* `elf_boot_test`, `elf_boot_test_hw` — generates a PS2 program (`tools/make_test_elf.py`), boots
   it through the full emulator and checks the rendered frame.
 
 ## Layout
@@ -118,6 +149,8 @@ Tests:
 external/Play     Play! emulator (git submodule, pinned)
 patches/          Minimal Vita patches for Play!/Framework/CodeGen, applied at configure time
 src/gs/           Portable software GS renderer (CGSH_Software, CSoftwareRasterizer)
+src/gs/hw/        GPU GS renderer (CGSH_Hardware, OpenGL fixed-function / vitaGL)
+src/ui/           2D drawing layer (menus, overlays) and embedded font
 src/common/       Emulator session, frame mailbox, JIT pool allocator
 src/vita/         Vita frontend: app/UI, JIT memory, controls, audio
 src/host/         Headless host runner

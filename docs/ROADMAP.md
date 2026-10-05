@@ -54,7 +54,9 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 - [ ] Dirty-region rendering: reuse pixels when a region's draws are unchanged
 - [ ] Effect detection: cheap or skippable full-screen blur/bloom/DOF passes
 - [ ] GPU-assisted fill for large textured/blended primitives (hybrid GS)
-- [ ] Optional full GXM hardware renderer for games that don't need GS-memory accuracy
+- [x] GPU (vitaGL) renderer with render targets and on-demand GS memory sync
+- [ ] GPU renderer: fog, region clamp modes, alpha test fail modes, 16-bit dithering, depth buffer readback
+- [ ] GPU renderer: upscaling (render targets at 2x where VRAM allows)
 - [ ] Upscaled UI/2D option where it is cheap
 
 ## Phase 5: CPU emulation speed
