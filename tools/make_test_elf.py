@@ -13,7 +13,12 @@ tags into VU1 memory (UNPACK) and starts the program (MSCAL). The program
 transforms the vertices with vector math (LQ/ADD/FTOI/SQ) and draws them
 with XGKICK. This exercises VIF1, the VU recompiler and GIF PATH1.
 
-usage: make_test_elf.py out.elf [--vu1]
+With --vu1-wait the microprogram first spins until a flag in VU1 memory
+becomes non-zero; the EE delivers the flag with a second VIF1 UNPACK only
+after the next vblank, while the program is running (allowed on hardware).
+This catches emulators that wait for VU1 at vblank (deadlock).
+
+usage: make_test_elf.py out.elf [--vu1 | --vu1-wait]
 """
 import struct
 import sys
@@ -117,14 +122,29 @@ def vu_lq(dest, ft, imm, vi): return (imm & 0x7FF) | (vi << 11) | (ft << 16) | (
 def vu_sq(dest, fs, imm, vi): return 0x02000000 | (imm & 0x7FF) | (fs << 11) | (vi << 16) | (dest << 21)
 def vu_iaddiu(it, vi, imm): return 0x10000000 | (it << 16) | (vi << 11) | (imm & 0x7FF) | (((imm & 0x7800) >> 11) << 21)
 def vu_xgkick(vi): return 0x800006FC | (vi << 11)
+def vu_ilw(dest, it, imm, vi): return 0x08000000 | (imm & 0x7FF) | (vi << 11) | (it << 16) | (dest << 21)
+def vu_ibeq(it, vi, off): return 0x50000000 | (off & 0x7FF) | (vi << 11) | (it << 16)
 VU_E_BIT = 0x40000000
 
 IN_COLOR, IN_POS, IN_OFFSET, OUT_BASE, TRI_TAG = 32, 35, 38, 12, 11
 
 
-def vu1_microprogram():
+FLAG = 60
+DEST_X = 8
+
+
+def vu1_microprogram(wait=False):
     """Returns the program as a list of (upper, lower) pairs."""
-    prog = [(vu_upper_nop(), vu_lq(DEST_XYZW, 3, IN_OFFSET, 0))]
+    prog = []
+    if wait:
+        # spin: ILW.x vi2, FLAG(vi0); IBEQ vi2, vi0, spin
+        prog += [
+            (vu_upper_nop(), vu_ilw(DEST_X, 2, FLAG, 0)),
+            (vu_upper_nop(), vu_lower_nop()),
+            (vu_upper_nop(), vu_ibeq(2, 0, -3)),
+            (vu_upper_nop(), vu_lower_nop()),
+        ]
+    prog += [(vu_upper_nop(), vu_lq(DEST_XYZW, 3, IN_OFFSET, 0))]
     for v in range(3):
         prog += [
             (vu_upper_nop(), vu_lq(DEST_XYZW, 1, IN_COLOR + v, 0)),
@@ -183,12 +203,21 @@ def vu1_memory_image():
     return setup, inputs
 
 
-def vif1_packet():
+def vif1_flag_packet(value):
+    words = [(0x01 << 24) | 0x0101, (0x6C << 24) | (1 << 16) | FLAG, value, 0, 0, 0]
+    while len(words) % 4 != 0:
+        words.append(0)
+    return struct.pack("<%dI" % len(words), *words)
+
+
+def vif1_packet(wait=False):
     words = []
     words.append((0x01 << 24) | 0x0101)                         # STCYCL CL=1 WL=1
+    if wait:
+        words += [(0x6C << 24) | (1 << 16) | FLAG, 0, 0, 0, 0]  # clear the flag
     while len(words) % 2 != 1:                                  # MPG data must be 64-bit aligned
         words.append(0)
-    prog = vu1_microprogram()
+    prog = vu1_microprogram(wait)
     words.append((0x4A << 24) | (len(prog) << 16) | 0)          # MPG at 0
     for upper, lower in prog:
         words += [lower, upper]
@@ -202,7 +231,7 @@ def vif1_packet():
     return struct.pack("<%dI" % len(words), *words)
 
 
-def build(vu1=False):
+def build(vu1=False, wait=False):
     a = Asm()
     # SetGsCrt(interlace=1, NTSC, field mode)
     a.emit(ori(V1, ZERO, 2), ori(A0, ZERO, 1), ori(A1, ZERO, 2), ori(A2, ZERO, 0), SYSCALL, NOP)
@@ -213,43 +242,49 @@ def build(vu1=False):
     a.li(T1, 656 | (50 << 12) | (3 << 23)); a.emit(sw(T1, 0x80, T0))
     a.li(T1, 2559 | (447 << 12)); a.emit(sw(T1, 0x84, T0))
 
-    a.label("loop")
-    a.li(T2, 0x10009000 if vu1 else 0x1000A000)                 # D1 (VIF1) or D2 (GIF) channel
-    a.fixups.append(None)  # placeholder removed below
-    a.fixups.pop()
-    packet_li_index = len(a.words)
-    a.li(T1, 0)                                                 # MADR, patched below
-    a.emit(sw(T1, 0x10, T2))
-    qwc_li_index = len(a.words)
-    a.li(T1, 0)                                                 # QWC, patched below
-    a.emit(sw(T1, 0x20, T2))
-    a.li(T1, 0x101); a.emit(sw(T1, 0x00, T2))                   # CHCR: from memory, STR
-    a.label("wait_dma")
-    a.emit(lw(T1, 0, T2), andi(T1, T1, 0x100))
-    a.branch(bne, T1, ZERO, "wait_dma"); a.emit(NOP)
+    patches = []  # (MADR li index, QWC li index, packet)
 
-    a.li(T0, 0x12001000)                                        # GS CSR
-    a.li(T1, 8); a.emit(sw(T1, 0, T0))                          # acknowledge VSINT
-    a.label("wait_vsync")
-    a.emit(lw(T1, 0, T0), andi(T1, T1, 8))
-    a.branch(beq, T1, ZERO, "wait_vsync"); a.emit(NOP)
+    def send_and_wait_vsync(tag, packet):
+        a.li(T2, 0x10009000 if vu1 else 0x1000A000)             # D1 (VIF1) or D2 (GIF) channel
+        madr = len(a.words)
+        a.li(T1, 0)                                             # MADR, patched below
+        a.emit(sw(T1, 0x10, T2))
+        qwc = len(a.words)
+        a.li(T1, 0)                                             # QWC, patched below
+        a.emit(sw(T1, 0x20, T2))
+        a.li(T1, 0x101); a.emit(sw(T1, 0x00, T2))               # CHCR: from memory, STR
+        a.label("wait_dma" + tag)
+        a.emit(lw(T1, 0, T2), andi(T1, T1, 0x100))
+        a.branch(bne, T1, ZERO, "wait_dma" + tag); a.emit(NOP)
+        a.li(T0, 0x12001000)                                    # GS CSR
+        a.li(T1, 8); a.emit(sw(T1, 0, T0))                      # acknowledge VSINT
+        a.label("wait_vsync" + tag)
+        a.emit(lw(T1, 0, T0), andi(T1, T1, 8))
+        a.branch(beq, T1, ZERO, "wait_vsync" + tag); a.emit(NOP)
+        patches.append((madr, qwc, packet))
+
+    a.label("loop")
+    send_and_wait_vsync("", vif1_packet(wait) if vu1 else gif_packet())
+    if wait:
+        # The program is spinning on the flag: release it after the vblank.
+        send_and_wait_vsync("_flag", vif1_flag_packet(1))
     a.emit(j(a.labels["loop"]), NOP)
     a.resolve()
-
-    code = b"".join(struct.pack("<I", w) for w in a.words)
-    code += b"\0" * ((-len(code)) % 16)
-    packet_addr = BASE + len(code)
-    packet = vif1_packet() if vu1 else gif_packet()
 
     def patch_li(index, value):
         a.words[index] = lui(T1, value >> 16)
         a.words[index + 1] = ori(T1, T1, value & 0xFFFF)
 
-    patch_li(packet_li_index, packet_addr)
-    patch_li(qwc_li_index, len(packet) // 16)
+    code_size = len(a.words) * 4
+    code_size += (-code_size) % 16
+    data = b""
+    for madr, qwc, packet in patches:
+        patch_li(madr, BASE + code_size + len(data))
+        patch_li(qwc, len(packet) // 16)
+        data += packet
     code = b"".join(struct.pack("<I", w) for w in a.words)
     code += b"\0" * ((-len(code)) % 16)
-    return code + packet
+    return code + data
 
 
 def write_elf(path, image):
@@ -267,4 +302,5 @@ def write_elf(path, image):
 
 if __name__ == "__main__":
     args = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
-    write_elf(args[0] if args else "gs_test.elf", build(vu1="--vu1" in sys.argv))
+    wait = "--vu1-wait" in sys.argv
+    write_elf(args[0] if args else "gs_test.elf", build(vu1=wait or "--vu1" in sys.argv, wait=wait))

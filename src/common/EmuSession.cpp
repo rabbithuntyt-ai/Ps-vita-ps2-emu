@@ -241,6 +241,10 @@ CEmuSession::DEBUG_STATE CEmuSession::GetDebugState()
 	state.intcStat = m_vm->m_ee->m_intc.GetRegister(CINTC::INTC_STAT);
 	state.intcMask = m_vm->m_ee->m_intc.GetRegister(CINTC::INTC_MASK);
 	state.dmacStat = m_vm->m_ee->m_dmac.GetRegister(CDMAC::D_STAT);
+	auto& vpu1 = *m_vm->m_ee->m_vpu1;
+	state.vu1Start = vpu1.GetProgramStart();
+	state.vu1Pc = vpu1.GetCurrentPc();
+	state.vu1RunMs = vpu1.GetProgramRunMs();
 	return state;
 }
 

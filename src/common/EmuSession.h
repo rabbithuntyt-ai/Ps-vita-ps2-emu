@@ -100,6 +100,8 @@ public:
 		uint32_t iopPc = 0, iopRa = 0;
 		int32_t iopThread = -1;
 		uint32_t intcStat = 0, intcMask = 0, dmacStat = 0;
+		// VU1: microprogram start, current PC, ms it has been running (0: idle).
+		uint32_t vu1Start = 0, vu1Pc = 0, vu1RunMs = 0;
 	};
 	DEBUG_STATE GetDebugState();
 

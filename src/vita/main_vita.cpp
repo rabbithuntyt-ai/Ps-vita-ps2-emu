@@ -662,11 +662,12 @@ namespace
 					std::vector<std::pair<uint32_t, uint32_t>> hottest(stallPcs.begin(), stallPcs.end());
 					std::sort(hottest.begin(), hottest.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
 					auto debug = session->GetDebugState();
-					char text[256];
-					int length = std::snprintf(text, sizeof(text), "no output %us: EE pc %08X ra %08X  IOP pc %08X ra %08X thr %d  INTC %X/%X  DMAC %08X  EE hot:",
+					char text[320];
+					int length = std::snprintf(text, sizeof(text), "no output %us: EE pc %08X ra %08X  IOP pc %08X ra %08X thr %d  INTC %X/%X  DMAC %08X  VU1 %04X pc %04X %ums  EE hot:",
 					                           static_cast<unsigned int>(stalledFor / 1000000), debug.eePc, debug.eeRa, debug.iopPc,
-					                           debug.iopRa, debug.iopThread, debug.intcStat, debug.intcMask, debug.dmacStat);
-					for(size_t i = 0; i < std::min<size_t>(hottest.size(), 4) && length < 230; i++)
+					                           debug.iopRa, debug.iopThread, debug.intcStat, debug.intcMask, debug.dmacStat,
+					                           debug.vu1Start, debug.vu1Pc, debug.vu1RunMs);
+					for(size_t i = 0; i < std::min<size_t>(hottest.size(), 4) && length < 290; i++)
 					{
 						length += std::snprintf(text + length, sizeof(text) - length, " %08X(%u)", hottest[i].first, hottest[i].second);
 					}

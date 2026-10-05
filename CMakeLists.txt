@@ -240,6 +240,27 @@ else()
 				-DRUNNER_ARGS=--mtvu
 				-DSUFFIX=_mtvu
 				-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/elf_boot_test.cmake)
+		# VU1 program spinning until the EE feeds it after a vblank (must not deadlock)
+		add_test(NAME elf_boot_test_vu1_wait
+			COMMAND ${CMAKE_COMMAND}
+				-DPYTHON=${Python3_EXECUTABLE}
+				-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+				-DRUNNER=$<TARGET_FILE:vitaps2_host>
+				"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
+				-DELF_ARGS=--vu1-wait
+				-DSUFFIX=_vu1_wait
+				-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/elf_boot_test.cmake)
+		add_test(NAME elf_boot_test_vu1_wait_mtvu
+			COMMAND ${CMAKE_COMMAND}
+				-DPYTHON=${Python3_EXECUTABLE}
+				-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+				-DRUNNER=$<TARGET_FILE:vitaps2_host>
+				"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
+				-DELF_ARGS=--vu1-wait
+				-DRUNNER_ARGS=--mtvu
+				-DSUFFIX=_vu1_wait_mtvu
+				-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/elf_boot_test.cmake)
+		set_tests_properties(elf_boot_test_vu1_wait elf_boot_test_vu1_wait_mtvu PROPERTIES TIMEOUT 180)
 		if(TARGET gsh_hardware)
 			add_test(NAME elf_boot_test_hw
 				COMMAND ${CMAKE_COMMAND}

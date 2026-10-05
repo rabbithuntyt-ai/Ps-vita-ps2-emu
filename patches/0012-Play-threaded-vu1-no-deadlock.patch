@@ -1,0 +1,154 @@
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -355,8 +355,10 @@ void CSubSystem::CountTicks(int ticks)
+ 
+ void CSubSystem::NotifyVBlankStart()
+ {
+-	//Frames are complete when displayed: wait for a threaded VU1
+-	m_vpu1->Sync();
++	//Frames are complete when displayed: give a threaded VU1 some time to
++	//finish. Not indefinitely: a program can run until VIF1 (driven by the
++	//EE) delivers more data, which would deadlock.
++	m_vpu1->SyncFor(20);
+ 	m_timer.NotifyVBlankStart();
+ 	m_intc.AssertLine(CINTC::INTC_LINE_VBLANK_START);
+ 	m_os->GetLibMc2().NotifyVBlankStart();
+@@ -740,8 +742,10 @@ void CSubSystem::CopyVuState(CMIPS& dst, const CMIPS& src)
+ 
+ uint32 CSubSystem::HandleVu1AreaRead(uint32 offset)
+ {
+-	m_vpu1->Sync();
+-	assert(!m_vpu1->IsVuRunning());
++	//Games may poll VU1 registers while a program runs (allowed on
++	//hardware): don't wait for a threaded VU1 indefinitely.
++	m_vpu1->SyncFor(50);
++	assert(!m_vpu1->IsVuRunning() || m_vpu1->IsThreaded());
+ 	assert(offset < 0x400);
+ 	uint32 result = 0;
+ 	switch(offset)
+@@ -762,8 +766,10 @@ uint32 CSubSystem::HandleVu1AreaRead(uint32 offset)
+ 
+ void CSubSystem::HandleVu1AreaWrite(uint32 offset, uint32 value)
+ {
+-	m_vpu1->Sync();
+-	assert(!m_vpu1->IsVuRunning());
++	//Games may poll VU1 registers while a program runs (allowed on
++	//hardware): don't wait for a threaded VU1 indefinitely.
++	m_vpu1->SyncFor(50);
++	assert(!m_vpu1->IsVuRunning() || m_vpu1->IsThreaded());
+ 	assert(offset < 0x400);
+ 	if(offset >= 0 && offset <= 0x1FF)
+ 	{
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -1,5 +1,6 @@
+ #include "Vpu.h"
+ #include <algorithm>
++#include <chrono>
+ #include <cstring>
+ #include "make_unique.h"
+ #include "string_format.h"
+@@ -112,7 +113,9 @@ void CVpu::SetThreaded(bool threaded, const std::function<void()>& workerInit)
+ 	if(threaded == m_threaded) return;
+ 	if(m_threaded)
+ 	{
+-		Sync();
++		//Don't wait for the program to end (it may be waiting for data the
++		//EE would deliver): the worker stops between slices and a program
++		//still running continues on the EE thread.
+ 		{
+ 			std::lock_guard<std::mutex> lock(m_workerMutex);
+ 			m_stopWorker = true;
+@@ -120,6 +123,9 @@ void CVpu::SetThreaded(bool threaded, const std::function<void()>& workerInit)
+ 		m_workerCondition.notify_all();
+ 		m_worker.join();
+ 		m_threaded = false;
++		m_workPending = false;
++		FlushPendingXgKicks();
++		RaisePendingInterrupt();
+ 		return;
+ 	}
+ 	assert(m_vuState != VU_STATE_RUNNING);
+@@ -166,6 +172,27 @@ void CVpu::Sync()
+ 	RaisePendingInterrupt();
+ }
+ 
++bool CVpu::SyncFor(uint32 timeoutMs)
++{
++	if(!m_threaded) return true;
++	bool idle = false;
++	{
++		std::unique_lock<std::mutex> lock(m_workerMutex);
++		idle = m_idleCondition.wait_for(lock, std::chrono::milliseconds(timeoutMs),
++		                                [this]() { return !m_workPending && (m_vuState != VU_STATE_RUNNING); });
++	}
++	FlushPendingXgKicks();
++	RaisePendingInterrupt();
++	return idle;
++}
++
++uint32 CVpu::GetProgramRunMs() const
++{
++	if(m_vuState != VU_STATE_RUNNING) return 0;
++	auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++	return static_cast<uint32>(now - m_programStartMs.load());
++}
++
+ void CVpu::RaisePendingInterrupt()
+ {
+ 	if(m_pendingInterrupt.exchange(false))
+@@ -362,6 +389,8 @@ void CVpu::SetFbrst(uint32 fbrst)
+ void CVpu::ExecuteMicroProgram(uint32 nAddress)
+ {
+ 	CLog::GetInstance().Print(LOG_NAME, "Starting microprogram execution at 0x%08X.\r\n", nAddress);
++	m_programStart = nAddress;
++	m_programStartMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+ 
+ 	m_ctx->m_State.nPC = nAddress;
+ 	m_ctx->m_State.pipeTime = 0;
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -108,8 +108,24 @@ public:
+ 	//EE thread: waits for a running microprogram to end, then flushes its
+ 	//GIF packets and pending interrupt.
+ 	void Sync();
++	//EE thread: like Sync(), but gives up after timeoutMs (returns false if
++	//the microprogram is still running). For waits that are only there for
++	//timing: a program may legitimately run until the EE or VIF1 feeds it.
++	bool SyncFor(uint32 timeoutMs);
+ 	void FlushPendingXgKicks();
+ 
++	//Diagnostics (any thread, racy): start address of the current or last
++	//microprogram, how long it has been running and its current PC.
++	uint32 GetProgramStart() const
++	{
++		return m_programStart;
++	}
++	uint32 GetProgramRunMs() const;
++	uint32 GetCurrentPc() const
++	{
++		return m_ctx->m_State.nPC;
++	}
++
+ #ifdef DEBUGGER_INCLUDED
+ 	void SaveMiniState();
+ 	const MIPSSTATE& GetVuMiniState() const;
+@@ -164,12 +180,14 @@ protected:
+ 	std::condition_variable m_workerCondition;
+ 	std::condition_variable m_idleCondition;
+ 	bool m_workPending = false;
+-	bool m_stopWorker = false;
++	std::atomic<bool> m_stopWorker = false;
+ 	std::mutex m_kickMutex;
+ 	std::vector<std::vector<uint8>> m_pendingKicks;
+ 	std::atomic<bool> m_hasPendingKicks = false;
+ 	std::atomic<bool> m_pendingInterrupt = false;
+ 	uint32 m_fbrst = 0;
++	std::atomic<uint32> m_programStart = 0;
++	std::atomic<int64> m_programStartMs = 0;
+ 
+ 	CProfiler::ZoneHandle m_vuProfilerZone = 0;
+ };
