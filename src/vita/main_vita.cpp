@@ -135,6 +135,7 @@ namespace
 		bool showStats = true;
 		bool stretch = false; //fill the 16:9 screen instead of 4:3
 		bool softwareRenderer = false;
+		bool threadedVu1 = true; //VU1 microprograms on the third core
 	};
 
 	std::string SettingsPathFor(const std::string& gamePath)
@@ -160,6 +161,7 @@ namespace
 			else if(key == "show_stats") settings.showStats = value != 0;
 			else if(key == "stretch") settings.stretch = value != 0;
 			else if(key == "software_renderer") settings.softwareRenderer = value != 0;
+			else if(key == "threaded_vu1") settings.threadedVu1 = value != 0;
 		}
 		return settings;
 	}
@@ -172,7 +174,8 @@ namespace
 		     << "frame_skip=" << settings.frameSkip << "\n"
 		     << "show_stats=" << (settings.showStats ? 1 : 0) << "\n"
 		     << "stretch=" << (settings.stretch ? 1 : 0) << "\n"
-		     << "software_renderer=" << (settings.softwareRenderer ? 1 : 0) << "\n";
+		     << "software_renderer=" << (settings.softwareRenderer ? 1 : 0) << "\n"
+		     << "threaded_vu1=" << (settings.threadedVu1 ? 1 : 0) << "\n";
 	}
 
 	CEmuSession::SPEED_HACKS ToSpeedHacks(const GAME_SETTINGS& settings)
@@ -181,6 +184,7 @@ namespace
 		hacks.eeCycleRatePercent = settings.eeCycleRate;
 		hacks.interlacedRendering = settings.interlaced;
 		hacks.frameSkip = settings.frameSkip;
+		hacks.threadedVu1 = settings.threadedVu1;
 		return hacks;
 	}
 
@@ -215,6 +219,7 @@ namespace
 			ITEM_STRETCH,
 			ITEM_STATS,
 			ITEM_RENDERER,
+			ITEM_VU1_THREAD,
 			ITEM_QUIT,
 			ITEM_COUNT
 		};
@@ -251,6 +256,7 @@ namespace
 				case ITEM_STRETCH: settings.stretch = !settings.stretch; break;
 				case ITEM_STATS: settings.showStats = !settings.showStats; break;
 				case ITEM_RENDERER: settings.softwareRenderer = !settings.softwareRenderer; break;
+				case ITEM_VU1_THREAD: settings.threadedVu1 = !settings.threadedVu1; break;
 				case ITEM_QUIT:
 					if(input.pressed & SCE_CTRL_CROSS)
 					{
@@ -270,19 +276,20 @@ namespace
 				std::snprintf(lines[ITEM_STRETCH], 96, "Aspect: %s", settings.stretch ? "Stretch 16:9" : "4:3");
 				std::snprintf(lines[ITEM_STATS], 96, "Performance overlay: %s", settings.showStats ? "On" : "Off");
 				std::snprintf(lines[ITEM_RENDERER], 96, "Renderer: %s  (applies when the game restarts)", settings.softwareRenderer ? "Software" : "GPU");
+				std::snprintf(lines[ITEM_VU1_THREAD], 96, "VU1 on its own core: %s  (faster 3D; turn off if a game glitches)", settings.threadedVu1 ? "On" : "Off");
 				std::snprintf(lines[ITEM_QUIT], 96, "Quit to game list");
 
 				BeginFrame();
 				DrawScreen(screen, settings.stretch);
-				Gfx::Rect(90, 70, 780, 400, Gfx::Rgba(10, 12, 24, 220));
-				Gfx::Text(120, 110, COLOR_ACCENT, 1.1f, "Paused");
+				Gfx::Rect(90, 60, 780, 440, Gfx::Rgba(10, 12, 24, 220));
+				Gfx::Text(120, 100, COLOR_ACCENT, 1.1f, "Paused");
 				for(int i = 0; i < ITEM_COUNT; i++)
 				{
-					int y = 160 + i * 34;
+					int y = 145 + i * 32;
 					if(i == selected) Gfx::Rect(110, y - 24, 740, 32, COLOR_SELECTION);
 					Gfx::Text(125, y, (i == selected) ? COLOR_WHITE : COLOR_GREY, 0.8f, lines[i]);
 				}
-				Gfx::Text(120, 450, COLOR_GREY, 0.7f, "LEFT/RIGHT: change   X: select   O: resume");
+				Gfx::Text(120, 480, COLOR_GREY, 0.7f, "LEFT/RIGHT: change   X: select   O: resume");
 				EndFrame();
 			}
 		}
@@ -432,6 +439,8 @@ namespace
 		config.resourcesPath = "app0:";
 		config.limitFrameRate = true;
 		config.padFactory = CPH_Vita::GetFactoryFunction(&pad);
+		// Third core: VU1 (the audio thread there is light)
+		config.vu1ThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */); };
 		config.soundFactory = &CSH_Vita::HandlerFactory;
 		config.interlacedRendering = settings.interlaced;
 		config.frameSkip = settings.frameSkip;

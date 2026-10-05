@@ -3,7 +3,7 @@
 // of emulated frames and writes the last displayed frame to a PPM file.
 //
 //   vitaps2_host <game.elf|game.iso> [--frames N] [--timeout SECONDS] [--out frame.ppm]
-//                [--gs-threads N] [--interlaced] [--frameskip N] [--hw]
+//                [--gs-threads N] [--interlaced] [--frameskip N] [--hw] [--mtvu]
 //
 // --hw renders with the GPU renderer on an offscreen Mesa context, pumped
 // from the main thread exactly like the Vita frontend does.
@@ -66,6 +66,7 @@ int main(int argc, char** argv)
 	bool interlaced = false;
 	uint32_t frameSkip = 0;
 	bool hardware = false;
+	bool threadedVu1 = false;
 	for(int i = 2; i < argc; i++)
 	{
 		if(!std::strcmp(argv[i], "--frames") && (i + 1 < argc)) targetFrames = std::strtoull(argv[++i], nullptr, 10);
@@ -75,6 +76,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--interlaced")) interlaced = true;
 		else if(!std::strcmp(argv[i], "--frameskip") && (i + 1 < argc)) frameSkip = std::atoi(argv[++i]);
 		else if(!std::strcmp(argv[i], "--hw")) hardware = true;
+		else if(!std::strcmp(argv[i], "--mtvu")) threadedVu1 = true;
 	}
 
 	const char* home = std::getenv("HOME");
@@ -133,6 +135,12 @@ int main(int argc, char** argv)
 	{
 		CEmuSession session(config);
 		sessionPtr = &session;
+		if(threadedVu1)
+		{
+			auto hacks = session.GetSpeedHacks();
+			hacks.threadedVu1 = true;
+			session.SetSpeedHacks(hacks);
+		}
 		session.Boot(bootPath);
 
 		ThreadProfiler::Sample();

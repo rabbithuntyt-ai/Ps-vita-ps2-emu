@@ -36,6 +36,8 @@ public:
 		// same thread before the renderer is destroyed.
 		std::function<void()> gsPump;
 		std::function<void()> gsShutdown;
+		// Runs first on the VU1 worker thread (e.g. to pin it to a core).
+		std::function<void()> vu1ThreadInit;
 		CPadHandler::FactoryFunction padFactory;
 		CSoundHandler::FactoryFunction soundFactory;
 	};
@@ -45,6 +47,7 @@ public:
 		uint32_t eeCycleRatePercent = 100; // <100 underclocks the EE: less work per frame
 		bool interlacedRendering = false;  // draw alternate lines per frame
 		uint32_t frameSkip = 0;            // skip N of N+1 frames
+		bool threadedVu1 = false;          // run VU1 microprograms on their own thread/core
 	};
 
 	explicit CEmuSession(const CONFIG&);
@@ -103,6 +106,7 @@ private:
 	std::unique_ptr<CPS2VM> m_vm;
 	std::function<void()> m_gsPump;
 	std::function<void()> m_gsShutdown;
+	std::function<void()> m_vu1ThreadInit;
 	CFrameMailbox m_frames;
 	std::atomic<uint64_t> m_vmFrames{0};
 	Framework::CSignal<void()>::Connection m_newFrameConnection;

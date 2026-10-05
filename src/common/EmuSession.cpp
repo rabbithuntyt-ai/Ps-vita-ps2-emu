@@ -10,6 +10,8 @@
 #include "PS2VM_Preferences.h"
 #include "PathUtils.h"
 #include "ee/PS2OS.h"
+#include "ee/Vpu.h"
+#include "ee/Ee_SubSystem.h"
 #include "GSH_Software.h"
 #include "ThreadProfiler.h"
 
@@ -70,6 +72,7 @@ CEmuSession::CEmuSession(const CONFIG& config)
 	m_vm->ReloadFrameRateLimit();
 
 	m_gsPump = config.gsPump;
+	m_vu1ThreadInit = config.vu1ThreadInit;
 	m_gsShutdown = config.gsShutdown;
 	auto frames = &m_frames;
 	if(config.gsFactory)
@@ -107,6 +110,7 @@ CEmuSession::~CEmuSession()
 	if(m_vm)
 	{
 		RunPumped([this]() { m_vm->Pause(); });
+		m_vm->m_ee->m_vpu1->SetThreaded(false);
 		if(m_gsShutdown) m_gsShutdown();
 		m_vm->DestroyPadHandler();
 		m_vm->DestroySoundHandler();
@@ -163,6 +167,12 @@ void CEmuSession::SetSpeedHacks(const SPEED_HACKS& hacks)
 		if(wasRunning) m_vm->Pause();
 		uint32_t percent = std::clamp<uint32_t>(hacks.eeCycleRatePercent, 25, 300);
 		m_vm->SetEeFrequencyScale(percent, 100);
+		// The VM is paused: VU1 is idle (or gets synchronized) while switching.
+		auto init = m_vu1ThreadInit;
+		m_vm->m_ee->m_vpu1->SetThreaded(hacks.threadedVu1, [init]() {
+			ThreadProfiler::RegisterCurrentThread("VU1");
+			if(init) init();
+		});
 	});
 	if(wasRunning) m_vm->Resume();
 

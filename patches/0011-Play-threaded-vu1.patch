@@ -1,0 +1,439 @@
+diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
+index 4c460e64..bbe900f5 100644
+--- a/Source/BasicBlock.cpp
++++ b/Source/BasicBlock.cpp
+@@ -80,11 +80,8 @@ void CBasicBlock::Compile()
+ 
+ 	Framework::CMemStream stream;
+ 	{
+-		static
+-#ifdef AOT_BUILD_CACHE
+-		    thread_local
+-#endif
+-		    CMipsJitter* jitter = nullptr;
++		//One jitter per thread: blocks may be compiled concurrently (threaded VU1)
++		static thread_local CMipsJitter* jitter = nullptr;
+ 		if(jitter == nullptr)
+ 		{
+ 			Jitter::CCodeGen* codeGen = Jitter::CreateCodeGen();
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+index ba721952..9aa14470 100644
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -153,7 +153,12 @@ CSubSystem::CSubSystem(uint8* iopRam, CIopBios& iopBios)
+ 
+ 	m_dmac.SetChannelTransferFunction(CDMAC::CHANNEL_ID_VIF0, std::bind(&CVif::ReceiveDMA, &m_vpu0->GetVif(), PLACEHOLDER_1, PLACEHOLDER_2, PLACEHOLDER_3, PLACEHOLDER_4));
+ 	m_dmac.SetChannelTransferFunction(CDMAC::CHANNEL_ID_VIF1, std::bind(&CVif::ReceiveDMA, &m_vpu1->GetVif(), PLACEHOLDER_1, PLACEHOLDER_2, PLACEHOLDER_3, PLACEHOLDER_4));
+-	m_dmac.SetChannelTransferFunction(CDMAC::CHANNEL_ID_GIF, std::bind(&CGIF::ReceiveDMA, &m_gif, PLACEHOLDER_1, PLACEHOLDER_2, PLACEHOLDER_3, PLACEHOLDER_4));
++	m_dmac.SetChannelTransferFunction(CDMAC::CHANNEL_ID_GIF,
++	                                  [this](uint32 address, uint32 qwc, uint32 direction, bool tagIncluded) {
++		                                  //PATH1 packets kicked by a threaded VU1 come first
++		                                  m_vpu1->FlushPendingXgKicks();
++		                                  return m_gif.ReceiveDMA(address, qwc, direction, tagIncluded);
++	                                  });
+ 	m_dmac.SetChannelTransferFunction(CDMAC::CHANNEL_ID_TO_IPU, std::bind(&CIPU::ReceiveDMA4, &m_ipu, PLACEHOLDER_1, PLACEHOLDER_2, PLACEHOLDER_4, m_ram, m_spr));
+ 	m_dmac.SetChannelTransferFunction(CDMAC::CHANNEL_ID_SIF0, std::bind(&CSIF::ReceiveDMA5, &m_sif, PLACEHOLDER_1, PLACEHOLDER_2, PLACEHOLDER_3, PLACEHOLDER_4));
+ 	m_dmac.SetChannelTransferFunction(CDMAC::CHANNEL_ID_SIF1, std::bind(&CSIF::ReceiveDMA6, &m_sif, PLACEHOLDER_1, PLACEHOLDER_2, PLACEHOLDER_3, PLACEHOLDER_4));
+@@ -350,6 +355,8 @@ void CSubSystem::CountTicks(int ticks)
+ 
+ void CSubSystem::NotifyVBlankStart()
+ {
++	//Frames are complete when displayed: wait for a threaded VU1
++	m_vpu1->Sync();
+ 	m_timer.NotifyVBlankStart();
+ 	m_intc.AssertLine(CINTC::INTC_LINE_VBLANK_START);
+ 	m_os->GetLibMc2().NotifyVBlankStart();
+@@ -579,6 +586,7 @@ uint32 CSubSystem::IOPortWriteHandler(uint32 nAddress, uint32 nData)
+ 		bool validAddress = (nData & 0x7) == 0;
+ 		if(validAddress)
+ 		{
++			m_vpu1->Sync();
+ 			m_vpu1->ExecuteMicroProgram(nData);
+ 		}
+ 	}
+@@ -669,6 +677,7 @@ void CSubSystem::Vu0StateChanged(CVpu::VU_STATE newState)
+ 
+ uint32 CSubSystem::Vu1MicroMemWriteHandler(uint32 address, uint32 value)
+ {
++	m_vpu1->Sync();
+ 	uint32 baseAddress = (address - PS2::MICROMEM1ADDR) & ~0x03;
+ 	*reinterpret_cast<uint32*>(m_microMem1 + baseAddress) = value;
+ 	m_vpu1->InvalidateMicroProgram(baseAddress, baseAddress + 4);
+@@ -731,6 +740,7 @@ void CSubSystem::CopyVuState(CMIPS& dst, const CMIPS& src)
+ 
+ uint32 CSubSystem::HandleVu1AreaRead(uint32 offset)
+ {
++	m_vpu1->Sync();
+ 	assert(!m_vpu1->IsVuRunning());
+ 	assert(offset < 0x400);
+ 	uint32 result = 0;
+@@ -752,6 +762,7 @@ uint32 CSubSystem::HandleVu1AreaRead(uint32 offset)
+ 
+ void CSubSystem::HandleVu1AreaWrite(uint32 offset, uint32 value)
+ {
++	m_vpu1->Sync();
+ 	assert(!m_vpu1->IsVuRunning());
+ 	assert(offset < 0x400);
+ 	if(offset >= 0 && offset <= 0x1FF)
+diff --git a/Source/ee/Vif1.cpp b/Source/ee/Vif1.cpp
+index 6ad84618..f35641e2 100644
+--- a/Source/ee/Vif1.cpp
++++ b/Source/ee/Vif1.cpp
+@@ -160,6 +160,9 @@ void CVif1::ExecuteCommand(StreamType& stream, CODE nCommand)
+ 
+ void CVif1::Cmd_DIRECT(StreamType& stream, CODE nCommand)
+ {
++	//PATH1 packets kicked by a threaded VU1 come before PATH2 data
++	m_vpu.FlushPendingXgKicks();
++
+ 	uint32 nSize = stream.GetAvailableReadBytes();
+ 	assert((nSize & 0x03) == 0);
+ 
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+index e21dc8bd..f09d23f6 100644
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -1,4 +1,6 @@
+ #include "Vpu.h"
++#include <algorithm>
++#include <cstring>
+ #include "make_unique.h"
+ #include "string_format.h"
+ #include "Log.h"
+@@ -37,6 +39,7 @@ CVpu::CVpu(unsigned int number, const VPUINIT& vpuInit, CGIF& gif, CINTC& intc,
+ 
+ CVpu::~CVpu()
+ {
++	SetThreaded(false);
+ #ifdef DEBUGGER_INCLUDED
+ 	delete[] m_microMemMiniState;
+ 	delete[] m_vuMemMiniState;
+@@ -44,6 +47,18 @@ CVpu::~CVpu()
+ }
+ 
+ void CVpu::Execute(int32 quota)
++{
++	if(m_threaded)
++	{
++		//The worker runs the microprogram: just forward its results
++		FlushPendingXgKicks();
++		RaisePendingInterrupt();
++		return;
++	}
++	ExecuteInternal(quota);
++}
++
++void CVpu::ExecuteInternal(int32 quota)
+ {
+ 	if(m_vuState != VU_STATE_RUNNING) return;
+ 
+@@ -57,7 +72,7 @@ void CVpu::Execute(int32 quota)
+ 	case MIPS_EXCEPTION_VU_EBIT:
+ 		//E bit encountered
+ 		m_vuState = VU_STATE_READY;
+-		VuStateChanged(m_vuState);
++		if(!m_threaded) VuStateChanged(m_vuState);
+ 		break;
+ 	case MIPS_EXCEPTION_VU_TBIT:
+ 	case MIPS_EXCEPTION_VU_DBIT:
+@@ -68,9 +83,18 @@ void CVpu::Execute(int32 quota)
+ 			mustBreak |= (m_ctx->m_State.nHasException == MIPS_EXCEPTION_VU_DBIT) && (m_fbrst & FBRST_DE);
+ 			if(mustBreak)
+ 			{
+-				m_vuState = VU_STATE_STOPPED;
+-				VuStateChanged(m_vuState);
+-				VuInterruptTriggered();
++				if(m_threaded)
++				{
++					//Interrupts are raised on the EE thread
++					m_pendingInterrupt = true;
++					m_vuState = VU_STATE_STOPPED;
++				}
++				else
++				{
++					m_vuState = VU_STATE_STOPPED;
++					VuStateChanged(m_vuState);
++					VuInterruptTriggered();
++				}
+ 			}
+ 			else
+ 			{
+@@ -83,6 +107,149 @@ void CVpu::Execute(int32 quota)
+ 	}
+ }
+ 
++void CVpu::SetThreaded(bool threaded, const std::function<void()>& workerInit)
++{
++	if(threaded == m_threaded) return;
++	if(m_threaded)
++	{
++		Sync();
++		{
++			std::lock_guard<std::mutex> lock(m_workerMutex);
++			m_stopWorker = true;
++		}
++		m_workerCondition.notify_all();
++		m_worker.join();
++		m_threaded = false;
++		return;
++	}
++	assert(m_vuState != VU_STATE_RUNNING);
++	m_stopWorker = false;
++	m_workPending = false;
++	m_threaded = true;
++	m_worker = std::thread(
++	    [this, workerInit]() {
++		    if(workerInit) workerInit();
++		    WorkerProc();
++	    });
++	m_workerId = m_worker.get_id();
++}
++
++void CVpu::WorkerProc()
++{
++	while(true)
++	{
++		{
++			std::unique_lock<std::mutex> lock(m_workerMutex);
++			m_workerCondition.wait(lock, [this]() { return m_workPending || m_stopWorker; });
++			if(m_stopWorker) break;
++			m_workPending = false;
++		}
++		while((m_vuState == VU_STATE_RUNNING) && !m_stopWorker)
++		{
++			ExecuteInternal(5000);
++		}
++		{
++			std::lock_guard<std::mutex> lock(m_workerMutex);
++		}
++		m_idleCondition.notify_all();
++	}
++}
++
++void CVpu::Sync()
++{
++	if(!m_threaded) return;
++	{
++		std::unique_lock<std::mutex> lock(m_workerMutex);
++		m_idleCondition.wait(lock, [this]() { return !m_workPending && (m_vuState != VU_STATE_RUNNING); });
++	}
++	FlushPendingXgKicks();
++	RaisePendingInterrupt();
++}
++
++void CVpu::RaisePendingInterrupt()
++{
++	if(m_pendingInterrupt.exchange(false))
++	{
++		VuStateChanged(m_vuState);
++		VuInterruptTriggered();
++	}
++}
++
++void CVpu::FlushPendingXgKicks()
++{
++	if(!m_hasPendingKicks) return;
++	std::vector<std::vector<uint8>> kicks;
++	{
++		std::lock_guard<std::mutex> lock(m_kickMutex);
++		kicks.swap(m_pendingKicks);
++		m_hasPendingKicks = false;
++	}
++	CGsPacketMetadata metadata;
++	metadata.pathIndex = 1;
++	for(const auto& packet : kicks)
++	{
++		uint32 size = static_cast<uint32>(packet.size());
++		uint32 processed = 0;
++		while(processed < size)
++		{
++			uint32 consumed = m_gif.ProcessSinglePacket(packet.data(), size, processed, size, metadata);
++			if(consumed == 0) break;
++			processed += consumed;
++			if(m_gif.GetActivePath() == 0) break;
++		}
++	}
++}
++
++void CVpu::QueueXgKick(uint32 address)
++{
++	//Copy the whole GIF packet (tags until EOP) out of VU memory now: the
++	//program keeps running and may overwrite it.
++	uint32 memoryMask = m_vuMemSize - 1;
++	uint32 position = address;
++	uint32 size = 0;
++	while(size < m_vuMemSize)
++	{
++		uint64 tag = *reinterpret_cast<const uint64*>(m_vuMem + (position & memoryMask));
++		uint32 nloop = static_cast<uint32>(tag & 0x7FFF);
++		bool eop = ((tag >> 15) & 1) != 0;
++		uint32 flg = static_cast<uint32>((tag >> 58) & 3);
++		uint32 nreg = static_cast<uint32>((tag >> 60) & 0xF);
++		if(nreg == 0) nreg = 16;
++		uint32 dataSize = 0;
++		switch(flg)
++		{
++		case 0: //PACKED
++			dataSize = nloop * nreg * 0x10;
++			break;
++		case 1: //REGLIST
++			dataSize = ((nloop * nreg * 8) + 0xF) & ~0xF;
++			break;
++		default: //IMAGE
++			dataSize = nloop * 0x10;
++			break;
++		}
++		uint32 packetSize = 0x10 + dataSize;
++		size += packetSize;
++		position += packetSize;
++		if(eop) break;
++	}
++	size = std::min(size, m_vuMemSize);
++
++	std::vector<uint8> packet(size);
++	uint32 start = address & memoryMask;
++	uint32 firstPart = std::min(size, m_vuMemSize - start);
++	memcpy(packet.data(), m_vuMem + start, firstPart);
++	if(firstPart < size)
++	{
++		memcpy(packet.data() + firstPart, m_vuMem, size - firstPart);
++	}
++	{
++		std::lock_guard<std::mutex> lock(m_kickMutex);
++		m_pendingKicks.push_back(std::move(packet));
++		m_hasPendingKicks = true;
++	}
++}
++
+ #ifdef DEBUGGER_INCLUDED
+ 
+ void CVpu::SaveMiniState()
+@@ -123,6 +290,7 @@ uint32 CVpu::GetVuItopMiniState() const
+ 
+ void CVpu::Reset()
+ {
++	Sync();
+ 	m_vuState = VU_STATE_READY;
+ 	m_ctx->m_executor->Reset();
+ 	m_vif->Reset();
+@@ -130,6 +298,7 @@ void CVpu::Reset()
+ 
+ void CVpu::SaveState(Framework::CZipArchiveWriter& archive)
+ {
++	Sync();
+ 	{
+ 		auto path = string_format(STATE_PATH_REGS_FORMAT, m_number);
+ 		auto registerFile = std::make_unique<CRegisterStateFile>(path.c_str());
+@@ -143,6 +312,7 @@ void CVpu::SaveState(Framework::CZipArchiveWriter& archive)
+ 
+ void CVpu::LoadState(Framework::CZipArchiveReader& archive)
+ {
++	Sync();
+ 	{
+ 		auto path = string_format(STATE_PATH_REGS_FORMAT, m_number);
+ 		CRegisterStateFile registerFile(*archive.BeginReadFile(path.c_str()));
+@@ -207,10 +377,19 @@ void CVpu::ExecuteMicroProgram(uint32 nAddress)
+ 
+ 	assert(m_vuState != VU_STATE_RUNNING);
+ 	m_vuState = VU_STATE_RUNNING;
++	if(m_threaded)
++	{
++		{
++			std::lock_guard<std::mutex> lock(m_workerMutex);
++			m_workPending = true;
++		}
++		m_workerCondition.notify_one();
++		return;
++	}
+ 	VuStateChanged(m_vuState);
+ 	for(unsigned int i = 0; i < 100; i++)
+ 	{
+-		Execute(5000);
++		ExecuteInternal(5000);
+ 		if(m_vuState != VU_STATE_RUNNING) break;
+ 	}
+ }
+@@ -230,6 +409,12 @@ void CVpu::ProcessXgKick(uint32 address)
+ 	address &= 0x3FF;
+ 	address *= 0x10;
+ 
++	if(m_threaded && (std::this_thread::get_id() == m_workerId))
++	{
++		QueueXgKick(address);
++		return;
++	}
++
+ 	CGsPacketMetadata metadata;
+ 	metadata.pathIndex = 1;
+ #ifdef DEBUGGER_INCLUDED
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+index 8e468062..eecf39aa 100644
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -1,5 +1,11 @@
+ #pragma once
+ 
++#include <atomic>
++#include <condition_variable>
++#include <functional>
++#include <mutex>
++#include <thread>
++#include <vector>
+ #include "Types.h"
+ #include "../MIPS.h"
+ #include "../Profiler.h"
+@@ -90,6 +96,20 @@ public:
+ 
+ 	void ProcessXgKick(uint32);
+ 
++	//Threaded execution (used for VU1): microprograms run on a worker thread
++	//while the EE keeps going. GIF packets kicked by the program (XGKICK)
++	//are queued and sent to the GIF on the EE thread by Execute(), Sync() or
++	//FlushPendingXgKicks(). Switch only while the VU is idle.
++	void SetThreaded(bool, const std::function<void()>& workerInit = std::function<void()>());
++	bool IsThreaded() const
++	{
++		return m_threaded;
++	}
++	//EE thread: waits for a running microprogram to end, then flushes its
++	//GIF packets and pending interrupt.
++	void Sync();
++	void FlushPendingXgKicks();
++
+ #ifdef DEBUGGER_INCLUDED
+ 	void SaveMiniState();
+ 	const MIPSSTATE& GetVuMiniState() const;
+@@ -103,6 +123,11 @@ public:
+ 	VuInterruptTriggeredEvent VuInterruptTriggered;
+ 
+ protected:
++	void ExecuteInternal(int32);
++	void WorkerProc();
++	void QueueXgKick(uint32);
++	void RaisePendingInterrupt();
++
+ 	enum
+ 	{
+ 		FBRST_FB = (1 << 0),
+@@ -130,7 +155,20 @@ protected:
+ 	uint32 m_itopMiniState;
+ #endif
+ 
+-	VU_STATE m_vuState = VU_STATE_READY;
++	std::atomic<VU_STATE> m_vuState = VU_STATE_READY;
++
++	bool m_threaded = false;
++	std::thread m_worker;
++	std::thread::id m_workerId;
++	std::mutex m_workerMutex;
++	std::condition_variable m_workerCondition;
++	std::condition_variable m_idleCondition;
++	bool m_workPending = false;
++	bool m_stopWorker = false;
++	std::mutex m_kickMutex;
++	std::vector<std::vector<uint8>> m_pendingKicks;
++	std::atomic<bool> m_hasPendingKicks = false;
++	std::atomic<bool> m_pendingInterrupt = false;
+ 	uint32 m_fbrst = 0;
+ 
+ 	CProfiler::ZoneHandle m_vuProfilerZone = 0;
