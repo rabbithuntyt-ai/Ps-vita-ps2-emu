@@ -553,6 +553,8 @@ namespace
 		uint64_t lastOutput = sceKernelGetProcessTimeWide();
 		std::map<uint32_t, uint32_t> stallPcs;
 		std::string stallSummary;
+		// Display sources per second (GPU renderer): explains black/flashing frames.
+		CGSH_Hardware::DISPLAY_STATS displayTotals, displayLastSecond;
 
 		while(true)
 		{
@@ -646,6 +648,19 @@ namespace
 				statsPresented = presented;
 				statsTime = now;
 				threadUsage = ThreadProfiler::Sample();
+				if(gpu)
+				{
+					auto totals = GetHardwareGs(session.get())->GetDisplayStats();
+					displayLastSecond = totals;
+					displayLastSecond.fromTarget -= displayTotals.fromTarget;
+					displayLastSecond.fromMemory -= displayTotals.fromMemory;
+					displayLastSecond.skipped -= displayTotals.skipped;
+					displayLastSecond.disabled -= displayTotals.disabled;
+					displayTotals = totals;
+					std::printf("display: target %u memory %u skipped %u off %u  buf %05X w %u psm %X y %u\n", displayLastSecond.fromTarget,
+					            displayLastSecond.fromMemory, displayLastSecond.skipped, displayLastSecond.disabled, displayLastSecond.bufPtr,
+					            displayLastSecond.bufWidth, displayLastSecond.psm, displayLastSecond.offsetY);
+				}
 				for(const auto& usage : threadUsage)
 				{
 					std::printf("cpu %-18s %5.1f%%\n", usage.name.c_str(), usage.cpuPercent);
@@ -691,8 +706,8 @@ namespace
 			DrawScreen(screen, settings.stretch);
 			if(settings.showStats)
 			{
-				int lines = 5 + static_cast<int>(threadUsage.size());
-				Gfx::Rect(0, 0, 400, 10 + lines * 20, Gfx::Rgba(0, 0, 0, 160));
+				int lines = 6 + static_cast<int>(threadUsage.size());
+				Gfx::Rect(0, 0, 640, 10 + lines * 20, Gfx::Rgba(0, 0, 0, 160));
 				Gfx::Textf(8, 20, COLOR_WHITE, 0.7f, "VM %.1f fps  out %.1f fps  %ux%u  " VITAPS2_BUILD, vmFps, presentFps, screen.width, screen.height);
 				uint32_t eeRate = (settings.eeCycleRate == 0) ? autoRate.GetRate() : settings.eeCycleRate;
 				Gfx::Textf(8, 40, COLOR_GREY, 0.7f, "EE idle %.0f%%  rate %u%%%s  JIT %u/%u KB  %s", session->GetEeIdleRatio() * 100.0f,
@@ -712,19 +727,25 @@ namespace
 				}
 				Gfx::Textf(8, 80, COLOR_GREY, 0.7f, "Audio tempo %.0f%%  underruns %u", CSH_Vita::GetTempo() * 100.0f,
 				           CSH_Vita::GetUnderruns());
+				if(gpu)
+				{
+					const auto& d = displayLastSecond;
+					Gfx::Textf(8, 100, COLOR_GREY, 0.7f, "Display/s: gpu %u  mem %u  skip %u  off %u  buf %05X w%u psm%X y%u", d.fromTarget,
+					           d.fromMemory, d.skipped, d.disabled, d.bufPtr, d.bufWidth, d.psm, d.offsetY);
+				}
 				if(!stallSummary.empty())
 				{
 					// Long line: wrap it under the overlay.
 					std::string wrapped = stallSummary;
 					for(size_t at = 90; at < wrapped.size(); at += 91) wrapped.insert(at, "\n");
-					Gfx::Text(8, 220, COLOR_WARN, 0.6f, wrapped.c_str());
+					Gfx::Text(8, 240, COLOR_WARN, 0.6f, wrapped.c_str());
 				}
-				Gfx::Text(8, 100, COLOR_ACCENT, 0.7f, "CPU per thread (100% = one core):");
+				Gfx::Text(8, 120, COLOR_ACCENT, 0.7f, "CPU per thread (100% = one core):");
 				int line = 0;
 				for(const auto& usage : threadUsage)
 				{
 					uint32_t color = (usage.cpuPercent > 90.0f) ? COLOR_WARN : COLOR_GREY;
-					Gfx::Textf(16, 120 + line * 20, color, 0.7f, "%-18s %5.1f%%", usage.name.c_str(), usage.cpuPercent);
+					Gfx::Textf(16, 140 + line * 20, color, 0.7f, "%-18s %5.1f%%", usage.name.c_str(), usage.cpuPercent);
 					line++;
 				}
 			}

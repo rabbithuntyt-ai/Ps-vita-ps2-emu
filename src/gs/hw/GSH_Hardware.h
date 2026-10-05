@@ -94,6 +94,21 @@ public:
 	{
 		return m_lastFrameStats;
 	}
+
+	// Display diagnostics (frontend thread, between pumps): where flipped
+	// frames came from, and the last displayed buffer.
+	struct DISPLAY_STATS
+	{
+		uint32 fromTarget = 0;  //frames shown from a GPU render target
+		uint32 fromMemory = 0;  //frames read from GS memory
+		uint32 skipped = 0;     //flips that kept the previous frame (frame skip)
+		uint32 disabled = 0;    //flips with the display circuit off or empty
+		uint32 bufPtr = 0, bufWidth = 0, psm = 0, offsetY = 0; //last displayed buffer
+	};
+	DISPLAY_STATS GetDisplayStats() const
+	{
+		return m_displayStats;
+	}
 	STATS GetCurrentFrameStats() const
 	{
 		return m_stats;
@@ -220,4 +235,5 @@ private:
 	std::vector<uint32> m_transferPixels;
 	STATS m_stats;
 	STATS m_lastFrameStats;
+	DISPLAY_STATS m_displayStats;
 };

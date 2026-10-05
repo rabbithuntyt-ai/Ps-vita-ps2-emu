@@ -1313,6 +1313,7 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 	// buffered games would otherwise flash an older frame).
 	if(m_lastFrameSkipped)
 	{
+		m_displayStats.skipped++;
 		CGSH_Primitives::FlipImpl(dispInfo);
 		return;
 	}
@@ -1321,6 +1322,10 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 		uint32 width = std::min<uint32>(dispInfo.width, 1024);
 		uint32 height = std::min<uint32>(dispInfo.height, 1024);
 		uint32 bufWidth = layer.bufWidth / 64;
+		m_displayStats.bufPtr = layer.bufPtr;
+		m_displayStats.bufWidth = bufWidth;
+		m_displayStats.psm = layer.psm;
+		m_displayStats.offsetY = layer.offsetY;
 		uint32 baseX = 0, baseY = 0;
 		TARGET* target = FindTarget(layer.bufPtr, bufWidth, layer.psm, false, 0);
 		// Double buffering inside one larger drawing area: the displayed
@@ -1328,6 +1333,7 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 		if(!target) target = FindTargetContaining(layer.bufPtr, bufWidth, layer.psm, layer.offsetY + height, baseX, baseY);
 		if(target)
 		{
+			m_displayStats.fromTarget++;
 			uint32 x = baseX + layer.offsetX, y = baseY + layer.offsetY;
 			EnsureValidRows(*target, y + height);
 			m_display.texture = target->colorTexture;
@@ -1350,6 +1356,7 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 		{
 			// Not rendered by the GPU (2D games, movies): display GS memory,
 			// after fetching anything the GPU drew there.
+			m_displayStats.fromMemory++;
 			GS_SURFACE surface;
 			surface.Init(layer.psm, layer.bufPtr, bufWidth);
 			uint32 pageRows = ((layer.offsetY + height) + surface.phMask) >> surface.phShift;
@@ -1369,6 +1376,10 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 			m_display.height = height;
 			if(m_options.readbackFrames && m_options.frameSink) m_options.frameSink(m_frameBuffer, width, height);
 		}
+	}
+	else
+	{
+		m_displayStats.disabled++;
 	}
 	m_stateApplied = false;
 	CGSH_Primitives::FlipImpl(dispInfo);
