@@ -23,8 +23,11 @@ add_executable(vitaps2
 target_include_directories(vitaps2 PRIVATE src/vita src/common)
 target_compile_options(vitaps2 PRIVATE -Wall)
 # Build identification shown in the UI, so photos and logs name the build.
-execute_process(COMMAND git rev-parse --short HEAD WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-	OUTPUT_VARIABLE VITAPS2_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+# CI passes -DVITAPS2_COMMIT (git may refuse to run inside the SDK container).
+if(NOT VITAPS2_COMMIT)
+	execute_process(COMMAND git rev-parse --short HEAD WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+		OUTPUT_VARIABLE VITAPS2_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+endif()
 if(NOT VITAPS2_COMMIT)
 	set(VITAPS2_COMMIT "unknown")
 endif()

@@ -50,20 +50,29 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Build name
+        id: build_name
+        run: |
+          version=$(sed -n 's/^set(VITA_VERSION *"\(.*\)")/\1/p' cmake/VitaApp.cmake)
+          commit=$(git rev-parse --short HEAD)
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "name=VitaPS2-$version-$commit" >> "$GITHUB_OUTPUT"
       - name: Build VPK
         run: |
-          docker run --rm -v "$PWD:/src" -w /src vitasdk/vitasdk:latest /bin/sh -c '
+          docker run --rm -e VITAPS2_COMMIT=${{ steps.build_name.outputs.commit }} -e VITAPS2_NAME=${{ steps.build_name.outputs.name }} -v "$PWD:/src" -w /src vitasdk/vitasdk:latest /bin/sh -c '
             set -e
             echo "vitaGL and dependencies in the SDK image:"
             ls -l $VITASDK/arm-vita-eabi/lib/ | grep -i -E "vitagl|vitashark|shacccg|mathneon|taihen" || true
             cmake -S . -B build-vita \
               -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake \
-              -DCMAKE_BUILD_TYPE=Release
+              -DCMAKE_BUILD_TYPE=Release \
+              -DVITAPS2_COMMIT=$VITAPS2_COMMIT
             cmake --build build-vita -j$(nproc) -- -k
+            cp build-vita/VitaPS2.vpk "build-vita/$VITAPS2_NAME.vpk"
           '
       - name: Upload VPK
         uses: actions/upload-artifact@v4
         with:
-          name: VitaPS2-vpk
-          path: build-vita/VitaPS2.vpk
+          name: ${{ steps.build_name.outputs.name }}
+          path: build-vita/${{ steps.build_name.outputs.name }}.vpk
           if-no-files-found: error
