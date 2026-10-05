@@ -50,18 +50,6 @@ index 3e63222..bd22f52 100644
  
  		void EnsurePathExists(const fs::path&);
  
-diff --git a/include/filesystem_def.h b/include/filesystem_def.h
-index 94cb8b5..5bd796b 100644
---- a/include/filesystem_def.h
-+++ b/include/filesystem_def.h
-@@ -1,6 +1,6 @@
- #pragma once
- 
--#if defined(__has_include) && __has_include(<filesystem>) && !defined(__APPLE__) && !defined(__ANDROID__)
-+#if defined(__has_include) && __has_include(<filesystem>) && !defined(__APPLE__) && !defined(__ANDROID__) && !defined(__vita__)
- 	#include <filesystem>
- 	namespace fs = std::filesystem;
- #else
 diff --git a/src/PathUtils.cpp b/src/PathUtils.cpp
 index f7a9f8b..f66cd07 100644
 --- a/src/PathUtils.cpp

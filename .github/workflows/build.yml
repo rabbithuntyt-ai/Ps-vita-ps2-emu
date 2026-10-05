@@ -36,7 +36,7 @@ jobs:
             cmake -S . -B build-vita \
               -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake \
               -DCMAKE_BUILD_TYPE=Release
-            cmake --build build-vita -j$(nproc)
+            cmake --build build-vita -j$(nproc) -- -k
           '
       - name: Upload VPK
         uses: actions/upload-artifact@v4
