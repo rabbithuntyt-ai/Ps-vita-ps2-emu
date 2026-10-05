@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <stdexcept>
 #include <thread>
 
@@ -241,11 +242,21 @@ CEmuSession::DEBUG_STATE CEmuSession::GetDebugState()
 	state.intcStat = m_vm->m_ee->m_intc.GetRegister(CINTC::INTC_STAT);
 	state.intcMask = m_vm->m_ee->m_intc.GetRegister(CINTC::INTC_MASK);
 	state.dmacStat = m_vm->m_ee->m_dmac.GetRegister(CDMAC::D_STAT);
+	for(int i = 0; i < 32; i++) state.eeGpr[i] = ee.nGPR[i].nV0;
 	auto& vpu1 = *m_vm->m_ee->m_vpu1;
 	state.vu1Start = vpu1.GetProgramStart();
 	state.vu1Pc = vpu1.GetCurrentPc();
 	state.vu1RunMs = vpu1.GetProgramRunMs();
 	return state;
+}
+
+uint32_t CEmuSession::ReadEeWord(uint32_t address)
+{
+	address &= 0x1FFFFFFC; //kseg0/kseg1 mirrors
+	if(address >= PS2::EE_RAM_SIZE) return 0;
+	uint32_t value = 0;
+	std::memcpy(&value, m_vm->m_ee->m_ram + address, 4);
+	return value;
 }
 
 void CEmuSession::Pause()

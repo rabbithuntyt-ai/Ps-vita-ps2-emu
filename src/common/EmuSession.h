@@ -102,8 +102,11 @@ public:
 		uint32_t intcStat = 0, intcMask = 0, dmacStat = 0;
 		// VU1: microprogram start, current PC, ms it has been running (0: idle).
 		uint32_t vu1Start = 0, vu1Pc = 0, vu1RunMs = 0;
+		uint32_t eeGpr[32] = {}; // low 32 bits of the EE registers
 	};
 	DEBUG_STATE GetDebugState();
+	// A word of EE main memory (0 outside RAM), for dumping code.
+	uint32_t ReadEeWord(uint32_t address);
 
 	CPS2VM* GetVm()
 	{

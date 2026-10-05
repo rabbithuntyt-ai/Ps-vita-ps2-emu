@@ -553,6 +553,7 @@ namespace
 		uint64_t lastOutput = sceKernelGetProcessTimeWide();
 		std::map<uint32_t, uint32_t> stallPcs;
 		std::string stallSummary;
+		std::string stallDetail; // code around the hot loop and EE registers
 		// Display sources per second (GPU renderer): explains black/flashing frames.
 		CGSH_Hardware::DISPLAY_STATS displayTotals, displayLastSecond;
 
@@ -637,6 +638,7 @@ namespace
 				std::printf("stall over\n");
 				stallPcs.clear();
 				stallSummary.clear();
+				stallDetail.clear();
 			}
 			if(now - statsTime >= 1000000)
 			{
@@ -688,6 +690,41 @@ namespace
 					}
 					stallSummary = text;
 					std::printf("%s\n", text);
+					// Code of the loop the EE spins in (hot addresses near the
+					// hottest one) and the EE registers, to see what it waits for.
+					uint32_t hot = hottest[0].first, lo = hot, hi = hot;
+					for(size_t i = 1; i < std::min<size_t>(hottest.size(), 6); i++)
+					{
+						uint32_t pc = hottest[i].first;
+						if((pc + 0x100 > hot) && (pc < hot + 0x100))
+						{
+							lo = std::min(lo, pc);
+							hi = std::max(hi, pc);
+						}
+					}
+					lo = (lo - 0x10) & ~0x1Fu;
+					hi = std::min(hi + 0x14, lo + 24 * 4 - 4);
+					std::string detail;
+					char line[128];
+					for(uint32_t address = lo; address <= hi; address += 32)
+					{
+						int n = std::snprintf(line, sizeof(line), "%08X:", address);
+						for(uint32_t a = address; (a < address + 32) && (a <= hi); a += 4)
+							n += std::snprintf(line + n, sizeof(line) - n, " %08X", session->ReadEeWord(a));
+						detail += line;
+						detail += "\n";
+					}
+					static const char* names[4] = {"r0-7  ", "r8-15 ", "r16-23", "r24-31"};
+					for(int row = 0; row < 4; row++)
+					{
+						int n = std::snprintf(line, sizeof(line), "%s:", names[row]);
+						for(int r = row * 8; r < row * 8 + 8; r++)
+							n += std::snprintf(line + n, sizeof(line) - n, " %08X", debug.eeGpr[r]);
+						detail += line;
+						detail += "\n";
+					}
+					stallDetail = detail;
+					std::printf("%s", detail.c_str());
 					stallPcs.clear();
 				}
 				newContent |= settings.showStats;
@@ -739,6 +776,7 @@ namespace
 					std::string wrapped = stallSummary;
 					for(size_t at = 90; at < wrapped.size(); at += 91) wrapped.insert(at, "\n");
 					Gfx::Text(8, 240, COLOR_WARN, 0.6f, wrapped.c_str());
+					Gfx::Text(8, 300, COLOR_WARN, 0.6f, stallDetail.c_str());
 				}
 				Gfx::Text(8, 120, COLOR_ACCENT, 0.7f, "CPU per thread (100% = one core):");
 				int line = 0;
