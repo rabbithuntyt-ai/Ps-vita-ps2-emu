@@ -27,6 +27,7 @@
 
 #include "EmuSession.h"
 #include "GsBenchmark.h"
+#include "ThreadProfiler.h"
 #include "JitMemory.h"
 #include "PH_Vita.h"
 #include "SH_Vita.h"
@@ -420,6 +421,8 @@ namespace
 		uint64_t statsTime = sceKernelGetProcessTimeWide();
 		uint64_t statsVmFrames = 0, statsPresented = 0, presented = 0;
 		float vmFps = 0, presentFps = 0;
+		std::vector<ThreadProfiler::SAMPLE> threadUsage;
+		ThreadProfiler::Sample();
 
 		while(true)
 		{
@@ -461,6 +464,12 @@ namespace
 				statsVmFrames = vmFrames;
 				statsPresented = presented;
 				statsTime = now;
+				threadUsage = ThreadProfiler::Sample();
+				for(const auto& usage : threadUsage)
+				{
+					std::printf("cpu %-18s %5.1f%%\n", usage.name.c_str(), usage.cpuPercent);
+				}
+				std::printf("fps vm %.1f out %.1f ee-idle %.0f%%\n", vmFps, presentFps, session->GetEeIdleRatio() * 100.0f);
 			}
 
 			vita2d_start_drawing();
@@ -468,14 +477,22 @@ namespace
 			DrawScreen(screen, width, height, settings.stretch);
 			if(settings.showStats)
 			{
-				vita2d_draw_rectangle(0, 0, 360, 82, RGBA8(0, 0, 0, 160));
+				int lines = 3 + static_cast<int>(threadUsage.size());
+				vita2d_draw_rectangle(0, 0, 380, 10 + lines * 24, RGBA8(0, 0, 0, 160));
 				vita2d_pgf_draw_textf(g_font, 8, 22, COLOR_WHITE, 0.8f, "VM %.1f fps  out %.1f fps  %ux%u",
 				                      vmFps, presentFps, width, height);
-				vita2d_pgf_draw_textf(g_font, 8, 46, COLOR_GREY, 0.8f, "GS %.1f ms/frame  EE idle %.0f%%",
-				                      session->GetGsRasterMicros() / 1000.0f, session->GetEeIdleRatio() * 100.0f);
-				vita2d_pgf_draw_textf(g_font, 8, 70, COLOR_GREY, 0.8f, "JIT %u/%u KB",
+				vita2d_pgf_draw_textf(g_font, 8, 46, COLOR_GREY, 0.8f, "EE idle %.0f%%  JIT %u/%u KB",
+				                      session->GetEeIdleRatio() * 100.0f,
 				                      static_cast<unsigned int>(VitaJit_GetUsedBytes() / 1024),
 				                      static_cast<unsigned int>(VitaJit_GetCapacity() / 1024));
+				vita2d_pgf_draw_text(g_font, 8, 70, COLOR_ACCENT, 0.8f, "CPU per thread (100% = one core):");
+				int line = 0;
+				for(const auto& usage : threadUsage)
+				{
+					unsigned int color = (usage.cpuPercent > 90.0f) ? RGBA8(255, 110, 110, 255) : COLOR_GREY;
+					vita2d_pgf_draw_textf(g_font, 16, 94 + line * 24, color, 0.8f, "%-18s %5.1f%%", usage.name.c_str(), usage.cpuPercent);
+					line++;
+				}
 			}
 			vita2d_end_drawing();
 			vita2d_swap_buffers();
@@ -494,6 +511,7 @@ int main()
 	if(std::freopen(LOG_PATH, "w", stdout)) setvbuf(stdout, nullptr, _IOLBF, 0);
 	if(std::freopen(LOG_PATH, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
 	std::printf("VitaPS2 starting\n");
+	ThreadProfiler::RegisterCurrentThread("UI");
 
 	scePowerSetArmClockFrequency(444);
 	scePowerSetBusClockFrequency(222);

@@ -15,8 +15,9 @@ class CGSH_Software : public CGSHandler
 {
 public:
 	// Called on the GS thread with a tightly packed RGBA8888 (R in the low byte)
-	// image of the currently displayed buffer.
-	using FrameSink = std::function<void(const uint32* pixels, uint32 width, uint32 height)>;
+	// image of the currently displayed buffer. The sink may take the buffer's
+	// contents (swap) and leave another buffer in its place.
+	using FrameSink = std::function<void(std::vector<uint32>& pixels, uint32 width, uint32 height)>;
 
 	explicit CGSH_Software(bool gsThreaded = true);
 	~CGSH_Software() override = default;

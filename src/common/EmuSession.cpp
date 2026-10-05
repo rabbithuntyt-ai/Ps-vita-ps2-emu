@@ -10,6 +10,7 @@
 #include "PathUtils.h"
 #include "ee/PS2OS.h"
 #include "GSH_Software.h"
+#include "ThreadProfiler.h"
 
 namespace
 {
@@ -74,7 +75,7 @@ CEmuSession::CEmuSession(const CONFIG& config)
 	gsOptions.interlacedRendering = config.interlacedRendering;
 	gsOptions.frameSkip = config.frameSkip;
 	m_vm->CreateGSHandler(CGSH_Software::GetFactoryFunction(
-	    [frames](const uint32* pixels, uint32 width, uint32 height) {
+	    [frames](std::vector<uint32>& pixels, uint32 width, uint32 height) {
 		    frames->Publish(pixels, width, height);
 	    },
 	    gsOptions));
@@ -85,7 +86,10 @@ CEmuSession::CEmuSession(const CONFIG& config)
 	if(config.padFactory) m_vm->CreatePadHandler(config.padFactory);
 	if(config.soundFactory) m_vm->CreateSoundHandler(config.soundFactory);
 
-	m_newFrameConnection = m_vm->OnNewFrame.Connect([this]() { m_vmFrames++; });
+	m_newFrameConnection = m_vm->OnNewFrame.Connect([this]() {
+		// Runs on the emulation thread (EE, IOP, VU, SPU).
+		if(m_vmFrames++ == 0) ThreadProfiler::RegisterCurrentThread("PS2 (EE/IOP/VU)");
+	});
 }
 
 CEmuSession::~CEmuSession()

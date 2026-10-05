@@ -1,4 +1,6 @@
 #include "ParallelRasterizer.h"
+#include <string>
+#include "ThreadProfiler.h"
 
 CParallelRasterizer::CParallelRasterizer(CSoftwareRasterizer& front, uint8* ram, const uint16* clut, uint32 threadCount)
     : m_front(front)
@@ -166,6 +168,8 @@ void CParallelRasterizer::RunLane(uint32 laneIndex)
 
 void CParallelRasterizer::WorkerProc(uint32 laneIndex)
 {
+	std::string name = "GS worker " + std::to_string(laneIndex);
+	ThreadProfiler::RegisterCurrentThread(name.c_str());
 	uint64 seenGeneration = 0;
 	while(true)
 	{

@@ -262,7 +262,7 @@ namespace
 		gs.Write(GS_REG_XYZ2, Xyz(OffX(640), OffX(448), 0));
 
 		uint32 seenWidth = 0, seenHeight = 0, seenPixel = 0;
-		gs.SetFrameSink([&](const uint32* pixels, uint32 w, uint32 h) {
+		gs.SetFrameSink([&](std::vector<uint32>& pixels, uint32 w, uint32 h) {
 			seenWidth = w;
 			seenHeight = h;
 			seenPixel = pixels[w * 10 + 10];

@@ -78,8 +78,10 @@ add_library(gsh_software STATIC
 	src/gs/GsDriver.h
 	src/gs/GsBenchmark.cpp
 	src/gs/GsBenchmark.h
+	src/common/ThreadProfiler.cpp
+	src/common/ThreadProfiler.h
 )
-target_include_directories(gsh_software PUBLIC src/gs ${PLAY_DIR}/Source)
+target_include_directories(gsh_software PUBLIC src/gs src/common ${PLAY_DIR}/Source)
 target_link_libraries(gsh_software PUBLIC PlayCore)
 
 # Frontend-independent glue shared by the Vita app and the host harness.

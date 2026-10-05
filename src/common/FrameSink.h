@@ -1,33 +1,34 @@
 #pragma once
 
 #include <cstdint>
-#include <cstring>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 // Single-slot mailbox carrying the most recent GS output from the GS thread to
-// whichever thread presents it. Producers never block on consumers: an
-// unconsumed frame is simply replaced by a newer one.
+// whichever thread presents it. Frames move by swapping buffers, never by
+// copying: the producer hands over its filled buffer and gets back a free one.
+// An unconsumed frame is simply replaced by a newer one.
 class CFrameMailbox
 {
 public:
-	void Publish(const uint32_t* pixels, uint32_t width, uint32_t height)
+	// Takes the contents of 'pixels' (leaving it with a recycled buffer).
+	void Publish(std::vector<uint32_t>& pixels, uint32_t width, uint32_t height)
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
-		m_pixels.resize(width * height);
-		std::memcpy(m_pixels.data(), pixels, width * height * sizeof(uint32_t));
+		std::swap(m_pixels, pixels);
 		m_width = width;
 		m_height = height;
 		m_serial++;
 	}
 
-	// Copies the latest frame out if it is newer than lastSerial.
-	// Returns true (and updates lastSerial) when a new frame was copied.
+	// If a frame newer than lastSerial is available, swaps it into 'pixels'
+	// and returns true.
 	bool Fetch(uint64_t& lastSerial, std::vector<uint32_t>& pixels, uint32_t& width, uint32_t& height)
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		if(m_serial == lastSerial) return false;
-		pixels = m_pixels;
+		std::swap(m_pixels, pixels);
 		width = m_width;
 		height = m_height;
 		lastSerial = m_serial;

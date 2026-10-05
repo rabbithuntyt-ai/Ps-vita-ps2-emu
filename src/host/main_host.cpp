@@ -15,6 +15,7 @@
 #include <thread>
 #include <vector>
 #include "EmuSession.h"
+#include "ThreadProfiler.h"
 
 namespace
 {
@@ -81,6 +82,7 @@ int main(int argc, char** argv)
 		CEmuSession session(config);
 		session.Boot(bootPath);
 
+		ThreadProfiler::Sample();
 		auto start = std::chrono::steady_clock::now();
 		uint64_t serial = 0;
 		std::vector<uint32_t> pixels;
@@ -92,8 +94,13 @@ int main(int argc, char** argv)
 			if(std::chrono::steady_clock::now() - start > std::chrono::seconds(timeoutSeconds)) break;
 			std::this_thread::sleep_for(std::chrono::milliseconds(5));
 		}
+		auto threadUsage = ThreadProfiler::Sample();
 		session.Pause();
 		session.GetFrames().Fetch(serial, pixels, width, height);
+		for(const auto& usage : threadUsage)
+		{
+			std::printf("cpu %-18s %5.1f%%\n", usage.name.c_str(), usage.cpuPercent);
+		}
 
 		double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 		uint64_t vmFrames = session.GetVmFrameCount();

@@ -2,6 +2,7 @@
 #include "GsMemory.h"
 #include "gs/GsTransferRange.h"
 #include "xxhash.h"
+#include "ThreadProfiler.h"
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
@@ -31,6 +32,7 @@ void CGSH_Software::SetFrameSink(FrameSink sink)
 
 void CGSH_Software::InitializeImpl()
 {
+	if(m_gsThreaded) ThreadProfiler::RegisterCurrentThread("GS");
 	m_rasterizer.SetMemory(m_pRAM, m_pCLUT);
 	m_rasterizer.SetClutHash(XXH3_64bits(m_pCLUT, CLUTSIZE));
 	if(m_rasterizerThreads > 1)
@@ -484,7 +486,7 @@ void CGSH_Software::FlipImpl(const DISPLAY_INFO& dispInfo)
 				}
 			}
 		}
-		m_frameSink(m_frameBuffer.data(), width, height);
+		m_frameSink(m_frameBuffer, width, height);
 	}
 	CGSHandler::FlipImpl(dispInfo);
 }

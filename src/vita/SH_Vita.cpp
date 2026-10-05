@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstring>
 #include <psp2/audioout.h>
+#include "ThreadProfiler.h"
 
 CSH_Vita::CSH_Vita()
     : m_ring(RING_FRAMES * 2)
@@ -62,6 +63,7 @@ void CSH_Vita::RecycleBuffers()
 
 void CSH_Vita::ThreadProc()
 {
+	ThreadProfiler::RegisterCurrentThread("Audio");
 	std::vector<int16> grain(GRAIN * 2);
 	while(m_running)
 	{
