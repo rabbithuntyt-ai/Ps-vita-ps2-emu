@@ -481,7 +481,7 @@ namespace
 			GsMemory::WriteRaw(gs.Ram(), CGSHandler::PSMCT32, clutPtr, 1, i & 15, i >> 4, ((i * 0x9E3779B1) & 0x00FFFFFF) | ((i & 0x7F) << 24));
 
 		// HW_RANDOM_NO=<letters> disables features to isolate differences:
-		// b=blending a=alpha test z=depth test (ALWAYS) t=texturing p=perspective
+		// b=blending a=alpha test z=depth test (ALWAYS) t=texturing p=perspective f=fog
 		const char* disabled = std::getenv("HW_RANDOM_NO");
 		auto off = [&](char c) { return disabled && std::strchr(disabled, c); };
 		const char* env = std::getenv("HW_RANDOM_BATCHES");
@@ -510,8 +510,10 @@ namespace
 			bool sprite = rand(3) == 0;
 			bool fst = sprite || rand(2) || off('p');
 			bool abe = rand(2) && !off('b');
+			bool fog = (rand(3) == 0) && !off('f');
+			gs.Write(GS_REG_FOGCOL, rng() & 0xFFFFFF);
 			uint64 prim = (sprite ? CGSHandler::PRIM_SPRITE : CGSHandler::PRIM_TRIANGLE) | (rand(2) << 3) | (textured << 4) |
-			              (abe << 6) | (fst << 8);
+			              (fog << 5) | (abe << 6) | (fst << 8);
 			gs.Write(GS_REG_PRIM, prim);
 			if(std::getenv("HW_RANDOM_VERBOSE") && (dynamic_cast<CHardwareDriver*>(&gs) != nullptr))
 				std::printf("    seed %u: %s tex=%d idx=%d tfx=%u tcc=%d bil=%d fst=%d abe=%d ABCD=%u%u%u%u ate=%d atst=%u aref=%u ztst=%u iip=%d\n",
@@ -523,7 +525,7 @@ namespace
 				// Gouraud colors are interpolated perspective correctly on the GPU
 				// (the GS interpolates them affinely): keep Q ratios realistic.
 				bool gouraud = (prim >> 3) & 1;
-				float q = fst ? 1.0f : gouraud ? 0.9f + rand(100) / 500.0f : 0.5f + rand(100) / 100.0f;
+				float q = fst ? 1.0f : (gouraud || fog) ? 0.96f + rand(100) / 1250.0f : 0.5f + rand(100) / 100.0f;
 				gs.Write(GS_REG_RGBAQ, RgbaqQ(rand(256), rand(256), rand(256), rand(0x81), q));
 				uint32 u = rand(64 * 16), vv = rand(64 * 16);
 				float sCoord = rand(100) / 100.0f, tCoord = rand(100) / 100.0f;
@@ -531,6 +533,7 @@ namespace
 				else gs.Write(GS_REG_ST, St(sCoord * q, tCoord * q));
 				// Distinct at 24-bit depth precision.
 				uint32 x = rand(640), y = rand(448);
+				gs.Write(GS_REG_FOG, static_cast<uint64>(rand(256)) << 56);
 				gs.Write(GS_REG_XYZ2, Xyz(OffX(x), OffX(y), rand(1 << 16) << 16));
 				if(std::getenv("HW_RANDOM_VERTICES") && (dynamic_cast<CHardwareDriver*>(&gs) != nullptr))
 					std::printf("      v%u: xy %u,%u uv %.2f,%.2f st %.2f,%.2f q %.2f\n", v, x, y, u / 16.0f, vv / 16.0f, sCoord, tCoord, q);

@@ -191,6 +191,20 @@ void CGSH_Hardware::InitializeImpl()
 	std::vector<uint32> empty(1024 * 1024, 0xFF000000);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1024, 1024, 0, GL_RGBA, GL_UNSIGNED_BYTE, empty.data());
 
+	// Fog: texture unit 1 interpolates towards the fog color by a factor
+	// looked up in this ramp (alpha = fog value) from a texture coordinate.
+	{
+		std::vector<uint32> ramp(256);
+		for(uint32 i = 0; i < 256; i++) ramp[i] = 0x00FFFFFF | (i << 24);
+		glGenTextures(1, &m_fogRamp);
+		glBindTexture(GL_TEXTURE_2D, m_fogRamp);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 256, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, ramp.data());
+	}
+
 	// Untextured draws still go through the texture combiner (for the alpha
 	// scale), sampling a 1x1 white texture.
 	CACHED_TEXTURE white;
@@ -216,6 +230,8 @@ void CGSH_Hardware::ReleaseImpl()
 		glDeleteTextures(1, &texture.second.texture);
 	}
 	m_glTextures.clear();
+	if(m_fogRamp) glDeleteTextures(1, &m_fogRamp);
+	m_fogRamp = 0;
 	if(m_displayUploadTexture) glDeleteTextures(1, &m_displayUploadTexture);
 	if(m_feedbackTexture) glDeleteTextures(1, &m_feedbackTexture);
 	m_feedbackTexture = 0;
@@ -945,6 +961,40 @@ void CGSH_Hardware::ApplyState()
 		glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, 1.0f);
 	}
 	SetupAlphaCombiner(m_fixAlpha);
+	SetupFog();
+}
+
+void CGSH_Hardware::SetupFog()
+{
+	const auto& s = m_state;
+	glActiveTexture(GL_TEXTURE1);
+	if(s.fog)
+	{
+		glEnable(GL_TEXTURE_2D);
+		glBindTexture(GL_TEXTURE_2D, m_fogRamp);
+		float fogColor[4] = {static_cast<float>(s.fogColor & 0xFF) / 255.0f, static_cast<float>((s.fogColor >> 8) & 0xFF) / 255.0f,
+		                     static_cast<float>((s.fogColor >> 16) & 0xFF) / 255.0f, 1.0f};
+		glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, fogColor);
+		glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+		// previous * f + fogColor * (1 - f)
+		glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_INTERPOLATE);
+		glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_RGB, GL_PREVIOUS);
+		glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB, GL_SRC_COLOR);
+		glTexEnvi(GL_TEXTURE_ENV, GL_SRC1_RGB, GL_CONSTANT);
+		glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND1_RGB, GL_SRC_COLOR);
+		glTexEnvi(GL_TEXTURE_ENV, GL_SRC2_RGB, GL_TEXTURE);
+		glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND2_RGB, GL_SRC_ALPHA);
+		glTexEnvf(GL_TEXTURE_ENV, GL_RGB_SCALE, 1.0f);
+		glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_REPLACE);
+		glTexEnvi(GL_TEXTURE_ENV, GL_SRC0_ALPHA, GL_PREVIOUS);
+		glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_ALPHA, GL_SRC_ALPHA);
+		glTexEnvf(GL_TEXTURE_ENV, GL_ALPHA_SCALE, 1.0f);
+	}
+	else
+	{
+		glDisable(GL_TEXTURE_2D);
+	}
+	glActiveTexture(GL_TEXTURE0);
 }
 
 void CGSH_Hardware::SetupAlphaCombiner(bool fix)
@@ -993,6 +1043,8 @@ void CGSH_Hardware::AddVertex(const CSoftwareRasterizer::VERTEX& v)
 	out.g = v.g;
 	out.b = v.b;
 	out.a = v.a;
+	out.fogS = (static_cast<float>(v.fog & 0xFF) + 0.5f) / 256.0f;
+	out.fogT = 0.5f;
 	if(s.fst)
 	{
 		out.s = v.u / static_cast<float>(s.tw) * m_texScaleS + m_texOffsetS;
@@ -1117,6 +1169,13 @@ void CGSH_Hardware::FlushBatch()
 	glVertexPointer(4, GL_FLOAT, stride, &m_batch[0].x);
 	glColorPointer(4, GL_UNSIGNED_BYTE, stride, &m_batch[0].r);
 	glTexCoordPointer(2, GL_FLOAT, stride, &m_batch[0].s);
+	if(m_state.fog)
+	{
+		glClientActiveTexture(GL_TEXTURE1);
+		glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+		glTexCoordPointer(2, GL_FLOAT, stride, &m_batch[0].fogS);
+		glClientActiveTexture(GL_TEXTURE0);
+	}
 	glDrawArrays(m_batchMode, 0, static_cast<GLsizei>(m_batch.size()));
 	if(m_alphaPass)
 	{

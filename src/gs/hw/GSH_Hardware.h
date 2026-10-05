@@ -133,6 +133,7 @@ private:
 		float x, y, z, w;
 		uint8 r, g, b, a;
 		float s, t;
+		float fogS, fogT; //texture unit 1: fog factor lookup in a ramp
 	};
 
 	struct CACHED_TEXTURE
@@ -160,6 +161,7 @@ private:
 
 	void ApplyState();
 	void SetupAlphaCombiner(bool fix);
+	void SetupFog();
 	void BindTexture();
 	void FlushBatch();
 	void AddVertex(const CSoftwareRasterizer::VERTEX&);
@@ -190,6 +192,7 @@ private:
 
 	DISPLAY_TEXTURE m_display;
 	GLuint m_displayUploadTexture = 0;
+	GLuint m_fogRamp = 0;
 	GLuint m_feedbackTexture = 0;
 	uint32 m_feedbackWidth = 0, m_feedbackHeight = 0;
 	std::vector<uint32> m_frameBuffer;

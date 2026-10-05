@@ -36,7 +36,7 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 ## Phase 3: Smoothness (felt performance)
 
 - [ ] Frame pacing: steady 60/30/20Hz present cadence instead of jitter
-- [ ] Audio time-stretching when emulation runs below full speed
+- [x] Audio time-stretching when emulation runs below full speed (WSOLA, pitch preserved)
 - [ ] Detect each game's real frame rate (buffer flips) and skip duplicate presents
 - [ ] Adaptive internal resolution / interlaced rendering driven by frame time
 - [ ] Automatic frame skip that never skips two frames in a row
@@ -56,8 +56,9 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 - [ ] GPU-assisted fill for large textured/blended primitives (hybrid GS)
 - [x] GPU (vitaGL) renderer with render targets and on-demand GS memory sync
 - [ ] GPU renderer: exact blending for `(A-B)*C+A` forms (e.g. `Cs*(1+As)`) via a custom GXM shader with framebuffer fetch; FIX blend + alpha test together
-- [ ] GPU renderer: affine (not perspective) Gouraud color interpolation on STQ primitives
-- [ ] GPU renderer: fog, region clamp modes, alpha test fail modes, 16-bit dithering, depth buffer readback
+- [ ] GPU renderer: affine (not perspective) Gouraud color and fog interpolation on STQ primitives (differs when Q varies strongly within a triangle)
+- [x] GPU renderer: fog (second texture stage interpolating towards FOGCOL)
+- [ ] GPU renderer: region clamp modes, alpha test fail modes, 16-bit dithering, depth buffer readback
 - [ ] GPU renderer: upscaling (render targets at 2x where VRAM allows)
 - [ ] Upscaled UI/2D option where it is cheap
 
@@ -69,7 +70,8 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 - [ ] Ahead-of-time block cache: prerecord and ship translated code per game
 - [ ] Hot-function native replacements (hand-tuned C++/NEON) for top functions
 - [ ] Middleware HLE: recognize and replace common library routines (memcpy/math, Criware, RenderWare)
-- [ ] IPU/MPEG movies: hardware-assisted or optimized decode for FMVs
+- [x] IPU/MPEG movies: integer IDCT (IEEE 1180 compliant) and fixed-point color conversion
+- [ ] IPU: NEON IDCT/CSC, profile VLC decoding on device
 - [ ] Thread and core layout tuning (affinity for EE, GS, worker, audio)
 - [ ] Explore unlocking part of the 4th core for audio/IOP
 
