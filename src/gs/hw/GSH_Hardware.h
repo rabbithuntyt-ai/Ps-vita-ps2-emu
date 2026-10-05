@@ -148,6 +148,9 @@ private:
 	};
 
 	TARGET* FindTarget(uint32 fbp, uint32 fbw, uint32 psm, bool create, uint32 minHeight);
+	// A target that holds the buffer at 'ptr' (same layout) 'rows' high,
+	// starting some page rows into it.
+	TARGET* FindTargetContaining(uint32 ptr, uint32 fbw, uint32 psm, uint32 rows, uint32& offsetX, uint32& offsetY);
 	void DeleteTarget(TARGET&);
 	void RemoveTargetsOverlapping(const TARGET* except, uint32 start, uint32 size);
 	void EnsureValidRows(TARGET&, uint32 rows);

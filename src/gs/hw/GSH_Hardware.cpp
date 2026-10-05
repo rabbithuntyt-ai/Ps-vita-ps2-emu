@@ -396,6 +396,28 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 	return m_targets.back().get();
 }
 
+CGSH_Hardware::TARGET* CGSH_Hardware::FindTargetContaining(uint32 ptr, uint32 fbw, uint32 psm, uint32 rows, uint32& offsetX, uint32& offsetY)
+{
+	if(!IsColorPsm(psm) || (fbw == 0)) return nullptr;
+	for(auto& target : m_targets)
+	{
+		if((target->fbw != fbw) || (PsmClass(target->psm) != PsmClass(psm))) continue;
+		if((ptr <= target->fbp) || ((ptr - target->fbp) % 8192) != 0) continue;
+		GS_SURFACE surface;
+		surface.Init(target->psm, target->fbp, target->fbw);
+		uint32 pagesPerRow = std::max<uint32>(surface.pagesPerRow, 1);
+		uint32 page = (ptr - target->fbp) / 8192;
+		uint32 x = (page % pagesPerRow) << surface.pwShift;
+		uint32 y = (page / pagesPerRow) << surface.phShift;
+		if((x != 0) || (y + rows > target->height)) continue;
+		offsetX = x;
+		offsetY = y;
+		target->lastUse = ++m_useCounter;
+		return target.get();
+	}
+	return nullptr;
+}
+
 void CGSH_Hardware::EnsureValidRows(TARGET& target, uint32 rows)
 {
 	rows = std::min(rows, target.height);
@@ -1299,17 +1321,22 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 		uint32 width = std::min<uint32>(dispInfo.width, 1024);
 		uint32 height = std::min<uint32>(dispInfo.height, 1024);
 		uint32 bufWidth = layer.bufWidth / 64;
+		uint32 baseX = 0, baseY = 0;
 		TARGET* target = FindTarget(layer.bufPtr, bufWidth, layer.psm, false, 0);
+		// Double buffering inside one larger drawing area: the displayed
+		// buffer starts some page rows into a render target.
+		if(!target) target = FindTargetContaining(layer.bufPtr, bufWidth, layer.psm, layer.offsetY + height, baseX, baseY);
 		if(target)
 		{
-			EnsureValidRows(*target, layer.offsetY + height);
+			uint32 x = baseX + layer.offsetX, y = baseY + layer.offsetY;
+			EnsureValidRows(*target, y + height);
 			m_display.texture = target->colorTexture;
 			m_display.textureWidth = target->width;
 			m_display.textureHeight = target->height;
-			m_display.x = layer.offsetX;
-			m_display.y = layer.offsetY;
-			m_display.width = std::min(width, target->width - std::min(layer.offsetX, target->width));
-			m_display.height = std::min(height, target->height - std::min(layer.offsetY, target->height));
+			m_display.x = x;
+			m_display.y = y;
+			m_display.width = std::min(width, target->width - std::min(x, target->width));
+			m_display.height = std::min(height, target->height - std::min(y, target->height));
 			if(m_options.readbackFrames && m_options.frameSink)
 			{
 				m_frameBuffer.resize(m_display.width * m_display.height);
@@ -1321,7 +1348,12 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 		}
 		else
 		{
-			// Not rendered by the GPU (2D games, movies): display GS memory.
+			// Not rendered by the GPU (2D games, movies): display GS memory,
+			// after fetching anything the GPU drew there.
+			GS_SURFACE surface;
+			surface.Init(layer.psm, layer.bufPtr, bufWidth);
+			uint32 pageRows = ((layer.offsetY + height) + surface.phMask) >> surface.phShift;
+			DownloadTargetsOverlapping(layer.bufPtr, std::max<uint32>(surface.pagesPerRow, 1) * pageRows * 8192);
 			m_frameBuffer.resize(width * height);
 			for(uint32 y = 0; y < height; y++)
 				for(uint32 x = 0; x < width; x++)

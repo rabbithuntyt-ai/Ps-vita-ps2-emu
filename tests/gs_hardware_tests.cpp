@@ -562,6 +562,36 @@ namespace
 		gs.Present();
 	}
 
+	// Double buffering inside one tall render target: the game draws a
+	// 640x896 area and displays its lower half (DISPFB points 448 rows, i.e.
+	// 14 page rows, past the drawing FBP).
+	void SceneDisplayInsideTarget(IDriver& gs)
+	{
+		Setup(gs);
+		gs.Write(GS_REG_SCISSOR_1, Scissor(0, 639, 0, 895));
+		gs.Write(GS_REG_PRIM, CGSHandler::PRIM_SPRITE);
+		Sprite(gs, 0, 0, 640, 448, Rgbaq(0x20, 0xC0, 0x20, 0x80));
+		Sprite(gs, 0, 448, 640, 896, Rgbaq(0xC0, 0x30, 0x30, 0x80));
+		Sprite(gs, 100, 500, 300, 700, Rgbaq(0x30, 0x30, 0xD0, 0x80));
+		gs.WritePriv(CGSHandler::GS_DISPFB1, 140 | (FBW << 9));
+		gs.WritePriv(CGSHandler::GS_DISPFB1 + 4, 0); //latched when both halves are written
+		gs.Present();
+	}
+
+	// The displayed buffer starts mid-row of pages inside a render target
+	// (no GPU texture matches): GS memory is shown, so what the GPU drew
+	// there must be read back first.
+	void SceneDisplayReadback(IDriver& gs)
+	{
+		Setup(gs);
+		gs.Write(GS_REG_PRIM, CGSHandler::PRIM_SPRITE);
+		Sprite(gs, 0, 0, 640, 448, Rgbaq(0x20, 0xC0, 0x20, 0x80));
+		Sprite(gs, 320, 0, 640, 200, Rgbaq(0xC0, 0x30, 0x30, 0x80));
+		gs.WritePriv(CGSHandler::GS_DISPFB1, 5 | (FBW << 9)); //5 pages = 320 pixels to the right
+		gs.WritePriv(CGSHandler::GS_DISPFB1 + 4, 0);
+		gs.Present();
+	}
+
 	//-------------------------------------------------------------------------
 
 	struct SCENE
@@ -653,6 +683,8 @@ int main(int argc, char** argv)
 	    {"render target alpha", SceneRenderTargetAlpha, 0.5},
 	    {"transfer", SceneTransfer, 0.5},
 	    {"textures after frame", SceneTexturesAfterFrame, 0.5},
+	    {"display inside target", SceneDisplayInsideTarget, 0.5},
+	    {"display readback", SceneDisplayReadback, 0.5},
 	};
 	std::vector<SCENE> allScenes(std::begin(scenes), std::end(scenes));
 	static std::vector<std::string> randomNames;
@@ -678,7 +710,7 @@ int main(int argc, char** argv)
 			std::printf("  FAIL %s: GL error\n", scene.name);
 			failures++;
 		}
-		if(!hardware.PresentedRenderTarget())
+		if(!hardware.PresentedRenderTarget() && std::strcmp(scene.name, "display readback"))
 		{
 			std::printf("  FAIL %s: display was not served from a render target\n", scene.name);
 			failures++;
