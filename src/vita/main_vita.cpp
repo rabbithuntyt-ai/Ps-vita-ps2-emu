@@ -42,6 +42,7 @@
 #include "GSH_Hardware.h"
 #include "Gfx.h"
 #include "GsBenchmark.h"
+#include "GsHardwareBenchmark.h"
 #include "JitMemory.h"
 #include "PH_Vita.h"
 #include "PS2VM.h"
@@ -339,13 +340,14 @@ namespace
 		return games;
 	}
 
-	// Runs the software renderer benchmark on the device and shows/saves the results.
+	// Runs the GS benchmark (software renderer, then GPU renderer) on the
+	// device and shows/saves the results.
 	void RunBenchmarkScreen()
 	{
 		std::vector<std::string> lines;
 		auto draw = [&](const char* status) {
 			BeginFrame();
-			Gfx::Text(30, 45, COLOR_ACCENT, 1.2f, "Software GS benchmark (Mpix/s)");
+			Gfx::Text(30, 45, COLOR_ACCENT, 1.2f, "GS benchmark (Mpix/s)  build " VITAPS2_BUILD);
 			for(size_t i = 0; i < lines.size(); i++)
 			{
 				Gfx::Text(30, 80 + static_cast<int>(i) * 20, COLOR_WHITE, 0.7f, lines[i].c_str());
@@ -355,22 +357,29 @@ namespace
 		};
 
 		FILE* file = std::fopen(BENCHMARK_PATH, "w");
-		for(uint32_t threads : {1u, 2u, 3u})
-		{
-			char header[64];
-			std::snprintf(header, sizeof(header), "-- %u rasterizer thread(s) --", threads);
+		if(file) std::fprintf(file, "build %s\n", VITAPS2_BUILD);
+		auto addHeader = [&](const char* header) {
 			lines.push_back(header);
 			if(file) std::fprintf(file, "%s\n", header);
 			draw("Running... (about 20 seconds)");
-			RunGsBenchmark(1.0, threads, [&](const GS_BENCHMARK_RESULT& result) {
-				char line[128];
-				std::snprintf(line, sizeof(line), "%-46s %7.1f  (%5.1f frames/s)", result.name.c_str(), result.mpixelsPerSecond, result.framesPerSecond);
-				lines.push_back(line);
-				if(file) std::fprintf(file, "%s\n", line);
-				std::printf("benchmark: %s\n", line);
-				draw("Running... (about 20 seconds)");
-			});
+		};
+		auto addResult = [&](const GS_BENCHMARK_RESULT& result) {
+			char line[128];
+			std::snprintf(line, sizeof(line), "%-46s %7.1f  (%5.1f frames/s)", result.name.c_str(), result.mpixelsPerSecond, result.framesPerSecond);
+			lines.push_back(line);
+			if(file) std::fprintf(file, "%s\n", line);
+			std::printf("benchmark: %s\n", line);
+			draw("Running... (about 20 seconds)");
+		};
+		for(uint32_t threads : {1u, 3u})
+		{
+			char header[64];
+			std::snprintf(header, sizeof(header), "-- software renderer, %u thread(s) --", threads);
+			addHeader(header);
+			RunGsBenchmark(1.0, threads, addResult);
 		}
+		addHeader("-- GPU renderer (what games use by default) --");
+		RunGsHardwareBenchmark(1.0, addResult);
 		if(file) std::fclose(file);
 
 		uint32_t previous = ~0u;

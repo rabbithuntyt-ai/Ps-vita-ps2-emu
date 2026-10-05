@@ -1,6 +1,7 @@
-// Software GS throughput benchmark. Each workload mimics a common PS2 draw
-// pattern and reports millions of pixels shaded per second. Runs on the host
-// (tests/gs_benchmark) and on the Vita (from the game list).
+// GS throughput benchmark. Each workload mimics a common PS2 draw pattern and
+// reports millions of pixels shaded per second. Runs on the host
+// (tests/gs_benchmark) and on the Vita (from the game list), against the
+// software renderer or any other target (the GPU renderer).
 
 #include "GsBenchmark.h"
 #include <chrono>
@@ -15,7 +16,7 @@ namespace
 	constexpr uint32 TEX_PTR = 0x260000; //clear of the frame (pages 0-149) and Z buffer (pages 150-299)
 	constexpr uint32 CLUT_PTR = 0x380000;
 
-	void UploadTextures(CTestGs& gs)
+	void UploadTextures(IGsBenchmarkTarget& gs)
 	{
 		//256x256 8-bit indexed texture + 256-entry 32-bit CLUT, and a 256x256 CT32 texture
 		for(uint32 y = 0; y < 256; y++)
@@ -47,11 +48,11 @@ namespace
 	struct WORKLOAD
 	{
 		const char* name;
-		std::function<void(CTestGs&)> setup;
-		std::function<uint64(CTestGs&)> draw; //returns pixels covered
+		std::function<void(IGsBenchmarkTarget&)> setup;
+		std::function<uint64(IGsBenchmarkTarget&)> draw; //returns pixels covered
 	};
 
-	uint64 FullScreenSprite(CTestGs& gs, bool uv)
+	uint64 FullScreenSprite(IGsBenchmarkTarget& gs, bool uv)
 	{
 		if(uv) gs.Write(GS_REG_UV, Uv(0, 0));
 		gs.Write(GS_REG_XYZ2, Xyz(OffX(0), OffX(0), 0x1000));
@@ -61,7 +62,7 @@ namespace
 	}
 
 	// A mesh of 32x32 pixel quads (2 triangles each) covering the screen.
-	uint64 TriangleGrid(CTestGs& gs, bool textured)
+	uint64 TriangleGrid(IGsBenchmarkTarget& gs, bool textured)
 	{
 		gs.Write(GS_REG_PRIM, CGSHandler::PRIM_TRIANGLESTRIP | (1 << 3) | (textured ? (1 << 4) : 0) |
 		                          (textured ? (1 << 6) : 0));
@@ -97,57 +98,99 @@ namespace
 	{
 		return {
 		    {"flat sprite fill (clear)",
-		     [](CTestGs& gs) { gs.Write(GS_REG_PRIM, CGSHandler::PRIM_SPRITE); },
-		     [](CTestGs& gs) {
+		     [](IGsBenchmarkTarget& gs) { gs.Write(GS_REG_PRIM, CGSHandler::PRIM_SPRITE); },
+		     [](IGsBenchmarkTarget& gs) {
 			     gs.Write(GS_REG_RGBAQ, Rgbaq(1, 2, 3, 0x80));
 			     return FullScreenSprite(gs, false);
 		     }},
 		    {"textured sprite, T8+CLUT (2D games, FMV)",
-		     [](CTestGs& gs) {
+		     [](IGsBenchmarkTarget& gs) {
 			     gs.Write(GS_REG_TEX0_1, Tex0(CGSHandler::PSMT8, true));
 			     gs.Write(GS_REG_PRIM, CGSHandler::PRIM_SPRITE | (1 << 4) | (1 << 8));
 		     },
-		     [](CTestGs& gs) {
+		     [](IGsBenchmarkTarget& gs) {
 			     gs.Write(GS_REG_RGBAQ, Rgbaq(0x80, 0x80, 0x80, 0x80));
 			     return FullScreenSprite(gs, true);
 		     }},
 		    {"textured sprite, CT32 bilinear + alpha blend",
-		     [](CTestGs& gs) {
+		     [](IGsBenchmarkTarget& gs) {
 			     gs.Write(GS_REG_TEX0_1, Tex0(CGSHandler::PSMCT32, false));
 			     gs.Write(GS_REG_TEX1_1, 1ULL << 5); //MMAG linear
 			     gs.Write(GS_REG_ALPHA_1, 0 | (1 << 2) | (0 << 4) | (1 << 6));
 			     gs.Write(GS_REG_PRIM, CGSHandler::PRIM_SPRITE | (1 << 4) | (1 << 6) | (1 << 8));
 		     },
-		     [](CTestGs& gs) {
+		     [](IGsBenchmarkTarget& gs) {
 			     gs.Write(GS_REG_RGBAQ, Rgbaq(0x80, 0x80, 0x80, 0x40));
 			     return FullScreenSprite(gs, true);
 		     }},
 		    {"gouraud triangles + z test",
-		     [](CTestGs& gs) {
+		     [](IGsBenchmarkTarget& gs) {
 			     gs.Write(GS_REG_ZBUF_1, 150);
 			     gs.Write(GS_REG_TEST_1, (1ULL << 16) | (CGSHandler::DEPTH_TEST_GEQUAL << 17));
 		     },
-		     [](CTestGs& gs) { return TriangleGrid(gs, false); }},
+		     [](IGsBenchmarkTarget& gs) { return TriangleGrid(gs, false); }},
 		    {"STQ textured T8 triangles + blend + z (3D games)",
-		     [](CTestGs& gs) {
+		     [](IGsBenchmarkTarget& gs) {
 			     gs.Write(GS_REG_ZBUF_1, 150);
 			     gs.Write(GS_REG_TEST_1, (1ULL << 16) | (CGSHandler::DEPTH_TEST_GEQUAL << 17));
 			     gs.Write(GS_REG_TEX0_1, Tex0(CGSHandler::PSMT8, true));
 			     gs.Write(GS_REG_ALPHA_1, 0 | (1 << 2) | (0 << 4) | (1 << 6));
 		     },
-		     [](CTestGs& gs) { return TriangleGrid(gs, true); }},
+		     [](IGsBenchmarkTarget& gs) { return TriangleGrid(gs, true); }},
 		};
 	}
+}
+
+namespace
+{
+	class CSoftwareTarget : public IGsBenchmarkTarget
+	{
+	public:
+		explicit CSoftwareTarget(uint32 threads)
+		    : m_gs(threads)
+		{
+		}
+		void Write(uint8 reg, uint64 value) override
+		{
+			m_gs.Write(reg, value);
+		}
+		uint8* Ram() override
+		{
+			return m_gs.Ram();
+		}
+		void Sync() override
+		{
+			m_gs.Sync();
+		}
+
+	private:
+		CTestGs m_gs;
+	};
 }
 
 std::vector<GS_BENCHMARK_RESULT> RunGsBenchmark(double secondsPerWorkload, uint32 threads,
                                                 const std::function<void(const GS_BENCHMARK_RESULT&)>& onResult)
 {
+	return RunGsBenchmarkOn(
+	    secondsPerWorkload, [threads]() { return std::make_unique<CSoftwareTarget>(threads); }, onResult);
+}
+
+std::vector<GS_BENCHMARK_RESULT> RunGsBenchmarkOn(double secondsPerWorkload, const GS_BENCHMARK_TARGET_FACTORY& factory,
+                                                  const std::function<void(const GS_BENCHMARK_RESULT&)>& onResult)
+{
 	std::vector<GS_BENCHMARK_RESULT> results;
 	for(auto& workload : MakeWorkloads())
 	{
-		CTestGs gs(threads);
-		SetupContext(gs);
+		auto target = factory();
+		auto& gs = *target;
+		// 640x448 CT32 frame at page 0, Z32 at page 150, XYOFFSET (2048,2048).
+		gs.Write(GS_REG_FRAME_1, Frame(0));
+		gs.Write(GS_REG_ZBUF_1, 150 | (0ULL << 24) | (1ULL << 32));
+		gs.Write(GS_REG_SCISSOR_1, Scissor(0, 639, 0, 447));
+		gs.Write(GS_REG_XYOFFSET_1, (2048ULL << 4) | ((2048ULL << 4) << 32));
+		gs.Write(GS_REG_TEST_1, 0);
+		gs.Write(GS_REG_PRMODECONT, 1);
+		gs.Write(GS_REG_COLCLAMP, 1);
 		UploadTextures(gs);
 		workload.setup(gs);
 

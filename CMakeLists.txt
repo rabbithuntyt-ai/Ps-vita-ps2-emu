@@ -101,6 +101,8 @@ if(VITAPS2_HAS_GL)
 		src/gs/hw/GSH_Hardware.cpp
 		src/gs/hw/GSH_Hardware.h
 		src/gs/hw/GpuGl.h
+		src/gs/hw/GsHardwareBenchmark.cpp
+		src/gs/hw/GsHardwareBenchmark.h
 	)
 	target_include_directories(gsh_hardware PUBLIC src/gs/hw)
 	target_link_libraries(gsh_hardware PUBLIC gsh_software)
@@ -152,6 +154,10 @@ else()
 	add_executable(gs_benchmark tests/gs_benchmark.cpp)
 	target_include_directories(gs_benchmark PRIVATE tests)
 	target_link_libraries(gs_benchmark PRIVATE vitaps2_common)
+	if(VITAPS2_HAS_GL)
+		target_compile_definitions(gs_benchmark PRIVATE VITAPS2_HAS_GL)
+		target_link_libraries(gs_benchmark PRIVATE gsh_hardware)
+	endif()
 
 	add_executable(gs_diff_tests tests/gs_diff_tests.cpp tests/reference/ReferenceRasterizer.cpp)
 	target_include_directories(gs_diff_tests PRIVATE tests)
