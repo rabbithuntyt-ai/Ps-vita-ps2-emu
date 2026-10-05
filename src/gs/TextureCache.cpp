@@ -90,7 +90,9 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 		m_textures.erase(lru);
 	}
 
+	static std::atomic<uint64> nextUniqueId{1};
 	auto texture = std::make_unique<CTexture>();
+	texture->m_uniqueId = nextUniqueId++;
 	texture->m_key = key;
 	texture->m_cache = this;
 	texture->m_hasSurface = texture->m_surface.Init(key.tpsm, key.tbp, key.tbw);

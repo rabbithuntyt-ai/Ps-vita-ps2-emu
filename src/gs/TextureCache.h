@@ -63,6 +63,17 @@ public:
 			return m_decodeStamp;
 		}
 
+		// Unique for the lifetime of the process (cache entries are recycled).
+		uint64 GetUniqueId() const
+		{
+			return m_uniqueId;
+		}
+
+		const KEY& GetKey() const
+		{
+			return m_key;
+		}
+
 		uint32 GetFirstPage() const
 		{
 			return m_firstPage;
@@ -106,6 +117,7 @@ public:
 		uint32 m_pageCount = 0;
 		uint32 m_decodeStamp = 0;
 		uint32 m_generation = 0;
+		uint64 m_uniqueId = 0;
 		uint64 m_lastUse = 0;
 		std::array<uint32, 256> m_clut = {};
 	};

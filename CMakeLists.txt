@@ -86,6 +86,29 @@ add_library(gsh_software STATIC
 target_include_directories(gsh_software PUBLIC src/gs src/common ${PLAY_DIR}/Source)
 target_link_libraries(gsh_software PUBLIC PlayCore)
 
+# GPU GS renderer (OpenGL fixed-function subset: vitaGL on the Vita, Mesa on
+# the host for tests).
+if(VITA)
+	set(VITAPS2_HAS_GL ON)
+else()
+	find_library(OSMESA_LIBRARY OSMesa)
+	if(OSMESA_LIBRARY)
+		set(VITAPS2_HAS_GL ON)
+	endif()
+endif()
+if(VITAPS2_HAS_GL)
+	add_library(gsh_hardware STATIC
+		src/gs/hw/GSH_Hardware.cpp
+		src/gs/hw/GSH_Hardware.h
+		src/gs/hw/GpuGl.h
+	)
+	target_include_directories(gsh_hardware PUBLIC src/gs/hw)
+	target_link_libraries(gsh_hardware PUBLIC gsh_software)
+	if(NOT VITA)
+		target_link_libraries(gsh_hardware PUBLIC ${OSMESA_LIBRARY})
+	endif()
+endif()
+
 # Frontend-independent glue shared by the Vita app and the host harness.
 add_library(vitaps2_common STATIC
 	src/common/EmuSession.cpp
@@ -102,6 +125,10 @@ else()
 		src/host/main_host.cpp
 	)
 	target_link_libraries(vitaps2_host PRIVATE vitaps2_common)
+	if(TARGET gsh_hardware)
+		target_link_libraries(vitaps2_host PRIVATE gsh_hardware)
+		target_compile_definitions(vitaps2_host PRIVATE VITAPS2_HAS_GL)
+	endif()
 
 	enable_testing()
 	add_executable(gs_software_tests tests/gs_software_tests.cpp)
@@ -123,6 +150,13 @@ else()
 	target_link_libraries(gs_parallel_tests PRIVATE vitaps2_common)
 	add_test(NAME gs_parallel_tests COMMAND gs_parallel_tests)
 
+	if(TARGET gsh_hardware)
+		add_executable(gs_hardware_tests tests/gs_hardware_tests.cpp)
+		target_include_directories(gs_hardware_tests PRIVATE tests)
+		target_link_libraries(gs_hardware_tests PRIVATE vitaps2_common gsh_hardware)
+		add_test(NAME gs_hardware_tests COMMAND gs_hardware_tests)
+	endif()
+
 	add_executable(jit_pool_tests tests/jit_pool_tests.cpp)
 	target_include_directories(jit_pool_tests PRIVATE src/common)
 	add_test(NAME jit_pool_tests COMMAND jit_pool_tests)
@@ -136,5 +170,15 @@ else()
 				-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
 				-DRUNNER=$<TARGET_FILE:vitaps2_host>
 				-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/elf_boot_test.cmake)
+		if(TARGET gsh_hardware)
+			add_test(NAME elf_boot_test_hw
+				COMMAND ${CMAKE_COMMAND}
+					-DPYTHON=${Python3_EXECUTABLE}
+					-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+					-DRUNNER=$<TARGET_FILE:vitaps2_host>
+					-DRUNNER_ARGS=--hw
+					-DSUFFIX=_hw
+					-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/elf_boot_test.cmake)
+		endif()
 	endif()
 endif()

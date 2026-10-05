@@ -1,0 +1,12 @@
+diff --git a/Source/gs/GSHandler.h b/Source/gs/GSHandler.h
+index 66bfe59a..94cb55e1 100644
+--- a/Source/gs/GSHandler.h
++++ b/Source/gs/GSHandler.h
+@@ -1137,6 +1137,6 @@ protected:
+ 	bool m_gsThreaded = true;
+ 	bool m_flipped = false;
+ 
+-private:
++	// Non-threaded handlers are pumped by their owner (GPU renderers).
+ 	CMailBox m_mailBox;
+ };

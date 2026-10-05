@@ -3,7 +3,10 @@
 // of emulated frames and writes the last displayed frame to a PPM file.
 //
 //   vitaps2_host <game.elf|game.iso> [--frames N] [--timeout SECONDS] [--out frame.ppm]
-//                [--gs-threads N] [--interlaced] [--frameskip N]
+//                [--gs-threads N] [--interlaced] [--frameskip N] [--hw]
+//
+// --hw renders with the GPU renderer on an offscreen Mesa context, pumped
+// from the main thread exactly like the Vita frontend does.
 //
 // Exit code is 0 when at least one frame was presented.
 
@@ -11,11 +14,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
 #include "EmuSession.h"
 #include "ThreadProfiler.h"
+#include "PS2VM.h"
+#ifdef VITAPS2_HAS_GL
+#include <GL/osmesa.h>
+#include "GSH_Hardware.h"
+#endif
 
 namespace
 {
@@ -56,6 +65,7 @@ int main(int argc, char** argv)
 	uint32_t gsThreads = 1;
 	bool interlaced = false;
 	uint32_t frameSkip = 0;
+	bool hardware = false;
 	for(int i = 2; i < argc; i++)
 	{
 		if(!std::strcmp(argv[i], "--frames") && (i + 1 < argc)) targetFrames = std::strtoull(argv[++i], nullptr, 10);
@@ -64,6 +74,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--gs-threads") && (i + 1 < argc)) gsThreads = std::atoi(argv[++i]);
 		else if(!std::strcmp(argv[i], "--interlaced")) interlaced = true;
 		else if(!std::strcmp(argv[i], "--frameskip") && (i + 1 < argc)) frameSkip = std::atoi(argv[++i]);
+		else if(!std::strcmp(argv[i], "--hw")) hardware = true;
 	}
 
 	const char* home = std::getenv("HOME");
@@ -77,9 +88,51 @@ int main(int argc, char** argv)
 	config.interlacedRendering = interlaced;
 	config.frameSkip = frameSkip;
 
+	// The GPU renderer runs on this thread.
+	CEmuSession* sessionPtr = nullptr;
+	std::function<void(uint32_t)> pump = [](uint32_t timeoutMs) { std::this_thread::sleep_for(std::chrono::milliseconds(timeoutMs)); };
+#ifdef VITAPS2_HAS_GL
+	OSMesaContext glContext = nullptr;
+	std::vector<uint32_t> glWindow(16 * 16);
+	if(hardware)
+	{
+		const int attribs[] = {OSMESA_FORMAT, OSMESA_RGBA, OSMESA_DEPTH_BITS, 24, OSMESA_PROFILE, OSMESA_COMPAT_PROFILE, 0};
+		glContext = OSMesaCreateContextAttribs(attribs, nullptr);
+		if(!glContext || !OSMesaMakeCurrent(glContext, glWindow.data(), GL_UNSIGNED_BYTE, 16, 16))
+		{
+			std::fprintf(stderr, "could not create an OSMesa context\n");
+			return 1;
+		}
+		CGSH_Hardware::OPTIONS options;
+		options.readbackFrames = true;
+		options.frameSink = [&sessionPtr](std::vector<uint32>& pixels, uint32 width, uint32 height) {
+			if(sessionPtr) sessionPtr->GetFrames().Publish(pixels, width, height);
+		};
+		config.gsFactory = CGSH_Hardware::GetFactoryFunction(options);
+		auto hwGs = [&sessionPtr]() -> CGSH_Hardware* {
+			return sessionPtr ? static_cast<CGSH_Hardware*>(sessionPtr->GetVm()->GetGSHandler()) : nullptr;
+		};
+		pump = [hwGs](uint32_t timeoutMs) {
+			if(auto gs = hwGs()) gs->Pump(timeoutMs);
+			else std::this_thread::sleep_for(std::chrono::milliseconds(timeoutMs));
+		};
+		config.gsPump = [pump]() { pump(2); };
+		config.gsShutdown = [hwGs]() {
+			if(auto gs = hwGs()) gs->ReleaseGpu();
+		};
+	}
+#else
+	if(hardware)
+	{
+		std::fprintf(stderr, "built without the GPU renderer\n");
+		return 2;
+	}
+#endif
+
 	try
 	{
 		CEmuSession session(config);
+		sessionPtr = &session;
 		session.Boot(bootPath);
 
 		ThreadProfiler::Sample();
@@ -92,7 +145,7 @@ int main(int argc, char** argv)
 		{
 			if(session.GetFrames().Fetch(serial, pixels, width, height)) presented++;
 			if(std::chrono::steady_clock::now() - start > std::chrono::seconds(timeoutSeconds)) break;
-			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			pump(5);
 		}
 		auto threadUsage = ThreadProfiler::Sample();
 		session.Pause();
@@ -114,6 +167,7 @@ int main(int argc, char** argv)
 		}
 		WritePpm(outPath, pixels, width, height);
 		std::printf("wrote %ux%u frame to %s\n", width, height, outPath.c_str());
+		sessionPtr = nullptr;
 	}
 	catch(const std::exception& e)
 	{

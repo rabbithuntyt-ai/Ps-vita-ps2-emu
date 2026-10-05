@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <stdexcept>
+#include <thread>
 
 #include "AppConfig.h"
 #include "PS2VM.h"
@@ -68,17 +69,26 @@ CEmuSession::CEmuSession(const CONFIG& config)
 	m_vm->Initialize();
 	m_vm->ReloadFrameRateLimit();
 
+	m_gsPump = config.gsPump;
+	m_gsShutdown = config.gsShutdown;
 	auto frames = &m_frames;
-	CGSH_Software::OPTIONS gsOptions;
-	gsOptions.gsThreaded = config.gsThreaded;
-	gsOptions.rasterizerThreads = config.rasterizerThreads;
-	gsOptions.interlacedRendering = config.interlacedRendering;
-	gsOptions.frameSkip = config.frameSkip;
-	m_vm->CreateGSHandler(CGSH_Software::GetFactoryFunction(
-	    [frames](std::vector<uint32>& pixels, uint32 width, uint32 height) {
-		    frames->Publish(pixels, width, height);
-	    },
-	    gsOptions));
+	if(config.gsFactory)
+	{
+		m_vm->CreateGSHandler(config.gsFactory);
+	}
+	else
+	{
+		CGSH_Software::OPTIONS gsOptions;
+		gsOptions.gsThreaded = config.gsThreaded;
+		gsOptions.rasterizerThreads = config.rasterizerThreads;
+		gsOptions.interlacedRendering = config.interlacedRendering;
+		gsOptions.frameSkip = config.frameSkip;
+		m_vm->CreateGSHandler(CGSH_Software::GetFactoryFunction(
+		    [frames](std::vector<uint32>& pixels, uint32 width, uint32 height) {
+			    frames->Publish(pixels, width, height);
+		    },
+		    gsOptions));
+	}
 
 	m_speedHacks.interlacedRendering = config.interlacedRendering;
 	m_speedHacks.frameSkip = config.frameSkip;
@@ -96,7 +106,8 @@ CEmuSession::~CEmuSession()
 {
 	if(m_vm)
 	{
-		m_vm->Pause();
+		RunPumped([this]() { m_vm->Pause(); });
+		if(m_gsShutdown) m_gsShutdown();
 		m_vm->DestroyPadHandler();
 		m_vm->DestroySoundHandler();
 		m_vm->DestroyGSHandler();
@@ -111,22 +122,34 @@ void CEmuSession::Boot(const std::string& path)
 		throw std::runtime_error("File not found: " + path);
 	}
 
-	m_vm->Pause();
-	m_vm->Reset();
-	if(IsBootableExecutable(path))
-	{
-		m_vm->m_ee->m_os->BootFromFile(path);
-	}
-	else if(IsBootableDiscImage(path))
-	{
-		CAppConfig::GetInstance().SetPreferencePath(PREF_PS2_CDROM0_PATH, path);
-		m_vm->CDROM0_SyncPath();
-		m_vm->m_ee->m_os->BootFromCDROM();
-	}
-	else
+	if(!IsBootableExecutable(path) && !IsBootableDiscImage(path))
 	{
 		throw std::runtime_error("Unsupported file type: " + path);
 	}
+
+	std::string error;
+	RunPumped([&]() {
+		try
+		{
+			m_vm->Pause();
+			m_vm->Reset();
+			if(IsBootableExecutable(path))
+			{
+				m_vm->m_ee->m_os->BootFromFile(path);
+			}
+			else
+			{
+				CAppConfig::GetInstance().SetPreferencePath(PREF_PS2_CDROM0_PATH, path);
+				m_vm->CDROM0_SyncPath();
+				m_vm->m_ee->m_os->BootFromCDROM();
+			}
+		}
+		catch(const std::exception& e)
+		{
+			error = e.what();
+		}
+	});
+	if(!error.empty()) throw std::runtime_error(error);
 	m_booted = true;
 	SetSpeedHacks(m_speedHacks); //Reset() restored the EE clock
 	m_vm->Resume();
@@ -136,12 +159,14 @@ void CEmuSession::SetSpeedHacks(const SPEED_HACKS& hacks)
 {
 	m_speedHacks = hacks;
 	bool wasRunning = IsRunning();
-	if(wasRunning) m_vm->Pause();
-	uint32_t percent = std::clamp<uint32_t>(hacks.eeCycleRatePercent, 25, 300);
-	m_vm->SetEeFrequencyScale(percent, 100);
+	RunPumped([&]() {
+		if(wasRunning) m_vm->Pause();
+		uint32_t percent = std::clamp<uint32_t>(hacks.eeCycleRatePercent, 25, 300);
+		m_vm->SetEeFrequencyScale(percent, 100);
+	});
 	if(wasRunning) m_vm->Resume();
 
-	if(auto gs = static_cast<CGSH_Software*>(m_vm->GetGSHandler()))
+	if(auto gs = dynamic_cast<CGSH_Software*>(m_vm->GetGSHandler()))
 	{
 		gs->SendGSCall([gs, hacks]() {
 			gs->SetInterlacedRendering(hacks.interlacedRendering);
@@ -152,7 +177,7 @@ void CEmuSession::SetSpeedHacks(const SPEED_HACKS& hacks)
 
 uint32_t CEmuSession::GetGsRasterMicros()
 {
-	auto gs = static_cast<CGSH_Software*>(m_vm->GetGSHandler());
+	auto gs = dynamic_cast<CGSH_Software*>(m_vm->GetGSHandler());
 	return gs ? gs->GetLastFrameRasterMicros() : 0;
 }
 
@@ -165,7 +190,26 @@ float CEmuSession::GetEeIdleRatio()
 
 void CEmuSession::Pause()
 {
-	m_vm->Pause();
+	RunPumped([this]() { m_vm->Pause(); });
+}
+
+void CEmuSession::RunPumped(const std::function<void()>& work)
+{
+	if(!m_gsPump)
+	{
+		work();
+		return;
+	}
+	std::atomic<bool> done{false};
+	std::thread worker([&]() {
+		work();
+		done = true;
+	});
+	while(!done)
+	{
+		m_gsPump();
+	}
+	worker.join();
 }
 
 void CEmuSession::Resume()

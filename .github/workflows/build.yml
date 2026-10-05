@@ -14,7 +14,7 @@ jobs:
         with:
           submodules: recursive
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y ninja-build libbz2-dev zlib1g-dev
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libbz2-dev zlib1g-dev libosmesa6-dev
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build

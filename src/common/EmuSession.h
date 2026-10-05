@@ -1,10 +1,12 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include "FrameSink.h"
 #include "PadHandler.h"
+#include "gs/GSHandler.h"
 #include "sound/SoundHandler.h"
 #include "signal/Signal.h"
 
@@ -24,6 +26,16 @@ public:
 		uint32_t rasterizerThreads = 1;   // threads rasterizing (GS thread included)
 		bool interlacedRendering = false; // speed hack: draw alternate lines per frame
 		uint32_t frameSkip = 0;           // speed hack: skip N of N+1 frames
+		// Renderer override (GPU renderer). The software renderer is used
+		// when empty; it publishes frames to GetFrames().
+		CGSHandler::FactoryFunction gsFactory;
+		// Non-threaded renderers run on the frontend's thread: gsPump executes
+		// pending GS work and is called repeatedly whenever the session waits
+		// on the emulation thread (pause, boot...), so that the emulation
+		// thread can never deadlock waiting on the GS. gsShutdown runs on the
+		// same thread before the renderer is destroyed.
+		std::function<void()> gsPump;
+		std::function<void()> gsShutdown;
 		CPadHandler::FactoryFunction padFactory;
 		CSoundHandler::FactoryFunction soundFactory;
 	};
@@ -84,7 +96,13 @@ public:
 	static void SetDataPaths(const std::string& dataPath, const std::string& resourcesPath);
 
 private:
+	// Runs 'work' (which may block on the emulation thread) while pumping a
+	// non-threaded GS on the calling thread.
+	void RunPumped(const std::function<void()>& work);
+
 	std::unique_ptr<CPS2VM> m_vm;
+	std::function<void()> m_gsPump;
+	std::function<void()> m_gsShutdown;
 	CFrameMailbox m_frames;
 	std::atomic<uint64_t> m_vmFrames{0};
 	Framework::CSignal<void()>::Connection m_newFrameConnection;
