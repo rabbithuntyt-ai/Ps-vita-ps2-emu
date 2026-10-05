@@ -2,7 +2,7 @@
 
 #include <functional>
 #include <vector>
-#include "gs/GSHandler.h"
+#include "GSH_Primitives.h"
 #include <atomic>
 #include <memory>
 #include "SoftwareRasterizer.h"
@@ -11,7 +11,7 @@
 // GS handler backed by CSoftwareRasterizer. All drawing happens in the
 // emulated GS local memory; on each flip the displayed buffer is converted to
 // RGBA8888 and handed to the frontend through the frame sink.
-class CGSH_Software : public CGSHandler
+class CGSH_Software : public CGSH_Primitives
 {
 public:
 	// Called on the GS thread with a tightly packed RGBA8888 (R in the low byte)
@@ -39,11 +39,6 @@ public:
 	void ProcessLocalToLocalTransfer() override;
 	void ProcessClutTransfer(uint32, uint32) override;
 
-	uint32 GetPrimitiveCount() const
-	{
-		return m_primitiveCount;
-	}
-
 	// Time the GS spent rasterizing during the last completed frame (us).
 	uint32 GetLastFrameRasterMicros() const
 	{
@@ -64,20 +59,17 @@ protected:
 	void InitializeImpl() override;
 	void ReleaseImpl() override;
 	void ResetImpl() override;
-	void WriteRegisterImpl(uint8, uint64) override;
 	void FlipImpl(const DISPLAY_INFO&) override;
 	void MarkNewFrame() override;
 	void TransferWrite(const uint8*, uint32) override;
 	void SyncCLUT(const TEX0&) override;
 
 private:
-	void VertexKick(uint8, uint64);
-	void BeginPrimitive(uint64);
-	void BuildState();
+	void OnStateChanged() override;
+	void OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND, const CSoftwareRasterizer::VERTEX*) override;
 	void Submit(CSoftwareRasterizer::PRIMITIVE_KIND, const CSoftwareRasterizer::VERTEX*);
 	void FlushRendering();
 	void UpdateRowFilter();
-	CSoftwareRasterizer::VERTEX ConvertVertex(const VERTEX&) const;
 
 	CSoftwareRasterizer m_rasterizer;
 	std::unique_ptr<CParallelRasterizer> m_parallel;
@@ -85,20 +77,10 @@ private:
 	FrameSink m_frameSink;
 	std::vector<uint32> m_frameBuffer;
 
-	VERTEX m_vtxBuffer[3] = {};
-	uint32 m_vtxCount = 0;
-	uint32 m_primitiveType = PRIM_INVALID;
-	PRMODE m_primitiveMode;
-	bool m_pendingPrim = false;
-	uint64 m_pendingPrimValue = 0;
-	uint32 m_primitiveCount = 0;
-	bool m_stateDirty = true;
-	uint64 m_lastPrimitiveMode = ~0ULL;
 
 	bool m_interlaced = false;
 	uint32 m_frameSkip = 0;
 	uint32 m_frameCounter = 0;
-	bool m_skipThisFrame = false;
 	uint64 m_frameRasterMicros = 0;
 	std::atomic<uint32> m_lastFrameRasterMicros{0};
 };
