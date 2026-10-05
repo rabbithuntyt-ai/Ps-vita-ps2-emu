@@ -1,0 +1,195 @@
+diff --git a/Source/ee/IPU.cpp b/Source/ee/IPU.cpp
+index b8efa0af..fb2fa9c4 100644
+--- a/Source/ee/IPU.cpp
++++ b/Source/ee/IPU.cpp
+@@ -881,6 +881,24 @@ void CIPU::CINFIFO::Write(void* data, unsigned int size)
+ 	m_lookupBitsDirty = true;
+ }
+ 
++unsigned int CIPU::CINFIFO::ReadAlignedBytes(uint8* data, unsigned int count)
++{
++	if((m_bitPosition % 8) != 0) return 0;
++	unsigned int total = 0;
++	while(count != 0)
++	{
++		unsigned int position = m_bitPosition / 8;
++		if(position >= m_size) break;
++		//Advance discards consumed data in 16 byte steps: read in chunks
++		unsigned int chunk = std::min(std::min(count, m_size - position), 16U);
++		memcpy(data + total, m_buffer + position, chunk);
++		Advance(static_cast<uint8>(chunk * 8));
++		total += chunk;
++		count -= chunk;
++	}
++	return total;
++}
++
+ bool CIPU::CINFIFO::TryPeekBits_LSBF(uint8 nBits, uint32& result)
+ {
+ 	//Shouldn't be used
+@@ -1941,6 +1959,8 @@ bool CIPU::CCSCCommand::Execute()
+ 			}
+ 			else
+ 			{
++				m_currentIndex += m_IN_FIFO->ReadAlignedBytes(m_block + m_currentIndex, BLOCK_SIZE - m_currentIndex);
++				if(m_currentIndex == BLOCK_SIZE) break;
+ 				uint32 blockValue = 0;
+ 				if(!m_IN_FIFO->TryGetBits_MSBF(8, blockValue))
+ 				{
+@@ -1954,58 +1974,7 @@ bool CIPU::CCSCCommand::Execute()
+ 		case STATE_CONVERTBLOCK:
+ 		{
+ 			uint32 nPixel[0x100];
+-
+-			uint8* pY = m_block;
+-			uint8* nBlockCb = m_block + 0x100;
+-			uint8* nBlockCr = m_block + 0x140;
+-
+-			uint32* pPixel = nPixel;
+-			unsigned int* pCbCrMap = m_nCbCrMap;
+-
+-			uint16 alphaTh0 = (m_TH0 & 0x1FF);
+-			uint16 alphaTh1 = (m_TH1 & 0x1FF);
+-
+-			for(unsigned int i = 0; i < 16; i++)
+-			{
+-				for(unsigned int j = 0; j < 16; j++)
+-				{
+-					float nY = pY[j];
+-					float nCb = nBlockCb[pCbCrMap[j]];
+-					float nCr = nBlockCr[pCbCrMap[j]];
+-
+-					float nR = nY + 1.402f * (nCr - 128);
+-					float nG = nY - 0.34414f * (nCb - 128) - 0.71414f * (nCr - 128);
+-					float nB = nY + 1.772f * (nCb - 128);
+-
+-					nR = std::clamp(nR, 0.f, 255.f);
+-					nG = std::clamp(nG, 0.f, 255.f);
+-					nB = std::clamp(nB, 0.f, 255.f);
+-
+-					uint8 a = 0;
+-					uint8 r = static_cast<uint8>(nR);
+-					uint8 g = static_cast<uint8>(nG);
+-					uint8 b = static_cast<uint8>(nB);
+-
+-					if(r < alphaTh0 && g < alphaTh0 && b < alphaTh0)
+-					{
+-						a = 0;
+-					}
+-					else if(r < alphaTh1 && g < alphaTh1 && b < alphaTh1)
+-					{
+-						a = 0x40;
+-					}
+-					else
+-					{
+-						a = 0x80;
+-					}
+-
+-					pPixel[j] = (a << 24) | (b << 16) | (g << 8) | (r << 0);
+-				}
+-
+-				pY += 0x10;
+-				pCbCrMap += 0x10;
+-				pPixel += 0x10;
+-			}
++			ConvertMacroblockToRgba32(m_block, nPixel, m_TH0, m_TH1);
+ 
+ 			if(m_command.ofm == 1)
+ 			{
+@@ -2050,6 +2019,71 @@ bool CIPU::CCSCCommand::Execute()
+ 	}
+ }
+ 
++namespace
++{
++	// 16.16 fixed point YCbCr -> RGB contributions, indexed by Cb or Cr.
++	struct CSC_TABLES
++	{
++		int32 rCr[256], gCb[256], gCr[256], bCb[256];
++
++		CSC_TABLES()
++		{
++			for(int i = 0; i < 256; i++)
++			{
++				int c = i - 128;
++				rCr[i] = static_cast<int32>(1.402 * 65536.0 * c);
++				gCb[i] = static_cast<int32>(-0.34414 * 65536.0 * c);
++				gCr[i] = static_cast<int32>(-0.71414 * 65536.0 * c);
++				bCb[i] = static_cast<int32>(1.772 * 65536.0 * c);
++			}
++		}
++	};
++
++	inline uint32 ClampChannel(int32 value)
++	{
++		if(value < 0) return 0;
++		value >>= 16;
++		return (value > 255) ? 255 : static_cast<uint32>(value);
++	}
++}
++
++void CIPU::ConvertMacroblockToRgba32(const uint8* block, uint32* pixels, uint16 th0, uint16 th1)
++{
++	static const CSC_TABLES tables;
++	const uint8* yBlock = block;
++	const uint8* cbBlock = block + 0x100;
++	const uint8* crBlock = block + 0x140;
++	uint32 alphaTh0 = (th0 & 0x1FF);
++	uint32 alphaTh1 = (th1 & 0x1FF);
++	for(unsigned int i = 0; i < 16; i++)
++	{
++		const uint8* cbRow = cbBlock + (i / 2) * 8;
++		const uint8* crRow = crBlock + (i / 2) * 8;
++		for(unsigned int j = 0; j < 16; j++)
++		{
++			int32 y = static_cast<int32>(yBlock[j]) << 16;
++			uint32 cb = cbRow[j / 2];
++			uint32 cr = crRow[j / 2];
++			uint32 r = ClampChannel(y + tables.rCr[cr]);
++			uint32 g = ClampChannel(y + tables.gCb[cb] + tables.gCr[cr]);
++			uint32 b = ClampChannel(y + tables.bCb[cb]);
++
++			uint32 a = 0x80;
++			if(r < alphaTh0 && g < alphaTh0 && b < alphaTh0)
++			{
++				a = 0;
++			}
++			else if(r < alphaTh1 && g < alphaTh1 && b < alphaTh1)
++			{
++				a = 0x40;
++			}
++			pixels[j] = (a << 24) | (b << 16) | (g << 8) | (r << 0);
++		}
++		yBlock += 0x10;
++		pixels += 0x10;
++	}
++}
++
+ void CIPU::CCSCCommand::GenerateCbCrMap()
+ {
+ 	unsigned int* pCbCrMap = m_nCbCrMap;
+diff --git a/Source/ee/IPU.h b/Source/ee/IPU.h
+index a46cb5c8..eb6effc9 100644
+--- a/Source/ee/IPU.h
++++ b/Source/ee/IPU.h
+@@ -23,6 +23,10 @@ public:
+ 	CIPU(CINTC&);
+ 	virtual ~CIPU() = default;
+ 
++	// Converts one 16x16 macroblock in RAW8 layout (256 Y, 64 Cb, 64 Cr) to
++	// RGBA32 with the CSC alpha thresholds. Integer arithmetic.
++	static void ConvertMacroblockToRgba32(const uint8* block, uint32* pixels, uint16 th0, uint16 th1);
++
+ 	enum REGISTER
+ 	{
+ 		IPU_CMD = 0x10002000,
+@@ -163,6 +167,9 @@ private:
+ 		virtual ~CINFIFO() = default;
+ 
+ 		void Write(void*, unsigned int);
++		// Reads whole bytes when the read position is byte aligned. Returns
++		// the number of bytes read (0 when unaligned or empty).
++		unsigned int ReadAlignedBytes(uint8*, unsigned int);
+ 
+ 		void Advance(uint8) override;
+ 		uint8 GetBitIndex() const override;

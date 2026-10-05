@@ -170,6 +170,14 @@ else()
 		add_test(NAME ui_render_test COMMAND ui_render_test)
 	endif()
 
+	add_executable(idct_tests tests/idct_tests.cpp)
+	target_link_libraries(idct_tests PRIVATE PlayCore)
+	add_test(NAME idct_tests COMMAND idct_tests)
+
+	add_executable(ipu_tests tests/ipu_tests.cpp)
+	target_link_libraries(ipu_tests PRIVATE PlayCore)
+	add_test(NAME ipu_tests COMMAND ipu_tests)
+
 	add_executable(jit_pool_tests tests/jit_pool_tests.cpp)
 	target_include_directories(jit_pool_tests PRIVATE src/common)
 	add_test(NAME jit_pool_tests COMMAND jit_pool_tests)
