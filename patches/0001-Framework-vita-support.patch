@@ -103,3 +103,19 @@ index f7a9f8b..f66cd07 100644
  #elif defined(__linux__) || defined(__FreeBSD__) || defined(__EMSCRIPTEN__)
  
  fs::path PathUtils::GetAppResourcesPath()
+diff --git a/src/http/HttpServer.cpp b/src/http/HttpServer.cpp
+index 0071562..cb7925b 100644
+--- a/src/http/HttpServer.cpp
++++ b/src/http/HttpServer.cpp
+@@ -6,6 +6,11 @@
+ #include "SocketStream.h"
+ #include "StdStreamUtils.h"
+ 
++#ifndef SOMAXCONN
++//Not defined by the PlayStation Vita's socket headers
++#define SOMAXCONN 128
++#endif
++
+ using namespace Framework;
+ 
+ CHttpServer::CHttpServer(uint16 port, const RequestHandler& requestHandler, const fs::path& logPath)

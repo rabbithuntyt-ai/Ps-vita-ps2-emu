@@ -72,8 +72,13 @@ else()
 
 	enable_testing()
 	add_executable(gs_software_tests tests/gs_software_tests.cpp)
+	target_include_directories(gs_software_tests PRIVATE tests)
 	target_link_libraries(gs_software_tests PRIVATE vitaps2_common)
 	add_test(NAME gs_software_tests COMMAND gs_software_tests)
+
+	add_executable(gs_benchmark tests/gs_benchmark.cpp)
+	target_include_directories(gs_benchmark PRIVATE tests)
+	target_link_libraries(gs_benchmark PRIVATE vitaps2_common)
 
 	add_executable(jit_pool_tests tests/jit_pool_tests.cpp)
 	target_include_directories(jit_pool_tests PRIVATE src/common)

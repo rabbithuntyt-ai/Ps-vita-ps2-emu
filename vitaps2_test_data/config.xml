@@ -1,0 +1,5 @@
+<Config>
+	<Preference Name="renderer.presentationmode" Type="integer" Value="1" />
+	<Preference Name="renderer.ramreads.enabled" Type="boolean" Value="true" />
+	<Preference Name="renderer.widescreen" Type="boolean" Value="false" />
+</Config>
