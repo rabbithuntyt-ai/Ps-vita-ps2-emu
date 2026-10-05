@@ -77,6 +77,7 @@ public:
 		uint32 downloadedPixels = 0;
 		uint32 uploadedPixels = 0;
 		uint32 approximateBlends = 0;
+		uint32 approximateWrapModes = 0; //region repeat masks GL cannot express
 		uint32 redundantStateChanges = 0; //state rewrites that did not break batching //state changes with a blend GL cannot express
 	};
 
@@ -159,6 +160,16 @@ private:
 	void DownloadTargetsOverlapping(uint32 start, uint32 size);
 	void UploadTargetsOverlapping(uint32 start, uint32 size);
 
+	// Part of a decoded texture uploaded as a GL texture, with its wrap mode:
+	// region clamp/repeat modes become a sub-texture with clamp/repeat.
+	struct AXIS_REGION
+	{
+		uint32 origin = 0;
+		uint32 size = 0;
+		GLint wrap = GL_REPEAT;
+	};
+	AXIS_REGION ResolveWrap(uint32 mode, uint32 minValue, uint32 maxValue, uint32 size);
+
 	void ApplyState();
 	void SetupAlphaCombiner(bool fix);
 	void SetupFog();
@@ -170,7 +181,8 @@ private:
 	bool m_gpuInitialized = false;
 	CTextureCache m_textureCache;
 	std::vector<std::unique_ptr<TARGET>> m_targets;
-	std::map<uint64, CACHED_TEXTURE> m_glTextures;
+	// Keyed by texture cache entry and uploaded region (see TEXTURE_REGION).
+	std::map<std::pair<uint64, uint64>, CACHED_TEXTURE> m_glTextures;
 	uint32 m_useCounter = 0;
 	uint64 m_clutHash = 0;
 

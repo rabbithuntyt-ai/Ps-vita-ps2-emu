@@ -481,7 +481,7 @@ namespace
 			GsMemory::WriteRaw(gs.Ram(), CGSHandler::PSMCT32, clutPtr, 1, i & 15, i >> 4, ((i * 0x9E3779B1) & 0x00FFFFFF) | ((i & 0x7F) << 24));
 
 		// HW_RANDOM_NO=<letters> disables features to isolate differences:
-		// b=blending a=alpha test z=depth test (ALWAYS) t=texturing p=perspective f=fog
+		// b=blending a=alpha test z=depth test (ALWAYS) t=texturing p=perspective f=fog r=region wrap modes
 		const char* disabled = std::getenv("HW_RANDOM_NO");
 		auto off = [&](char c) { return disabled && std::strchr(disabled, c); };
 		const char* env = std::getenv("HW_RANDOM_BATCHES");
@@ -506,7 +506,27 @@ namespace
 			gs.Write(GS_REG_TEX0_1, indexed ? Tex0(0x2C0000, 1, CGSHandler::PSMT8, 6, 6, tcc, tfx, clutPtr, true)
 			                                : Tex0(texPtr, 1, CGSHandler::PSMCT32, 6, 6, tcc, tfx));
 			gs.Write(GS_REG_TEX1_1, bilinear ? ((1ULL << 5) | (1ULL << 6)) : 0);
-			gs.Write(GS_REG_CLAMP_1, rand(2) ? 0 : (1 | (1 << 2)));
+			// Wrap modes: repeat, clamp, region clamp, region repeat (power
+			// of two mask with an aligned offset, the form games use).
+			auto wrapAxis = [&](uint64& mode, uint64& minValue, uint64& maxValue) {
+				mode = off('r') ? rand(2) : rand(4);
+				minValue = maxValue = 0;
+				if(mode == 2)
+				{
+					minValue = rand(48);
+					maxValue = minValue + rand(16);
+				}
+				else if(mode == 3)
+				{
+					uint32 k = 2 + rand(4);
+					minValue = (1u << k) - 1;
+					maxValue = rand(64 >> k) << k;
+				}
+			};
+			uint64 wms, minu, maxu, wmt, minv, maxv;
+			wrapAxis(wms, minu, maxu);
+			wrapAxis(wmt, minv, maxv);
+			gs.Write(GS_REG_CLAMP_1, wms | (wmt << 2) | (minu << 4) | (maxu << 14) | (minv << 24) | (maxv << 34));
 			bool sprite = rand(3) == 0;
 			bool fst = sprite || rand(2) || off('p');
 			bool abe = rand(2) && !off('b');

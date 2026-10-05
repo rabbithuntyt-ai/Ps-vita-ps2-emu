@@ -212,7 +212,7 @@ void CGSH_Hardware::InitializeImpl()
 	glBindTexture(GL_TEXTURE_2D, white.texture);
 	uint32 whiteTexel = 0xFFFFFFFF;
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &whiteTexel);
-	m_glTextures[0] = white;
+	m_glTextures[{0, 0}] = white;
 }
 
 void CGSH_Hardware::ReleaseImpl()
@@ -672,7 +672,7 @@ void CGSH_Hardware::BindTexture()
 
 	if(!s.textured)
 	{
-		glBindTexture(GL_TEXTURE_2D, m_glTextures[0].texture);
+		glBindTexture(GL_TEXTURE_2D, m_glTextures[{0, 0}].texture);
 		return;
 	}
 
@@ -742,13 +742,30 @@ void CGSH_Hardware::BindTexture()
 	DownloadTargetsOverlapping(firstPage * 8192, pageCount * 8192);
 
 	auto texture = m_textureCache.Get(key);
-	auto& glTexture = m_glTextures[texture->GetUniqueId()];
+	auto regionU = ResolveWrap(s.wms, s.minu, s.maxu, s.tw);
+	auto regionV = ResolveWrap(s.wmt, s.minv, s.maxv, s.th);
+	uint64 regionKey = static_cast<uint64>(regionU.origin) | (static_cast<uint64>(regionU.size) << 16) |
+	                   (static_cast<uint64>(regionV.origin) << 32) | (static_cast<uint64>(regionV.size) << 48);
+	auto& glTexture = m_glTextures[{texture->GetUniqueId(), regionKey}];
 	if(!glTexture.texture || (glTexture.generation != texture->GetGeneration()))
 	{
 		texture->DecodeAll();
 		if(!glTexture.texture) glGenTextures(1, &glTexture.texture);
 		glBindTexture(GL_TEXTURE_2D, glTexture.texture);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, s.tw, s.th, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture->Texels());
+		if((regionU.size == s.tw) && (regionV.size == s.th))
+		{
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, s.tw, s.th, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture->Texels());
+		}
+		else
+		{
+			m_transferPixels.resize(regionU.size * regionV.size);
+			for(uint32 y = 0; y < regionV.size; y++)
+			{
+				std::memcpy(m_transferPixels.data() + y * regionU.size,
+				            texture->Texels() + (regionV.origin + y) * s.tw + regionU.origin, regionU.size * 4);
+			}
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, regionU.size, regionV.size, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_transferPixels.data());
+		}
 		glTexture.generation = texture->GetGeneration();
 		m_stats.textureUploads++;
 	}
@@ -757,15 +774,20 @@ void CGSH_Hardware::BindTexture()
 	GLint filter = s.bilinear ? GL_LINEAR : GL_NEAREST;
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (s.wms == CLAMP_MODE_REPEAT) ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (s.wmt == CLAMP_MODE_REPEAT) ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, regionU.wrap);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, regionV.wrap);
+	// Texture coordinates are normalized to TW x TH: remap to the region.
+	m_texScaleS = static_cast<float>(s.tw) / static_cast<float>(regionU.size);
+	m_texScaleT = static_cast<float>(s.th) / static_cast<float>(regionV.size);
+	m_texOffsetS = -static_cast<float>(regionU.origin) / static_cast<float>(regionU.size);
+	m_texOffsetT = -static_cast<float>(regionV.origin) / static_cast<float>(regionV.size);
 
 	// Evict GL textures that have not been used for a while.
 	if(m_glTextures.size() > 96)
 	{
 		for(auto it = m_glTextures.begin(); it != m_glTextures.end();)
 		{
-			if((it->first != 0) && (m_useCounter - it->second.lastUse > 64))
+			if((it->first.first != 0) && (m_useCounter - it->second.lastUse > 64))
 			{
 				glDeleteTextures(1, &it->second.texture);
 				it = m_glTextures.erase(it);
@@ -776,6 +798,51 @@ void CGSH_Hardware::BindTexture()
 			}
 		}
 	}
+}
+
+CGSH_Hardware::AXIS_REGION CGSH_Hardware::ResolveWrap(uint32 mode, uint32 minValue, uint32 maxValue, uint32 size)
+{
+	AXIS_REGION region;
+	region.origin = 0;
+	region.size = size;
+	switch(mode)
+	{
+	case CLAMP_MODE_REPEAT:
+		region.wrap = GL_REPEAT;
+		break;
+	case CLAMP_MODE_CLAMP:
+		region.wrap = GL_CLAMP_TO_EDGE;
+		break;
+	case CLAMP_MODE_REGION_CLAMP:
+	{
+		// Clamp to [min, max] (within the texture).
+		uint32 first = std::min(minValue, size - 1);
+		uint32 last = std::min(std::max(maxValue, first), size - 1);
+		region.origin = first;
+		region.size = last - first + 1;
+		region.wrap = GL_CLAMP_TO_EDGE;
+	}
+	break;
+	case CLAMP_MODE_REGION_REPEAT:
+	{
+		// u = (u & mask) | fix: a repeating 2^k sub-texture when the mask is
+		// a low bit mask and fix does not overlap it.
+		uint32 mask = minValue, fix = maxValue;
+		bool lowMask = ((mask & (mask + 1)) == 0);
+		if(lowMask && ((fix & mask) == 0) && (fix + mask + 1 <= size))
+		{
+			region.origin = fix;
+			region.size = mask + 1;
+		}
+		else
+		{
+			m_stats.approximateWrapModes++;
+		}
+		region.wrap = GL_REPEAT;
+	}
+	break;
+	}
+	return region;
 }
 
 void CGSH_Hardware::ApplyState()

@@ -58,7 +58,8 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 - [ ] GPU renderer: exact blending for `(A-B)*C+A` forms (e.g. `Cs*(1+As)`) via a custom GXM shader with framebuffer fetch; FIX blend + alpha test together
 - [ ] GPU renderer: affine (not perspective) Gouraud color and fog interpolation on STQ primitives (differs when Q varies strongly within a triangle)
 - [x] GPU renderer: fog (second texture stage interpolating towards FOGCOL)
-- [ ] GPU renderer: region clamp modes, alpha test fail modes, 16-bit dithering, depth buffer readback
+- [x] GPU renderer: region clamp and (power of two) region repeat
+- [ ] GPU renderer: alpha test fail modes, 16-bit dithering, depth buffer readback
 - [ ] GPU renderer: upscaling (render targets at 2x where VRAM allows)
 - [ ] Upscaled UI/2D option where it is cheap
 
