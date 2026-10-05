@@ -36,7 +36,8 @@
 // live in CDRAM through vita2d. Requires ATTRIBUTE2=12 in param.sfo.
 extern "C"
 {
-	int _newlib_heap_size_user = 288 * 1024 * 1024;
+	// Leaves room for the JIT pool (VM block) inside the app's memory budget.
+	int _newlib_heap_size_user = 240 * 1024 * 1024;
 	unsigned int sceUserMainThreadStackSize = 1 * 1024 * 1024;
 }
 
@@ -49,7 +50,8 @@ namespace
 	constexpr const char* BENCHMARK_PATH = "ux0:data/VitaPS2/benchmark.txt";
 	constexpr const char* BUILTIN_TEST = "app0:gs_test.elf";
 	constexpr const char* BUILTIN_TEST_NAME = "[Built-in] GS self test";
-	constexpr size_t JIT_POOL_SIZE = 40 * 1024 * 1024;
+	constexpr size_t JIT_POOL_MIN = 8 * 1024 * 1024;
+	constexpr size_t JIT_POOL_MAX = 48 * 1024 * 1024;
 
 	constexpr unsigned int COLOR_WHITE = RGBA8(255, 255, 255, 255);
 	constexpr unsigned int COLOR_GREY = RGBA8(150, 150, 160, 255);
@@ -508,11 +510,12 @@ int main()
 	sceIoMkdir(GAMES_PATH, 0777);
 	sceIoMkdir(SETTINGS_PATH, 0777);
 
-	if(!VitaJit_Init(JIT_POOL_SIZE))
+	if(!VitaJit_Init(JIT_POOL_MIN, JIT_POOL_MAX))
 	{
-		ShowMessage("Cannot allocate JIT memory",
-		            "VitaPS2 needs unsafe homebrew to be enabled.\n"
-		            "Open HENkaku Settings and enable \"Unsafe Homebrew\".");
+		std::string details = VitaJit_GetDiagnostics() +
+		                      "\nIf the error is 0x80020??? check that \"Unsafe Homebrew\" is enabled\n"
+		                      "in HENkaku Settings. Please report this screen with log.txt.";
+		ShowMessage("Cannot allocate JIT memory", details);
 		vita2d_fini();
 		sceKernelExitProcess(0);
 		return 0;

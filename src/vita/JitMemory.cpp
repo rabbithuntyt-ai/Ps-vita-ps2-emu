@@ -1,6 +1,8 @@
 #include "JitMemory.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <string>
 #include <cstdlib>
 #include <mutex>
 #include <psp2/kernel/sysmem.h>
@@ -16,18 +18,49 @@ namespace
 	SceUID g_block = -1;
 	std::recursive_mutex g_writeMutex;
 	int g_writeDepth = 0;
+	std::string g_diagnostics;
 }
 
-bool VitaJit_Init(size_t poolSize)
+std::string VitaJit_GetDiagnostics()
+{
+	return g_diagnostics;
+}
+
+bool VitaJit_Init(size_t minSize, size_t maxSize)
 {
 	if(g_block >= 0) return true;
-	poolSize = (poolSize + 0xFFFFF) & ~static_cast<size_t>(0xFFFFF); //1MB granularity
-	g_block = sceKernelAllocMemBlockForVM("VitaPS2_JIT", poolSize);
-	if(g_block < 0)
+	const size_t MB = 1024 * 1024;
+	minSize = std::max<size_t>((minSize + MB - 1) & ~(MB - 1), MB);
+	maxSize = std::max<size_t>((maxSize + MB - 1) & ~(MB - 1), minSize);
+
+	SceKernelFreeMemorySizeInfo freeInfo = {};
+	freeInfo.size = sizeof(freeInfo);
+	sceKernelGetFreeMemorySize(&freeInfo);
+	char buffer[256];
+	std::snprintf(buffer, sizeof(buffer), "Free memory: user %u KB, cdram %u KB, phycont %u KB\n",
+	              freeInfo.size_user / 1024, freeInfo.size_cdram / 1024, freeInfo.size_phycont / 1024);
+	g_diagnostics = buffer;
+	std::printf("%s", buffer);
+
+	// Try big first, then step down: the largest block that fits wins.
+	size_t poolSize = maxSize;
+	int lastError = 0;
+	while(true)
 	{
-		std::printf("sceKernelAllocMemBlockForVM failed: 0x%08X\n", static_cast<unsigned int>(g_block));
-		return false;
+		g_block = sceKernelAllocMemBlockForVM("VitaPS2_JIT", poolSize);
+		if(g_block >= 0) break;
+		lastError = g_block;
+		std::printf("sceKernelAllocMemBlockForVM(%u MB) failed: 0x%08X\n", static_cast<unsigned int>(poolSize / MB), static_cast<unsigned int>(lastError));
+		if(poolSize <= minSize)
+		{
+			std::snprintf(buffer, sizeof(buffer), "sceKernelAllocMemBlockForVM failed for %u..%u MB, last error 0x%08X\n",
+			              static_cast<unsigned int>(minSize / MB), static_cast<unsigned int>(maxSize / MB), static_cast<unsigned int>(lastError));
+			g_diagnostics += buffer;
+			return false;
+		}
+		poolSize = std::max(minSize, poolSize - 4 * MB);
 	}
+	std::printf("JIT pool: %u MB\n", static_cast<unsigned int>(poolSize / MB));
 	void* base = nullptr;
 	if(sceKernelGetMemBlockBase(g_block, &base) < 0)
 	{
