@@ -123,6 +123,8 @@ add_library(vitaps2_common STATIC
 	src/common/EmuSession.cpp
 	src/common/EmuSession.h
 	src/common/FrameSink.h
+	src/common/AudioStretcher.cpp
+	src/common/AudioStretcher.h
 )
 target_include_directories(vitaps2_common PUBLIC src/common)
 target_link_libraries(vitaps2_common PUBLIC gsh_software PlayCore)
@@ -177,6 +179,10 @@ else()
 	add_executable(ipu_tests tests/ipu_tests.cpp)
 	target_link_libraries(ipu_tests PRIVATE PlayCore)
 	add_test(NAME ipu_tests COMMAND ipu_tests)
+
+	add_executable(audio_stretch_tests tests/audio_stretch_tests.cpp)
+	target_link_libraries(audio_stretch_tests PRIVATE vitaps2_common)
+	add_test(NAME audio_stretch_tests COMMAND audio_stretch_tests)
 
 	add_executable(jit_pool_tests tests/jit_pool_tests.cpp)
 	target_include_directories(jit_pool_tests PRIVATE src/common)

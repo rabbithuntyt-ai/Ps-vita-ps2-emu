@@ -1,15 +1,15 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
-#include <mutex>
 #include <thread>
 #include <vector>
+#include "AudioStretcher.h"
 #include "sound/SoundHandler.h"
 
 // Streams the SPU2 output (44.1kHz stereo) to a BGM audio port from a
-// dedicated thread. The emulator never blocks on audio: when the ring buffer
-// is full, the oldest samples are dropped; when it runs dry, silence plays.
+// dedicated thread. The emulator never blocks on audio. When it runs below
+// full speed, the stream is time-stretched (pitch preserved) instead of
+// being chopped into sound and silence.
 class CSH_Vita : public CSoundHandler
 {
 public:
@@ -23,11 +23,14 @@ public:
 	bool HasFreeBuffers() override;
 	void RecycleBuffers() override;
 
+	// Last stretcher state, for the performance overlay.
+	static float GetTempo();
+	static uint32_t GetUnderruns();
+
 private:
 	enum
 	{
-		GRAIN = 1024,                 //stereo frames per output call
-		RING_FRAMES = GRAIN * 8,
+		GRAIN = 1024, //stereo frames per output call
 	};
 
 	void ThreadProc();
@@ -35,8 +38,5 @@ private:
 	int m_port = -1;
 	std::thread m_thread;
 	std::atomic<bool> m_running{true};
-	std::mutex m_mutex;
-	std::vector<int16> m_ring;     //interleaved stereo
-	size_t m_readPos = 0;
-	size_t m_available = 0;        //in stereo frames
+	CAudioStretcher m_stretcher;
 };

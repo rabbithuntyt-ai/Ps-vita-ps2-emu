@@ -27,6 +27,7 @@
 #include <psp2/ctrl.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/power.h>
 #include <vitaGL.h>
@@ -476,6 +477,8 @@ namespace
 		uint32_t previousButtons = ~0u;
 
 		uint64_t statsTime = sceKernelGetProcessTimeWide();
+		uint64_t lastPresent = 0;
+		bool newContent = true;
 		uint64_t statsVmFrames = 0, statsPresented = 0, presented = 0;
 		float vmFps = 0, presentFps = 0;
 		std::vector<ThreadProfiler::SAMPLE> threadUsage;
@@ -492,12 +495,14 @@ namespace
 				SaveSettings(path, settings);
 				if(quit) break;
 				previousButtons = ~0u;
+				newContent = true;
 				continue;
 			}
 			if((buttons & SCE_CTRL_SELECT) && (pressed & SCE_CTRL_L1))
 			{
 				settings.showStats = !settings.showStats;
 				SaveSettings(path, settings);
+				newContent = true;
 			}
 
 			if(gpu)
@@ -511,7 +516,11 @@ namespace
 				{
 					flipped = gs->Pump(4);
 				}
-				if(flipped) presented++;
+				if(flipped)
+				{
+					presented++;
+					newContent = true;
+				}
 				auto display = gs->GetDisplayTexture();
 				screen.texture = display.texture;
 				screen.textureWidth = display.textureWidth;
@@ -527,6 +536,7 @@ namespace
 				if(session->GetFrames().Fetch(serial, pixels, width, height))
 				{
 					presented++;
+					newContent = true;
 					Gfx::UploadFrame(pixels.data(), width, height);
 					screen.texture = Gfx::FrameTexture();
 					screen.textureWidth = screen.textureHeight = Gfx::FRAME_TEXTURE_SIZE;
@@ -552,13 +562,23 @@ namespace
 					std::printf("cpu %-18s %5.1f%%\n", usage.name.c_str(), usage.cpuPercent);
 				}
 				std::printf("fps vm %.1f out %.1f ee-idle %.0f%%\n", vmFps, presentFps, session->GetEeIdleRatio() * 100.0f);
+				newContent |= settings.showStats;
 			}
+
+			// Redrawing an unchanged screen costs GPU time the GS needs.
+			if(!newContent && (now - lastPresent < 100000))
+			{
+				if(!gpu) sceKernelDelayThread(2000); //the GPU path waits in Pump()
+				continue;
+			}
+			newContent = false;
+			lastPresent = now;
 
 			BeginFrame();
 			DrawScreen(screen, settings.stretch);
 			if(settings.showStats)
 			{
-				int lines = 4 + static_cast<int>(threadUsage.size());
+				int lines = 5 + static_cast<int>(threadUsage.size());
 				Gfx::Rect(0, 0, 400, 10 + lines * 20, Gfx::Rgba(0, 0, 0, 160));
 				Gfx::Textf(8, 20, COLOR_WHITE, 0.7f, "VM %.1f fps  out %.1f fps  %ux%u", vmFps, presentFps, screen.width, screen.height);
 				Gfx::Textf(8, 40, COLOR_GREY, 0.7f, "EE idle %.0f%%  JIT %u/%u KB", session->GetEeIdleRatio() * 100.0f,
@@ -574,12 +594,14 @@ namespace
 				{
 					Gfx::Text(8, 60, COLOR_GREY, 0.7f, "Software renderer");
 				}
-				Gfx::Text(8, 80, COLOR_ACCENT, 0.7f, "CPU per thread (100% = one core):");
+				Gfx::Textf(8, 80, COLOR_GREY, 0.7f, "Audio tempo %.0f%%  underruns %u", CSH_Vita::GetTempo() * 100.0f,
+				           CSH_Vita::GetUnderruns());
+				Gfx::Text(8, 100, COLOR_ACCENT, 0.7f, "CPU per thread (100% = one core):");
 				int line = 0;
 				for(const auto& usage : threadUsage)
 				{
 					uint32_t color = (usage.cpuPercent > 90.0f) ? COLOR_WARN : COLOR_GREY;
-					Gfx::Textf(16, 100 + line * 20, color, 0.7f, "%-18s %5.1f%%", usage.name.c_str(), usage.cpuPercent);
+					Gfx::Textf(16, 120 + line * 20, color, 0.7f, "%-18s %5.1f%%", usage.name.c_str(), usage.cpuPercent);
 					line++;
 				}
 			}
