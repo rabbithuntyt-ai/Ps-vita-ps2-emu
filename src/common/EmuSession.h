@@ -58,6 +58,8 @@ public:
 
 	static bool IsBootableExecutable(const std::string& path);
 	static bool IsBootableDiscImage(const std::string& path);
+	// Disc serial from SYSTEM.CNF (e.g. "SLUS-20228"); empty when unknown.
+	static std::string GetDiscSerial(const std::string& path);
 
 	// Boots an .elf directly or a disc image (.iso/.cso/.chd/.isz/.cue/.mds/.bin).
 	// Throws std::runtime_error on failure.

@@ -6,6 +6,7 @@
 #include <thread>
 
 #include "AppConfig.h"
+#include "DiskUtils.h"
 #include "PS2VM.h"
 #include "PS2VM_Preferences.h"
 #include "PathUtils.h"
@@ -55,6 +56,20 @@ bool CEmuSession::IsBootableDiscImage(const std::string& path)
 	static const char* extensions[] = {".iso", ".cso", ".chd", ".isz", ".cue", ".mds", ".bin"};
 	auto ext = LowerExtension(path);
 	return std::any_of(std::begin(extensions), std::end(extensions), [&](const char* e) { return ext == e; });
+}
+
+std::string CEmuSession::GetDiscSerial(const std::string& path)
+{
+	if(!IsBootableDiscImage(path)) return std::string();
+	try
+	{
+		std::string serial;
+		if(DiskUtils::TryGetDiskId(path, &serial)) return serial;
+	}
+	catch(const std::exception&)
+	{
+	}
+	return std::string();
 }
 
 CEmuSession::CEmuSession(const CONFIG& config)

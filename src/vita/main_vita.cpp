@@ -32,8 +32,10 @@
 #include <psp2/power.h>
 #include <vitaGL.h>
 
+#include "AutoCycleRate.h"
 #include "CpuScreen.h"
 #include "EmuSession.h"
+#include "GameProfiles.h"
 #include "GSH_Hardware.h"
 #include "Gfx.h"
 #include "GsBenchmark.h"
@@ -129,7 +131,7 @@ namespace
 
 	struct GAME_SETTINGS
 	{
-		uint32_t eeCycleRate = 100;
+		uint32_t eeCycleRate = 100; //0: auto
 		bool interlaced = false;
 		uint32_t frameSkip = 0;
 		bool showStats = true;
@@ -144,24 +146,33 @@ namespace
 		return std::string(SETTINGS_PATH) + "/" + gamePath.substr(slash + 1) + ".ini";
 	}
 
-	GAME_SETTINGS LoadSettings(const std::string& gamePath)
+	void ApplySetting(GAME_SETTINGS& settings, const std::string& key, const std::string& text)
+	{
+		uint32_t value = static_cast<uint32_t>(std::strtoul(text.c_str(), nullptr, 10));
+		if(key == "ee_cycle_rate") settings.eeCycleRate = value;
+		else if(key == "interlaced") settings.interlaced = value != 0;
+		else if(key == "frame_skip") settings.frameSkip = value;
+		else if(key == "show_stats") settings.showStats = value != 0;
+		else if(key == "stretch") settings.stretch = value != 0;
+		else if(key == "software_renderer") settings.softwareRenderer = value != 0;
+		else if(key == "threaded_vu1") settings.threadedVu1 = value != 0;
+	}
+
+	// Defaults, then the bundled per-game profile, then the player's choices.
+	GAME_SETTINGS LoadSettings(const std::string& gamePath, const CGameProfiles::PROFILE* profile)
 	{
 		GAME_SETTINGS settings;
+		if(profile)
+		{
+			for(const auto& [key, value] : *profile) ApplySetting(settings, key, value);
+		}
 		std::ifstream file(SettingsPathFor(gamePath));
 		std::string line;
 		while(std::getline(file, line))
 		{
 			auto eq = line.find('=');
 			if(eq == std::string::npos) continue;
-			std::string key = line.substr(0, eq);
-			uint32_t value = static_cast<uint32_t>(std::strtoul(line.c_str() + eq + 1, nullptr, 10));
-			if(key == "ee_cycle_rate") settings.eeCycleRate = value;
-			else if(key == "interlaced") settings.interlaced = value != 0;
-			else if(key == "frame_skip") settings.frameSkip = value;
-			else if(key == "show_stats") settings.showStats = value != 0;
-			else if(key == "stretch") settings.stretch = value != 0;
-			else if(key == "software_renderer") settings.softwareRenderer = value != 0;
-			else if(key == "threaded_vu1") settings.threadedVu1 = value != 0;
+			ApplySetting(settings, line.substr(0, eq), line.substr(eq + 1));
 		}
 		return settings;
 	}
@@ -178,10 +189,11 @@ namespace
 		     << "threaded_vu1=" << (settings.threadedVu1 ? 1 : 0) << "\n";
 	}
 
-	CEmuSession::SPEED_HACKS ToSpeedHacks(const GAME_SETTINGS& settings)
+	// eeCycleRate 0 (Auto) runs at the rate the auto controller picked.
+	CEmuSession::SPEED_HACKS ToSpeedHacks(const GAME_SETTINGS& settings, const CAutoCycleRate& autoRate)
 	{
 		CEmuSession::SPEED_HACKS hacks;
-		hacks.eeCycleRatePercent = settings.eeCycleRate;
+		hacks.eeCycleRatePercent = (settings.eeCycleRate == 0) ? autoRate.GetRate() : settings.eeCycleRate;
 		hacks.interlacedRendering = settings.interlaced;
 		hacks.frameSkip = settings.frameSkip;
 		hacks.threadedVu1 = settings.threadedVu1;
@@ -207,9 +219,10 @@ namespace
 	}
 
 	// Returns true if the player chose to quit to the game list.
-	bool RunPauseMenu(CEmuSession& session, GAME_SETTINGS& settings, const SCREEN& screen)
+	bool RunPauseMenu(CEmuSession& session, GAME_SETTINGS& settings, const SCREEN& screen, const CAutoCycleRate& autoRate)
 	{
-		static const uint32_t eeRates[] = {50, 60, 75, 90, 100, 130};
+		static const uint32_t eeRates[] = {0, 50, 60, 75, 90, 100, 130};
+		constexpr int eeRateCount = sizeof(eeRates) / sizeof(eeRates[0]);
 		enum ITEM
 		{
 			ITEM_RESUME,
@@ -245,9 +258,9 @@ namespace
 				case ITEM_EE_RATE:
 				{
 					int index = 0;
-					for(int i = 0; i < 6; i++)
+					for(int i = 0; i < eeRateCount; i++)
 						if(eeRates[i] == settings.eeCycleRate) index = i;
-					index = std::clamp(index + delta, 0, 5);
+					index = std::clamp(index + delta, 0, eeRateCount - 1);
 					settings.eeCycleRate = eeRates[index];
 				}
 				break;
@@ -270,7 +283,10 @@ namespace
 			{
 				char lines[ITEM_COUNT][96];
 				std::snprintf(lines[ITEM_RESUME], 96, "Resume");
-				std::snprintf(lines[ITEM_EE_RATE], 96, "EE cycle rate: %u%%  (lower = faster, may slow game logic)", settings.eeCycleRate);
+				if(settings.eeCycleRate == 0)
+					std::snprintf(lines[ITEM_EE_RATE], 96, "EE cycle rate: Auto, now %u%%  (lowered while the EE is the bottleneck)", autoRate.GetRate());
+				else
+					std::snprintf(lines[ITEM_EE_RATE], 96, "EE cycle rate: %u%%  (lower = faster, may slow game logic)", settings.eeCycleRate);
 				std::snprintf(lines[ITEM_INTERLACED], 96, "Interlaced rendering: %s  (software renderer)", settings.interlaced ? "On" : "Off");
 				std::snprintf(lines[ITEM_FRAMESKIP], 96, "Frame skip: %u", settings.frameSkip);
 				std::snprintf(lines[ITEM_STRETCH], 96, "Aspect: %s", settings.stretch ? "Stretch 16:9" : "4:3");
@@ -294,7 +310,7 @@ namespace
 			}
 		}
 	done:
-		session.SetSpeedHacks(ToSpeedHacks(settings));
+		session.SetSpeedHacks(ToSpeedHacks(settings, autoRate));
 		if(!quit) session.Resume();
 		return quit;
 	}
@@ -427,9 +443,35 @@ namespace
 		return session ? static_cast<CGSH_Hardware*>(session->GetVm()->GetGSHandler()) : nullptr;
 	}
 
+	const CGameProfiles& GetGameProfiles()
+	{
+		static CGameProfiles profiles;
+		static bool loaded = false;
+		if(!loaded)
+		{
+			loaded = true;
+			if(profiles.Load("app0:game_profiles.ini"))
+				std::printf("game profiles: %u\n", static_cast<unsigned int>(profiles.GetCount()));
+		}
+		return profiles;
+	}
+
 	void RunGame(const std::string& path)
 	{
-		GAME_SETTINGS settings = LoadSettings(path);
+		const std::string discSerial = CEmuSession::GetDiscSerial(path);
+		const auto* profile = discSerial.empty() ? nullptr : GetGameProfiles().Find(discSerial);
+		std::string gameName;
+		if(profile)
+		{
+			auto name = profile->find("name");
+			if(name != profile->end()) gameName = name->second;
+		}
+		std::printf("booting %s serial '%s' profile %s\n", path.c_str(), discSerial.c_str(),
+		            profile ? (gameName.empty() ? "yes" : gameName.c_str()) : "none");
+		GAME_SETTINGS settings = LoadSettings(path, profile);
+		CAutoCycleRate autoRate;
+		// PAL discs (SCES/SLES/SCED...) run at 50 fps.
+		const float targetFps = ((discSerial.size() > 2) && (discSerial[2] == 'E' || discSerial[2] == 'e')) ? 50.0f : 60.0f;
 		const bool gpu = !settings.softwareRenderer;
 
 		CPH_Vita* pad = nullptr;
@@ -470,7 +512,7 @@ namespace
 		{
 			session = std::make_unique<CEmuSession>(config);
 			sessionPtr = session.get();
-			session->SetSpeedHacks(ToSpeedHacks(settings));
+			session->SetSpeedHacks(ToSpeedHacks(settings, autoRate));
 			session->Boot(path);
 		}
 		catch(const std::exception& e)
@@ -500,7 +542,13 @@ namespace
 			previousButtons = buttons;
 			if((buttons & SCE_CTRL_SELECT) && (pressed & SCE_CTRL_START))
 			{
-				bool quit = RunPauseMenu(*session, settings, screen);
+				uint32_t previousRate = settings.eeCycleRate;
+				bool quit = RunPauseMenu(*session, settings, screen, autoRate);
+				if((settings.eeCycleRate == 0) && (previousRate != 0))
+				{
+					autoRate.Reset();
+					session->SetSpeedHacks(ToSpeedHacks(settings, autoRate));
+				}
 				SaveSettings(path, settings);
 				if(quit) break;
 				previousButtons = ~0u;
@@ -570,7 +618,13 @@ namespace
 				{
 					std::printf("cpu %-18s %5.1f%%\n", usage.name.c_str(), usage.cpuPercent);
 				}
-				std::printf("fps vm %.1f out %.1f ee-idle %.0f%%\n", vmFps, presentFps, session->GetEeIdleRatio() * 100.0f);
+				float eeIdle = session->GetEeIdleRatio();
+				std::printf("fps vm %.1f out %.1f ee-idle %.0f%%\n", vmFps, presentFps, eeIdle * 100.0f);
+				if((settings.eeCycleRate == 0) && autoRate.Update(eeIdle, vmFps, targetFps))
+				{
+					std::printf("auto ee cycle rate: %u%%\n", autoRate.GetRate());
+					session->SetSpeedHacks(ToSpeedHacks(settings, autoRate));
+				}
 				newContent |= settings.showStats;
 			}
 
@@ -590,9 +644,12 @@ namespace
 				int lines = 5 + static_cast<int>(threadUsage.size());
 				Gfx::Rect(0, 0, 400, 10 + lines * 20, Gfx::Rgba(0, 0, 0, 160));
 				Gfx::Textf(8, 20, COLOR_WHITE, 0.7f, "VM %.1f fps  out %.1f fps  %ux%u", vmFps, presentFps, screen.width, screen.height);
-				Gfx::Textf(8, 40, COLOR_GREY, 0.7f, "EE idle %.0f%%  JIT %u/%u KB", session->GetEeIdleRatio() * 100.0f,
+				uint32_t eeRate = (settings.eeCycleRate == 0) ? autoRate.GetRate() : settings.eeCycleRate;
+				Gfx::Textf(8, 40, COLOR_GREY, 0.7f, "EE idle %.0f%%  rate %u%%%s  JIT %u/%u KB  %s", session->GetEeIdleRatio() * 100.0f,
+				           eeRate, (settings.eeCycleRate == 0) ? " auto" : "",
 				           static_cast<unsigned int>(VitaJit_GetUsedBytes() / 1024),
-				           static_cast<unsigned int>(VitaJit_GetCapacity() / 1024));
+				           static_cast<unsigned int>(VitaJit_GetCapacity() / 1024),
+				           discSerial.empty() ? "" : discSerial.c_str());
 				if(gpu)
 				{
 					auto stats = GetHardwareGs(session.get())->GetLastFrameStats();

@@ -95,6 +95,8 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 ## Phase 6.5: Auto-tuning across the catalog
 
 - [ ] Engine/middleware detection per game (RenderWare, Criware, Unreal 2, ...)
+- [x] Bundled per-game profiles keyed by disc serial (`assets/game_profiles.ini`)
+- [x] Auto EE cycle rate (steps 100→90→75→60% while EE-bound, climbs back with headroom)
 - [ ] Automatic profile on first boot: measure, try speed hacks, keep the smoothest
 - [ ] Shared community profiles file (import/export)
 

@@ -85,8 +85,13 @@ Built for the Vita's Cortex-A9 (see `gs_benchmark`):
 * **Multi-threaded GS**: primitives are batched and rasterized by several
   threads that own interleaved scanlines — output is bit-identical to single
   threaded rendering (verified by `gs_parallel_tests`, ThreadSanitizer clean).
-* **Speed hacks** (pause menu, per game): EE cycle rate (underclock), interlaced
-  half-line rendering, frame skip.
+* **Speed hacks** (pause menu, per game): EE cycle rate (underclock, or
+  *Auto*: stepped down to 60% while the EE is the bottleneck and back up when
+  there is headroom), interlaced half-line rendering, frame skip, VU1 on its
+  own core.
+* **Per-game profiles**: `assets/game_profiles.ini` ships default settings per
+  disc serial (e.g. `[SLUS-20228]`); the player's own choices in the pause
+  menu override them. The serial is shown in the overlay and the log.
 
 | Workload (host x86, 1 thread → 3 threads) | Mpix/s |
 |---|---|
