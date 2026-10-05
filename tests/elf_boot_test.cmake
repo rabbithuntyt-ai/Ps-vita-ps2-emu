@@ -1,0 +1,13 @@
+# Generates the test ELF, runs it headless and checks a few output pixels.
+execute_process(COMMAND ${PYTHON} ${SOURCE_DIR}/tools/make_test_elf.py gs_test.elf RESULT_VARIABLE r)
+if(NOT r EQUAL 0)
+	message(FATAL_ERROR "make_test_elf.py failed")
+endif()
+execute_process(COMMAND ${RUNNER} gs_test.elf --frames 30 --timeout 60 --out gs_test.ppm RESULT_VARIABLE r)
+if(NOT r EQUAL 0)
+	message(FATAL_ERROR "emulator run failed")
+endif()
+execute_process(COMMAND ${PYTHON} ${SOURCE_DIR}/tools/check_frame.py gs_test.ppm RESULT_VARIABLE r)
+if(NOT r EQUAL 0)
+	message(FATAL_ERROR "frame check failed")
+endif()

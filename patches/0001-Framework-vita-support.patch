@@ -1,0 +1,117 @@
+diff --git a/include/AlignedAlloc.h b/include/AlignedAlloc.h
+index f5dfa9d..394cb7d 100644
+--- a/include/AlignedAlloc.h
++++ b/include/AlignedAlloc.h
+@@ -8,6 +8,10 @@
+ #include <unistd.h>
+ #endif
+ 
++#if defined(__vita__)
++#include <malloc.h>
++#endif
++
+ #include "maybe_unused.h"
+ 
+ FRAMEWORK_MAYBE_UNUSED
+@@ -17,6 +21,8 @@ static size_t framework_getpagesize()
+ 	SYSTEM_INFO si;
+ 	GetSystemInfo(&si);
+ 	return si.dwPageSize;
++#elif defined(__vita__)
++	return 4096;
+ #else
+ 	return sysconf(_SC_PAGESIZE);
+ #endif
+@@ -34,6 +40,8 @@ static void* framework_aligned_alloc(size_t allocSize, size_t alignment)
+ 		return nullptr;
+ 	}
+ 	return result;
++#elif defined(__vita__)
++	return memalign(alignment, allocSize);
+ #else
+ 	return malloc(allocSize);
+ #endif
+diff --git a/include/PathUtils.h b/include/PathUtils.h
+index 3e63222..bd22f52 100644
+--- a/include/PathUtils.h
++++ b/include/PathUtils.h
+@@ -14,10 +14,13 @@ namespace Framework
+ #ifdef _WIN32
+ 		fs::path GetPathFromCsidl(int);
+ #endif	//WIN32
+-#if defined(__ANDROID__)
++#if defined(__ANDROID__) || defined(__vita__)
+ 		void SetFilesDirPath(const char*);
+ 		void SetCacheDirPath(const char*);
+ #endif
++#if defined(__vita__)
++		void SetAppResourcesPath(const char*);
++#endif
+ 
+ 		void EnsurePathExists(const fs::path&);
+ 
+diff --git a/include/filesystem_def.h b/include/filesystem_def.h
+index 94cb8b5..5bd796b 100644
+--- a/include/filesystem_def.h
++++ b/include/filesystem_def.h
+@@ -1,6 +1,6 @@
+ #pragma once
+ 
+-#if defined(__has_include) && __has_include(<filesystem>) && !defined(__APPLE__) && !defined(__ANDROID__)
++#if defined(__has_include) && __has_include(<filesystem>) && !defined(__APPLE__) && !defined(__ANDROID__) && !defined(__vita__)
+ 	#include <filesystem>
+ 	namespace fs = std::filesystem;
+ #else
+diff --git a/src/PathUtils.cpp b/src/PathUtils.cpp
+index f7a9f8b..f66cd07 100644
+--- a/src/PathUtils.cpp
++++ b/src/PathUtils.cpp
+@@ -121,6 +121,48 @@ void PathUtils::SetCacheDirPath(const char* cacheDirPath)
+ 	s_cacheDirPath = cacheDirPath;
+ }
+ 
++#elif defined(__vita__)
++
++//PlayStation Vita: the frontend decides where data lives (ex.: ux0:data/VitaPS2)
++static fs::path s_filesDirPath;
++static fs::path s_cacheDirPath;
++static fs::path s_resourcesPath;
++
++fs::path PathUtils::GetAppResourcesPath()
++{
++	return s_resourcesPath;
++}
++
++fs::path PathUtils::GetRoamingDataPath()
++{
++	return s_filesDirPath;
++}
++
++fs::path PathUtils::GetPersonalDataPath()
++{
++	return s_filesDirPath;
++}
++
++fs::path PathUtils::GetCachePath()
++{
++	return s_cacheDirPath.empty() ? s_filesDirPath : s_cacheDirPath;
++}
++
++void PathUtils::SetFilesDirPath(const char* filesDirPath)
++{
++	s_filesDirPath = filesDirPath;
++}
++
++void PathUtils::SetCacheDirPath(const char* cacheDirPath)
++{
++	s_cacheDirPath = cacheDirPath;
++}
++
++void PathUtils::SetAppResourcesPath(const char* resourcesPath)
++{
++	s_resourcesPath = resourcesPath;
++}
++
+ #elif defined(__linux__) || defined(__FreeBSD__) || defined(__EMSCRIPTEN__)
+ 
+ fs::path PathUtils::GetAppResourcesPath()

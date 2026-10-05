@@ -1,0 +1,78 @@
+diff --git a/src/MemoryFunction.cpp b/src/MemoryFunction.cpp
+index 73a3dab..0586ca4 100644
+--- a/src/MemoryFunction.cpp
++++ b/src/MemoryFunction.cpp
+@@ -31,6 +31,10 @@
+ #elif defined(__EMSCRIPTEN__)
+ 	#include <emscripten.h>
+ 	#define MEMFUNC_USE_WASM
++#elif defined(__vita__)
++	//PlayStation Vita: executable memory comes from a pool owned by the
++	//frontend (see VitaPS2's src/vita/JitMemory.cpp).
++	#define MEMFUNC_USE_VITA
+ #else
+ 	#define MEMFUNC_USE_MMAP
+ #endif
+@@ -43,6 +47,11 @@
+ #elif defined(MEMFUNC_USE_MMAP)
+ #include <sys/mman.h>
+ #include <pthread.h>
++#elif defined(MEMFUNC_USE_VITA)
++extern "C" void* vitaps2_jit_alloc(size_t);
++extern "C" void vitaps2_jit_free(void*);
++extern "C" void vitaps2_jit_begin_write();
++extern "C" void vitaps2_jit_end_write(void*, size_t);
+ #elif defined(MEMFUNC_USE_WASM)
+ EM_JS_DEPS(WasmMemoryFunction, "$addFunction,$removeFunction");
+ EM_JS(int, WasmCreateFunction, (emscripten::EM_VAL moduleHandle),
+@@ -128,6 +137,13 @@ CMemoryFunction::CMemoryFunction(const void* code, size_t size)
+ #ifdef MEMFUNC_MMAP_REQUIRES_JIT_WRITE_PROTECT
+ 	pthread_jit_write_protect_np(true);
+ #endif
++#elif defined(MEMFUNC_USE_VITA)
++	m_size = size;
++	m_code = vitaps2_jit_alloc(size);
++	assert(m_code != nullptr);
++	vitaps2_jit_begin_write();
++	memcpy(m_code, code, size);
++	vitaps2_jit_end_write(m_code, size);
+ #elif defined(MEMFUNC_USE_WASM)
+ 	m_wasmModule = emscripten::val::take_ownership(WasmCreateModule(reinterpret_cast<uintptr_t>(code), size));
+ 	m_size = size;
+@@ -148,6 +164,8 @@ void CMemoryFunction::ClearCache()
+ {
+ #ifdef __APPLE__
+ 	sys_icache_invalidate(m_code, m_size);
++#elif defined(MEMFUNC_USE_VITA)
++	//Cache maintenance is done by vitaps2_jit_end_write
+ #elif defined(MEMFUNC_USE_MMAP)
+ 	#if defined(__arm__) || defined(__aarch64__)
+ 		__clear_cache(m_code, reinterpret_cast<uint8*>(m_code) + m_size);
+@@ -165,6 +183,8 @@ void CMemoryFunction::Reset()
+ 		vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(m_code), m_size);
+ #elif defined(MEMFUNC_USE_MMAP)
+ 		munmap(m_code, m_size);
++#elif defined(MEMFUNC_USE_VITA)
++		vitaps2_jit_free(m_code);
+ #elif defined(MEMFUNC_USE_WASM)
+ 		WasmDeleteFunction(reinterpret_cast<int>(m_code));
+ #endif
+@@ -216,6 +236,8 @@ void CMemoryFunction::BeginModify()
+ 	assert(result == 0);
+ #elif defined(MEMFUNC_USE_MMAP) && defined(MEMFUNC_MMAP_REQUIRES_JIT_WRITE_PROTECT)
+ 	pthread_jit_write_protect_np(false);
++#elif defined(MEMFUNC_USE_VITA)
++	vitaps2_jit_begin_write();
+ #endif
+ }
+ 
+@@ -226,6 +248,9 @@ void CMemoryFunction::EndModify()
+ 	assert(result == 0);
+ #elif defined(MEMFUNC_USE_MMAP) && defined(MEMFUNC_MMAP_REQUIRES_JIT_WRITE_PROTECT)
+ 	pthread_jit_write_protect_np(true);
++#endif
++#if defined(MEMFUNC_USE_VITA)
++	vitaps2_jit_end_write(m_code, m_size);
+ #endif
+ 	ClearCache();
+ }

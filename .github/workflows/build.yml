@@ -1,0 +1,46 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host:
+    name: Host build + tests (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libbz2-dev zlib1g-dev
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j$(nproc)
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  vita:
+    name: PS Vita build (VitaSDK)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build VPK
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src vitasdk/vitasdk:latest /bin/sh -c '
+            set -e
+            cmake -S . -B build-vita \
+              -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake \
+              -DCMAKE_BUILD_TYPE=Release
+            cmake --build build-vita -j$(nproc)
+          '
+      - name: Upload VPK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VitaPS2-vpk
+          path: build-vita/VitaPS2.vpk
+          if-no-files-found: error
