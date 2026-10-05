@@ -22,6 +22,12 @@ add_executable(vitaps2
 )
 target_include_directories(vitaps2 PRIVATE src/vita src/common)
 target_compile_options(vitaps2 PRIVATE -Wall)
+# vita-elf-create appends the SCE module info and import tables (a few KB,
+# growing with the number of imports) right after the code segment and fails
+# if the data segment starts too close. The SDK linker script skips
+# __sce_headroom bytes before aligning the data segment; without it the gap
+# depends on the code size. Costs address space only.
+target_link_options(vitaps2 PRIVATE -Wl,--defsym,__sce_headroom=0x8000)
 # Build identification shown in the UI, so photos and logs name the build.
 # CI passes -DVITAPS2_COMMIT (git may refuse to run inside the SDK container).
 if(NOT VITAPS2_COMMIT)

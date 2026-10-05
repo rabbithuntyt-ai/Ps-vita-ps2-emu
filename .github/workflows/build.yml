@@ -67,7 +67,12 @@ jobs:
               -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake \
               -DCMAKE_BUILD_TYPE=Release \
               -DVITAPS2_COMMIT=$VITAPS2_COMMIT
-            cmake --build build-vita -j$(nproc) -- -k
+            cmake --build build-vita -j$(nproc) -- -k || {
+              echo "Segment layout:"
+              $VITASDK/bin/arm-vita-eabi-readelf -lW build-vita/vitaps2 || true
+              exit 1
+            }
+            $VITASDK/bin/arm-vita-eabi-readelf -lW build-vita/vitaps2 | grep -E "LOAD|Type"
             cp build-vita/VitaPS2.vpk "build-vita/$VITAPS2_NAME.vpk"
           '
       - name: Upload VPK
