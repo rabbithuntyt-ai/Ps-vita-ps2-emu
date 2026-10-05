@@ -143,6 +143,7 @@ namespace
 		bool stretch = false; //fill the 16:9 screen instead of 4:3
 		bool softwareRenderer = false;
 		bool threadedVu1 = true; //VU1 microprograms on the third core
+		bool safeJit = false;    //no NEON/VFP register allocation in the JIT
 	};
 
 	std::string SettingsPathFor(const std::string& gamePath)
@@ -161,6 +162,7 @@ namespace
 		else if(key == "stretch") settings.stretch = value != 0;
 		else if(key == "software_renderer") settings.softwareRenderer = value != 0;
 		else if(key == "threaded_vu1") settings.threadedVu1 = value != 0;
+		else if(key == "safe_jit") settings.safeJit = value != 0;
 	}
 
 	// Defaults, then the bundled per-game profile, then the player's choices.
@@ -191,7 +193,8 @@ namespace
 		     << "show_stats=" << (settings.showStats ? 1 : 0) << "\n"
 		     << "stretch=" << (settings.stretch ? 1 : 0) << "\n"
 		     << "software_renderer=" << (settings.softwareRenderer ? 1 : 0) << "\n"
-		     << "threaded_vu1=" << (settings.threadedVu1 ? 1 : 0) << "\n";
+		     << "threaded_vu1=" << (settings.threadedVu1 ? 1 : 0) << "\n"
+		     << "safe_jit=" << (settings.safeJit ? 1 : 0) << "\n";
 	}
 
 	// eeCycleRate 0 (Auto) runs at the rate the auto controller picked.
@@ -238,6 +241,7 @@ namespace
 			ITEM_STATS,
 			ITEM_RENDERER,
 			ITEM_VU1_THREAD,
+			ITEM_SAFE_JIT,
 			ITEM_QUIT,
 			ITEM_COUNT
 		};
@@ -275,6 +279,7 @@ namespace
 				case ITEM_STATS: settings.showStats = !settings.showStats; break;
 				case ITEM_RENDERER: settings.softwareRenderer = !settings.softwareRenderer; break;
 				case ITEM_VU1_THREAD: settings.threadedVu1 = !settings.threadedVu1; break;
+				case ITEM_SAFE_JIT: settings.safeJit = !settings.safeJit; break;
 				case ITEM_QUIT:
 					if(input.pressed & SCE_CTRL_CROSS)
 					{
@@ -298,6 +303,7 @@ namespace
 				std::snprintf(lines[ITEM_STATS], 96, "Performance overlay: %s", settings.showStats ? "On" : "Off");
 				std::snprintf(lines[ITEM_RENDERER], 96, "Renderer: %s  (applies when the game restarts)", settings.softwareRenderer ? "Software" : "GPU");
 				std::snprintf(lines[ITEM_VU1_THREAD], 96, "VU1 on its own core: %s  (faster 3D; turn off if a game glitches)", settings.threadedVu1 ? "On" : "Off");
+				std::snprintf(lines[ITEM_SAFE_JIT], 96, "Safe JIT: %s  (slower; try if a game hangs - applies on restart)", settings.safeJit ? "On" : "Off");
 				std::snprintf(lines[ITEM_QUIT], 96, "Quit to game list");
 
 				BeginFrame();
@@ -306,8 +312,8 @@ namespace
 				Gfx::Text(120, 100, COLOR_ACCENT, 1.1f, "Paused");
 				for(int i = 0; i < ITEM_COUNT; i++)
 				{
-					int y = 145 + i * 32;
-					if(i == selected) Gfx::Rect(110, y - 24, 740, 32, COLOR_SELECTION);
+					int y = 140 + i * 29;
+					if(i == selected) Gfx::Rect(110, y - 22, 740, 29, COLOR_SELECTION);
 					Gfx::Text(125, y, (i == selected) ? COLOR_WHITE : COLOR_GREY, 0.8f, lines[i]);
 				}
 				Gfx::Text(120, 480, COLOR_GREY, 0.7f, "LEFT/RIGHT: change   X: select   O: resume");
@@ -482,6 +488,9 @@ namespace
 		std::printf("booting %s serial '%s' profile %s\n", path.c_str(), discSerial.c_str(),
 		            profile ? (gameName.empty() ? "yes" : gameName.c_str()) : "none");
 		GAME_SETTINGS settings = LoadSettings(path, profile);
+		// Before anything is compiled for this game.
+		CEmuSession::SetSafeJit(settings.safeJit);
+		std::printf("safe jit: %s\n", settings.safeJit ? "on" : "off");
 		CAutoCycleRate autoRate;
 		// PAL discs (SCES/SLES/SCED...) run at 50 fps.
 		const float targetFps = ((discSerial.size() > 2) && (discSerial[2] == 'E' || discSerial[2] == 'e')) ? 50.0f : 60.0f;

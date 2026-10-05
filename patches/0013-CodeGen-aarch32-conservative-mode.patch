@@ -1,0 +1,56 @@
+diff --git a/include/Jitter_CodeGen_AArch32.h b/include/Jitter_CodeGen_AArch32.h
+--- a/include/Jitter_CodeGen_AArch32.h
++++ b/include/Jitter_CodeGen_AArch32.h
+@@ -22,6 +22,13 @@ namespace Jitter
+ 
+ 		void SetPlatformAbi(PLATFORM_ABI);
+ 
++		//Conservative mode keeps 128-bit and single precision values in memory
++		//(no NEON/VFP register allocation), like the original backend. Affects
++		//code compiled afterwards. Default: off, or on when the environment
++		//variable CODEGEN_AARCH32_CONSERVATIVE is set (tests).
++		static void SetConservativeAllocation(bool);
++		static bool GetConservativeAllocation();
++
+ 		void GenerateCode(const StatementList&, unsigned int) override;
+ 		void SetStream(Framework::CStream*) override;
+ 		void RegisterExternalSymbols(CObjectFile*) const override;
+diff --git a/src/Jitter_CodeGen_AArch32.cpp b/src/Jitter_CodeGen_AArch32.cpp
+--- a/src/Jitter_CodeGen_AArch32.cpp
++++ b/src/Jitter_CodeGen_AArch32.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include <stdexcept>
+ #include "Jitter_CodeGen_AArch32.h"
+ #include "ObjectFile.h"
+@@ -332,16 +333,28 @@ unsigned int CCodeGen_AArch32::GetAvailableRegisterCount() const
+ 	return MAX_REGISTERS;
+ }
+ 
++static bool g_conservativeAllocation = (getenv("CODEGEN_AARCH32_CONSERVATIVE") != nullptr);
++
++void CCodeGen_AArch32::SetConservativeAllocation(bool conservative)
++{
++	g_conservativeAllocation = conservative;
++}
++
++bool CCodeGen_AArch32::GetConservativeAllocation()
++{
++	return g_conservativeAllocation;
++}
++
+ unsigned int CCodeGen_AArch32::GetAvailableMdRegisterCount() const
+ {
+-	return MAX_MDREGISTERS;
++	return g_conservativeAllocation ? 0 : MAX_MDREGISTERS;
+ }
+ 
+ bool CCodeGen_AArch32::CanAllocateFpInMdRegisters() const
+ {
+ 	//Allocated FP32 values live in s16-s23, MD values in q8-q15: the same
+ 	//register id maps to different physical registers for each kind.
+-	return true;
++	return !g_conservativeAllocation;
+ }
+ 
+ bool CCodeGen_AArch32::Has128BitsCallOperands() const

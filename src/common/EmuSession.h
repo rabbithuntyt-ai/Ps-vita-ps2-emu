@@ -113,6 +113,11 @@ public:
 		return m_vm.get();
 	}
 
+	// ARM JIT: keep vector/float values in memory instead of NEON/VFP
+	// registers (slower; to rule out register allocation bugs). Takes effect
+	// for code compiled afterwards: set before booting. No-op elsewhere.
+	static void SetSafeJit(bool);
+
 	// Called once at startup before anything touches CAppConfig.
 	static void SetDataPaths(const std::string& dataPath, const std::string& resourcesPath);
 

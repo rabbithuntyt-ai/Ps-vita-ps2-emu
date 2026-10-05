@@ -14,6 +14,9 @@
 #include "ee/PS2OS.h"
 #include "ee/Vpu.h"
 #include "ee/Ee_SubSystem.h"
+#if defined(__arm__)
+#include "Jitter_CodeGen_AArch32.h"
+#endif
 #include "iop/IopBios.h"
 #include "iop/Iop_SubSystem.h"
 #include "GSH_Software.h"
@@ -248,6 +251,15 @@ CEmuSession::DEBUG_STATE CEmuSession::GetDebugState()
 	state.vu1Pc = vpu1.GetCurrentPc();
 	state.vu1RunMs = vpu1.GetProgramRunMs();
 	return state;
+}
+
+void CEmuSession::SetSafeJit(bool safe)
+{
+#if defined(__arm__)
+	Jitter::CCodeGen_AArch32::SetConservativeAllocation(safe);
+#else
+	(void)safe;
+#endif
 }
 
 uint32_t CEmuSession::ReadEeWord(uint32_t address)
