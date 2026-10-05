@@ -20,6 +20,15 @@ public:
 		return m_primitiveCount;
 	}
 
+	// Speed hacks; renderers ignore the ones they do not support. Call on the
+	// GS thread (SendGSCall).
+	virtual void SetFrameSkip(uint32)
+	{
+	}
+	virtual void SetInterlacedRendering(bool)
+	{
+	}
+
 protected:
 	void WriteRegisterImpl(uint8, uint64) override;
 

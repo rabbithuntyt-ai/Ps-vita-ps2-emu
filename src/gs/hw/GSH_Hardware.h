@@ -58,6 +58,9 @@ public:
 	// (the handler itself is deleted on the emulation thread).
 	void ReleaseGpu();
 
+	// Speed hack: draw only one frame out of frameSkip + 1.
+	void SetFrameSkip(uint32 frameSkip) override;
+
 	DISPLAY_TEXTURE GetDisplayTexture() const
 	{
 		return m_display;
@@ -179,6 +182,9 @@ private:
 
 	OPTIONS m_options;
 	bool m_gpuInitialized = false;
+	uint32 m_frameSkip = 0;
+	uint32 m_frameCounter = 0;
+	bool m_lastFrameSkipped = false;
 	CTextureCache m_textureCache;
 	std::vector<std::unique_ptr<TARGET>> m_targets;
 	// Keyed by texture cache entry and uploaded region (see TEXTURE_REGION).

@@ -4,7 +4,8 @@ if(NOT r EQUAL 0)
 	message(FATAL_ERROR "make_test_elf.py failed")
 endif()
 # RUNNER_ARGS: extra runner flags (e.g. --hw), as a ;-list.
-execute_process(COMMAND ${RUNNER} gs_test.elf --frames 30 --timeout 60 --out gs_test${SUFFIX}.ppm ${RUNNER_ARGS} RESULT_VARIABLE r)
+# EMULATOR: runs the runner on cross builds (qemu-arm ...), as a ;-list.
+execute_process(COMMAND ${EMULATOR} ${RUNNER} gs_test.elf --frames 30 --timeout 60 --out gs_test${SUFFIX}.ppm ${RUNNER_ARGS} RESULT_VARIABLE r)
 if(NOT r EQUAL 0)
 	message(FATAL_ERROR "emulator run failed")
 endif()

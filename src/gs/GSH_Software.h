@@ -48,9 +48,9 @@ public:
 	// Speed hacks -------------------------------------------------------------
 	// Interlaced rendering: rasterize only every other row, alternating each
 	// frame. Halves fill cost; can leave artifacts in render-to-texture effects.
-	void SetInterlacedRendering(bool);
+	void SetInterlacedRendering(bool) override;
 	// Skip drawing of N frames out of N+1 (0 = draw everything).
-	void SetFrameSkip(uint32);
+	void SetFrameSkip(uint32) override;
 	// Number of threads rasterizing (including the GS thread). 1 = single threaded.
 	// Must be called before Initialize().
 	void SetRasterizerThreads(uint32);

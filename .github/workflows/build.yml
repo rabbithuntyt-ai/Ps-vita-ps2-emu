@@ -22,6 +22,27 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  arm:
+    name: ARM Linux build + tests under qemu (AArch32 JIT)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install cross toolchain and armhf libraries
+        run: |
+          sudo sed -i 's/^Types: deb$/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources
+          printf 'Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports/\nSuites: noble noble-updates noble-security\nComponents: main universe\nArchitectures: armhf\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ports.sources
+          sudo dpkg --add-architecture armhf
+          sudo apt-get update
+          sudo apt-get install -y ninja-build qemu-user g++-arm-linux-gnueabihf zlib1g-dev:armhf libbz2-dev:armhf libssl-dev:armhf
+      - name: Configure
+        run: cmake -S . -B build-arm -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/armhf-linux.cmake -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build-arm -j$(nproc)
+      - name: Test
+        run: ctest --test-dir build-arm --output-on-failure
+
   vita:
     name: PS Vita build (VitaSDK)
     runs-on: ubuntu-24.04

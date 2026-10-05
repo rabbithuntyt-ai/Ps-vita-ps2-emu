@@ -258,7 +258,17 @@ void CGSH_Hardware::MarkNewFrame()
 	FlushBatch();
 	m_lastFrameStats = m_stats;
 	m_stats = STATS();
+	// Frame skip: the frame that just ended may have been skipped; decide
+	// for the next one.
+	m_lastFrameSkipped = m_skipDrawing;
+	m_frameCounter++;
+	m_skipDrawing = (m_frameSkip != 0) && ((m_frameCounter % (m_frameSkip + 1)) != 0);
 	CGSH_Primitives::MarkNewFrame();
+}
+
+void CGSH_Hardware::SetFrameSkip(uint32 frameSkip)
+{
+	m_frameSkip = frameSkip;
 }
 
 //-----------------------------------------------------------------------------
@@ -1277,6 +1287,13 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 {
 	FlushBatch();
 	const auto& layer = dispInfo.layers[0];
+	// A skipped frame was not drawn: keep showing the last drawn one (double
+	// buffered games would otherwise flash an older frame).
+	if(m_lastFrameSkipped)
+	{
+		CGSH_Primitives::FlipImpl(dispInfo);
+		return;
+	}
 	if(layer.enabled && (dispInfo.width != 0) && (dispInfo.height != 0))
 	{
 		uint32 width = std::min<uint32>(dispInfo.width, 1024);

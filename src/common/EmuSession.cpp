@@ -166,7 +166,7 @@ void CEmuSession::SetSpeedHacks(const SPEED_HACKS& hacks)
 	});
 	if(wasRunning) m_vm->Resume();
 
-	if(auto gs = dynamic_cast<CGSH_Software*>(m_vm->GetGSHandler()))
+	if(auto gs = dynamic_cast<CGSH_Primitives*>(m_vm->GetGSHandler()))
 	{
 		gs->SendGSCall([gs, hacks]() {
 			gs->SetInterlacedRendering(hacks.interlacedRendering);

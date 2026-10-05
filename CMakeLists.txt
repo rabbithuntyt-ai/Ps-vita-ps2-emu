@@ -196,6 +196,7 @@ else()
 				-DPYTHON=${Python3_EXECUTABLE}
 				-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
 				-DRUNNER=$<TARGET_FILE:vitaps2_host>
+				"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
 				-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/elf_boot_test.cmake)
 		if(TARGET gsh_hardware)
 			add_test(NAME elf_boot_test_hw
