@@ -1,3 +1,4 @@
 [submodule "external/Play"]
 	path = external/Play
 	url = https://github.com/jpd002/Play-.git
+	ignore = dirty
