@@ -797,90 +797,169 @@ void CSoftwareRasterizer::DrawTriangle(const VERTEX& va, const VERTEX& vb, const
 	if(!EnsureTexture()) return;
 	MarkWritten(minX, minY, maxX, maxY);
 
-	// Edges, as A*x + B(y) + bias >= 0 over pixel x (sampled at x*16).
+	// Everything below is set up once per triangle; the per-row work is
+	// incremental integer math only. (The Vita's Cortex-A9 has no integer
+	// divide and slow double precision, so per-row divisions are expensive.)
+
+	// Edges as A*x + K(y) >= 0 over pixel x (sampled at x*16); K steps by
+	// stepK per row.
 	struct EDGE
 	{
-		const VERTEX* a;
-		const VERTEX* b;
-		int64 bias;
 		int64 A;
+		int64 K;
+		int64 stepK;
+		float invA;
 	};
-	EDGE edges[3] = {
-	    {v1, v2, IsTopLeft(v1->x, v1->y, v2->x, v2->y) ? 0 : -1, 0},
-	    {v2, v0, IsTopLeft(v2->x, v2->y, v0->x, v0->y) ? 0 : -1, 0},
-	    {v0, v1, IsTopLeft(v0->x, v0->y, v1->x, v1->y) ? 0 : -1, 0},
+	auto makeEdge = [&](const VERTEX* a, const VERTEX* b) {
+		EDGE edge;
+		int64 bias = IsTopLeft(a->x, a->y, b->x, b->y) ? 0 : -1;
+		edge.A = -static_cast<int64>(b->y - a->y) * 16;
+		int32 py = minY * 16;
+		edge.K = static_cast<int64>(b->x - a->x) * static_cast<int64>(py - a->y) +
+		         static_cast<int64>(b->y - a->y) * static_cast<int64>(a->x) + bias;
+		edge.stepK = static_cast<int64>(b->x - a->x) * 16;
+		edge.invA = (edge.A != 0) ? 1.0f / static_cast<float>(edge.A) : 0.0f;
+		return edge;
 	};
-	for(auto& edge : edges)
-	{
-		edge.A = -static_cast<int64>(edge.b->y - edge.a->y) * 16;
-	}
+	EDGE edges[3] = {makeEdge(v1, v2), makeEdge(v2, v0), makeEdge(v0, v1)};
 
-	// Barycentric weights l0 = e0/area, l1 = e1/area change by step/area per pixel.
+	// Barycentric weights at the reference pixel (minX, minY) and their
+	// derivatives per pixel in x and y.
 	double invArea = 1.0 / static_cast<double>(area);
-	double dl0 = static_cast<double>(edges[0].A) * invArea;
-	double dl1 = static_cast<double>(edges[1].A) * invArea;
+	int32 refPx = minX * 16, refPy = minY * 16;
+	double l0 = static_cast<double>(EdgeFunction(v1->x, v1->y, v2->x, v2->y, refPx, refPy)) * invArea;
+	double l1 = static_cast<double>(EdgeFunction(v2->x, v2->y, v0->x, v0->y, refPx, refPy)) * invArea;
+	double dl0dx = static_cast<double>(edges[0].A) * invArea;
+	double dl1dx = static_cast<double>(edges[1].A) * invArea;
+	double dl0dy = static_cast<double>(edges[0].stepK) * invArea;
+	double dl1dy = static_cast<double>(edges[1].stepK) * invArea;
+
+	struct PLANE
+	{
+		double value, dx, dy;
+	};
+	auto plane = [&](double a0, double a1, double a2) {
+		PLANE p;
+		p.value = a2 + (a0 - a2) * l0 + (a1 - a2) * l1;
+		p.dx = (a0 - a2) * dl0dx + (a1 - a2) * dl1dx;
+		p.dy = (a0 - a2) * dl0dy + (a1 - a2) * dl1dy;
+		return p;
+	};
+	// 16.16 fixed point planes, stepped in int64.
+	struct FIXED_PLANE
+	{
+		int64 value, dy;
+		int32 dx;
+	};
+	auto fixedPlane = [&](const PLANE& p, double bias) {
+		FIXED_PLANE f;
+		f.value = static_cast<int64>(std::floor((p.value + bias) * 65536.0));
+		f.dx = ToFixed(p.dx);
+		f.dy = static_cast<int64>(std::floor(p.dy * 65536.0));
+		return f;
+	};
 
 	// Flat shading uses the color of the last vertex that was kicked.
 	const VERTEX& flat = vc;
+	const bool gouraud = s.gouraud;
+	const bool textured = s.textured;
+	const bool fst = s.fst;
 
-	auto gradient = [&](double a0, double a1, double a2) { return (a0 - a2) * dl0 + (a1 - a2) * dl1; };
-	auto value = [&](double a0, double a1, double a2, double l0, double l1) { return a2 + (a0 - a2) * l0 + (a1 - a2) * l1; };
-
-	INTERP step = {};
-	if(s.gouraud)
+	FIXED_PLANE pr = {}, pg = {}, pb = {}, pa = {};
+	if(gouraud)
 	{
-		step.dr = ToFixed(gradient(v0->r, v1->r, v2->r));
-		step.dg = ToFixed(gradient(v0->g, v1->g, v2->g));
-		step.db = ToFixed(gradient(v0->b, v1->b, v2->b));
-		step.da = ToFixed(gradient(v0->a, v1->a, v2->a));
+		pr = fixedPlane(plane(v0->r, v1->r, v2->r), 0.5);
+		pg = fixedPlane(plane(v0->g, v1->g, v2->g), 0.5);
+		pb = fixedPlane(plane(v0->b, v1->b, v2->b), 0.5);
+		pa = fixedPlane(plane(v0->a, v1->a, v2->a), 0.5);
 	}
-	step.df = ToFixed(gradient(v0->fog, v1->fog, v2->fog));
-	step.dz = static_cast<int64>(std::floor(gradient(v0->z, v1->z, v2->z) * 65536.0));
+	FIXED_PLANE pf = fixedPlane(plane(v0->fog, v1->fog, v2->fog), 0.5);
+	PLANE zPlane = plane(v0->z, v1->z, v2->z);
+	FIXED_PLANE pz;
+	pz.value = static_cast<int64>(std::floor(zPlane.value * 65536.0));
+	int64 dzdx = static_cast<int64>(std::floor(zPlane.dx * 65536.0));
+	pz.dy = static_cast<int64>(std::floor(zPlane.dy * 65536.0));
 
-	float q0 = (v0->q != 0) ? v0->q : 1.0f;
-	float q1 = (v1->q != 0) ? v1->q : 1.0f;
-	float q2 = (v2->q != 0) ? v2->q : 1.0f;
-	if(s.textured)
+	FIXED_PLANE pu = {}, pv = {};
+	PLANE ps = {}, pt = {}, pq = {};
+	if(textured)
 	{
-		if(s.fst)
+		if(fst)
 		{
-			step.du = ToFixed(gradient(v0->u, v1->u, v2->u));
-			step.dv = ToFixed(gradient(v0->v, v1->v, v2->v));
+			pu = fixedPlane(plane(v0->u, v1->u, v2->u), 0);
+			pv = fixedPlane(plane(v0->v, v1->v, v2->v), 0);
 		}
 		else
 		{
-			step.ds = static_cast<float>(gradient(v0->s, v1->s, v2->s));
-			step.dt = static_cast<float>(gradient(v0->t, v1->t, v2->t));
-			step.dq = static_cast<float>(gradient(q0, q1, q2));
+			float q0 = (v0->q != 0) ? v0->q : 1.0f;
+			float q1 = (v1->q != 0) ? v1->q : 1.0f;
+			float q2 = (v2->q != 0) ? v2->q : 1.0f;
+			ps = plane(v0->s, v1->s, v2->s);
+			pt = plane(v0->t, v1->t, v2->t);
+			pq = plane(q0, q1, q2);
 		}
 	}
 
+	INTERP step = {};
+	step.dr = pr.dx;
+	step.dg = pg.dx;
+	step.db = pb.dx;
+	step.da = pa.dx;
+	step.df = pf.dx;
+	step.dz = dzdx;
+	step.du = pu.dx;
+	step.dv = pv.dx;
+	step.ds = static_cast<float>(ps.dx);
+	step.dt = static_cast<float>(pt.dx);
+	step.dq = static_cast<float>(pq.dx);
+
 	for(int32 y = minY; y <= maxY; y++)
 	{
+		int32 rowIndex = y - minY;
+		if(rowIndex != 0)
+		{
+			for(auto& edge : edges) edge.K += edge.stepK;
+		}
 		if(!RowEnabled(y)) continue;
 
-		int32 py = y * 16;
-		int64 lo = minX, hi = maxX;
+		// Span extents: float estimate, then exact integer correction.
+		int32 lo = minX, hi = maxX;
+		bool empty = false;
 		for(const auto& edge : edges)
 		{
-			int64 k = static_cast<int64>(edge.b->x - edge.a->x) * static_cast<int64>(py - edge.a->y) +
-			          static_cast<int64>(edge.b->y - edge.a->y) * static_cast<int64>(edge.a->x) + edge.bias;
-			ClipSpanToEdge(edge.A, k, lo, hi);
+			if(edge.A > 0)
+			{
+				//x >= -K/A
+				float estimate = -static_cast<float>(edge.K) * edge.invA;
+				int32 x = static_cast<int32>(std::clamp(std::ceil(estimate), static_cast<float>(minX - 1), static_cast<float>(maxX + 1)));
+				while((x <= maxX) && (edge.A * x + edge.K < 0)) x++;
+				while((x > minX) && (edge.A * (x - 1) + edge.K >= 0)) x--;
+				lo = std::max(lo, x);
+			}
+			else if(edge.A < 0)
+			{
+				//x <= K/-A
+				float estimate = -static_cast<float>(edge.K) * edge.invA;
+				int32 x = static_cast<int32>(std::clamp(std::floor(estimate), static_cast<float>(minX - 1), static_cast<float>(maxX + 1)));
+				while((x >= minX) && (edge.A * x + edge.K < 0)) x--;
+				while((x < maxX) && (edge.A * (x + 1) + edge.K >= 0)) x++;
+				hi = std::min(hi, x);
+			}
+			else if(edge.K < 0)
+			{
+				empty = true;
+			}
 		}
-		if(lo > hi) continue;
+		if(empty || (lo > hi)) continue;
 
-		int32 xl = static_cast<int32>(lo);
-		int32 px = xl * 16;
-		double l0 = static_cast<double>(EdgeFunction(v1->x, v1->y, v2->x, v2->y, px, py)) * invArea;
-		double l1 = static_cast<double>(EdgeFunction(v2->x, v2->y, v0->x, v0->y, px, py)) * invArea;
-
+		int32 dx = lo - minX;
 		INTERP it = step;
-		if(s.gouraud)
+		if(gouraud)
 		{
-			it.r = ToFixed(value(v0->r, v1->r, v2->r, l0, l1) + 0.5);
-			it.g = ToFixed(value(v0->g, v1->g, v2->g, l0, l1) + 0.5);
-			it.b = ToFixed(value(v0->b, v1->b, v2->b, l0, l1) + 0.5);
-			it.a = ToFixed(value(v0->a, v1->a, v2->a, l0, l1) + 0.5);
+			it.r = static_cast<int32>(pr.value + pr.dy * rowIndex + static_cast<int64>(pr.dx) * dx);
+			it.g = static_cast<int32>(pg.value + pg.dy * rowIndex + static_cast<int64>(pg.dx) * dx);
+			it.b = static_cast<int32>(pb.value + pb.dy * rowIndex + static_cast<int64>(pb.dx) * dx);
+			it.a = static_cast<int32>(pa.value + pa.dy * rowIndex + static_cast<int64>(pa.dx) * dx);
 		}
 		else
 		{
@@ -889,24 +968,25 @@ void CSoftwareRasterizer::DrawTriangle(const VERTEX& va, const VERTEX& vb, const
 			it.b = flat.b << 16;
 			it.a = flat.a << 16;
 		}
-		it.f = ToFixed(value(v0->fog, v1->fog, v2->fog, l0, l1) + 0.5);
-		it.z = static_cast<int64>(std::floor(value(v0->z, v1->z, v2->z, l0, l1) * 65536.0));
-		if(s.textured)
+		it.f = static_cast<int32>(pf.value + pf.dy * rowIndex + static_cast<int64>(pf.dx) * dx);
+		it.z = pz.value + pz.dy * rowIndex + dzdx * dx;
+		if(textured)
 		{
-			if(s.fst)
+			if(fst)
 			{
-				it.u = ToFixed(value(v0->u, v1->u, v2->u, l0, l1));
-				it.v = ToFixed(value(v0->v, v1->v, v2->v, l0, l1));
+				it.u = static_cast<int32>(pu.value + pu.dy * rowIndex + static_cast<int64>(pu.dx) * dx);
+				it.v = static_cast<int32>(pv.value + pv.dy * rowIndex + static_cast<int64>(pv.dx) * dx);
 			}
 			else
 			{
-				it.s = static_cast<float>(value(v0->s, v1->s, v2->s, l0, l1));
-				it.t = static_cast<float>(value(v0->t, v1->t, v2->t, l0, l1));
-				it.q = static_cast<float>(value(q0, q1, q2, l0, l1));
+				float fy = static_cast<float>(rowIndex), fx = static_cast<float>(dx);
+				it.s = static_cast<float>(ps.value + ps.dy * fy + ps.dx * fx);
+				it.t = static_cast<float>(pt.value + pt.dy * fy + pt.dx * fx);
+				it.q = static_cast<float>(pq.value + pq.dy * fy + pq.dx * fx);
 			}
 		}
 
-		(this->*m_span)(y, xl, static_cast<int32>(hi), it);
+		(this->*m_span)(y, lo, hi, it);
 	}
 }
 
