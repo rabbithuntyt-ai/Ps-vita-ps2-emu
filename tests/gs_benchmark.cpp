@@ -16,7 +16,7 @@ using namespace GsTest;
 
 namespace
 {
-	constexpr uint32 TEX_PTR = 0x200000;
+	constexpr uint32 TEX_PTR = 0x260000; //clear of the frame (pages 0-149) and Z buffer (pages 150-299)
 	constexpr uint32 CLUT_PTR = 0x380000;
 
 	void UploadTextures(CTestGs& gs)

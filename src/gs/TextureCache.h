@@ -60,6 +60,20 @@ public:
 			return m_decodeStamp;
 		}
 
+		// Incremented whenever the decoded contents are thrown away.
+		uint32 GetGeneration() const
+		{
+			return m_generation;
+		}
+
+		// Decodes every tile that is not valid yet; afterwards Texels() can be
+		// indexed directly without per-fetch validity checks.
+		void DecodeAll();
+		const uint32* Texels() const
+		{
+			return m_texels.data();
+		}
+
 	private:
 		friend class CTextureCache;
 		void DecodeTile(uint32 tileX, uint32 tileY);
@@ -77,6 +91,7 @@ public:
 		uint32 m_firstPage = 0;
 		uint32 m_pageCount = 0;
 		uint32 m_decodeStamp = 0;
+		uint32 m_generation = 0;
 		uint64 m_lastUse = 0;
 		std::array<uint32, 256> m_clut = {};
 	};

@@ -150,10 +150,6 @@ private:
 		return (static_cast<uint32>(y) & m_rowMask) == m_rowValue;
 	}
 
-	uint32 SampleBilinear(int32 u, int32 v); //16.16, already offset by -0.5
-	uint32 SampleNearest(int32 u, int32 v);
-	int32 WrapU(int32) const;
-	int32 WrapV(int32) const;
 
 	uint8* m_ram = nullptr;
 	const uint16* m_clut = nullptr;
@@ -173,6 +169,8 @@ private:
 	CTextureCache m_textureCache;
 	CTextureCache::KEY m_textureKey;
 	CTextureCache::CTexture* m_texture = nullptr;
+	const uint32* m_texels = nullptr; //set when the whole texture is decoded
+	uint32 m_texelsGeneration = 0;
 	uint64 m_clutHash = 0;
 
 	uint32 m_rowMask = 0;

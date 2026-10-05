@@ -72,6 +72,32 @@ namespace
 		return (z >= 0xFFFFFFFFLL) ? 0xFFFFFFFF : static_cast<uint32>(z);
 	}
 
+	inline int32 WrapCoord(int32 coord, uint32 size, uint32 mode, uint32 minc, uint32 maxc)
+	{
+		switch(mode)
+		{
+		default:
+		case CGSHandler::CLAMP_MODE_REPEAT:
+			return coord & static_cast<int32>(size - 1);
+		case CGSHandler::CLAMP_MODE_CLAMP:
+			return std::clamp<int32>(coord, 0, static_cast<int32>(size) - 1);
+		case CGSHandler::CLAMP_MODE_REGION_CLAMP:
+			return std::clamp<int32>(coord, static_cast<int32>(minc), static_cast<int32>(maxc));
+		case CGSHandler::CLAMP_MODE_REGION_REPEAT:
+			return (coord & static_cast<int32>(minc)) | static_cast<int32>(maxc);
+		}
+	}
+
+	// Linear interpolation of two RGBA8888 colors, two channels per operation.
+	inline uint32 Lerp2(uint32 a, uint32 b, uint32 w)
+	{
+		uint32 ag = (a >> 8) & 0x00FF00FF, rb = a & 0x00FF00FF;
+		uint32 bg = (b >> 8) & 0x00FF00FF, bb = b & 0x00FF00FF;
+		uint32 lo = ((rb * (256 - w) + bb * w) >> 8) & 0x00FF00FF;
+		uint32 hi = ((ag * (256 - w) + bg * w) >> 8) & 0x00FF00FF;
+		return lo | (hi << 8);
+	}
+
 	// Edge inequality A*x + K >= 0 restricts x to [lo, hi].
 	inline void ClipSpanToEdge(int64 a, int64 k, int64& lo, int64& hi)
 	{
@@ -102,6 +128,7 @@ void CSoftwareRasterizer::SetMemory(uint8* ram, const uint16* clut)
 	m_clut = clut;
 	m_textureCache.SetMemory(ram, clut);
 	m_texture = nullptr;
+	m_texels = nullptr;
 }
 
 void CSoftwareRasterizer::SetClutHash(uint64 hash)
@@ -112,6 +139,7 @@ void CSoftwareRasterizer::SetClutHash(uint64 hash)
 	{
 		m_textureKey.clutHash = hash;
 		m_texture = nullptr;
+		m_texels = nullptr;
 	}
 }
 
@@ -160,6 +188,7 @@ void CSoftwareRasterizer::SetState(const STATE& state)
 		{
 			m_textureKey = key;
 			m_texture = nullptr;
+			m_texels = nullptr;
 		}
 	}
 
@@ -171,9 +200,22 @@ bool CSoftwareRasterizer::EnsureTexture()
 	if(!m_state.textured) return true;
 	if(!m_texture || (m_texture->GetDecodeStamp() != m_textureCache.GetStamp()))
 	{
-		m_texture = m_textureCache.Get(m_textureKey);
+		auto texture = m_textureCache.Get(m_textureKey);
+		if((texture != m_texture) || (texture->GetGeneration() != m_texelsGeneration))
+		{
+			m_texels = nullptr;
+		}
+		m_texture = texture;
 	}
-	return m_texture != nullptr;
+	if(!m_texture) return false;
+	// Small textures are decoded whole so spans can index texels directly.
+	if(!m_texels && (m_state.tw * m_state.th <= 256 * 256))
+	{
+		m_texture->DecodeAll();
+		m_texels = m_texture->Texels();
+		m_texelsGeneration = m_texture->GetGeneration();
+	}
+	return true;
 }
 
 void CSoftwareRasterizer::MarkWritten(int32 x0, int32 y0, int32 x1, int32 y1)
@@ -216,72 +258,6 @@ uint32 CSoftwareRasterizer::ReadColor32(uint8* ram, uint32 psm, uint32 bufPtr, u
 // Texturing
 //-----------------------------------------------------------------------------
 
-int32 CSoftwareRasterizer::WrapU(int32 coord) const
-{
-	const auto& s = m_state;
-	switch(s.wms)
-	{
-	default:
-	case CGSHandler::CLAMP_MODE_REPEAT:
-		return coord & static_cast<int32>(s.tw - 1);
-	case CGSHandler::CLAMP_MODE_CLAMP:
-		return std::clamp<int32>(coord, 0, static_cast<int32>(s.tw) - 1);
-	case CGSHandler::CLAMP_MODE_REGION_CLAMP:
-		return std::clamp<int32>(coord, static_cast<int32>(s.minu), static_cast<int32>(s.maxu));
-	case CGSHandler::CLAMP_MODE_REGION_REPEAT:
-		return (coord & static_cast<int32>(s.minu)) | static_cast<int32>(s.maxu);
-	}
-}
-
-int32 CSoftwareRasterizer::WrapV(int32 coord) const
-{
-	const auto& s = m_state;
-	switch(s.wmt)
-	{
-	default:
-	case CGSHandler::CLAMP_MODE_REPEAT:
-		return coord & static_cast<int32>(s.th - 1);
-	case CGSHandler::CLAMP_MODE_CLAMP:
-		return std::clamp<int32>(coord, 0, static_cast<int32>(s.th) - 1);
-	case CGSHandler::CLAMP_MODE_REGION_CLAMP:
-		return std::clamp<int32>(coord, static_cast<int32>(s.minv), static_cast<int32>(s.maxv));
-	case CGSHandler::CLAMP_MODE_REGION_REPEAT:
-		return (coord & static_cast<int32>(s.minv)) | static_cast<int32>(s.maxv);
-	}
-}
-
-inline uint32 CSoftwareRasterizer::SampleNearest(int32 u, int32 v)
-{
-	return m_texture->FetchAny(WrapU(u >> 16), WrapV(v >> 16));
-}
-
-uint32 CSoftwareRasterizer::SampleBilinear(int32 u, int32 v)
-{
-	int32 iu = u >> 16, iv = v >> 16;
-	uint32 wu = (static_cast<uint32>(u) >> 8) & 0xFF;
-	uint32 wv = (static_cast<uint32>(v) >> 8) & 0xFF;
-	int32 u0 = WrapU(iu), u1 = WrapU(iu + 1);
-	int32 v0 = WrapV(iv), v1 = WrapV(iv + 1);
-	uint32 t00 = m_texture->FetchAny(u0, v0);
-	uint32 t10 = m_texture->FetchAny(u1, v0);
-	uint32 t01 = m_texture->FetchAny(u0, v1);
-	uint32 t11 = m_texture->FetchAny(u1, v1);
-
-	uint32 result = 0;
-	for(uint32 shift = 0; shift < 32; shift += 8)
-	{
-		uint32 c00 = (t00 >> shift) & 0xFF;
-		uint32 c10 = (t10 >> shift) & 0xFF;
-		uint32 c01 = (t01 >> shift) & 0xFF;
-		uint32 c11 = (t11 >> shift) & 0xFF;
-		uint32 top = (c00 * (256 - wu) + c10 * wu) >> 8;
-		uint32 bottom = (c01 * (256 - wu) + c11 * wu) >> 8;
-		uint32 c = (top * (256 - wv) + bottom * wv) >> 8;
-		result |= (c & 0xFF) << shift;
-	}
-	return result;
-}
-
 //-----------------------------------------------------------------------------
 // Span pipeline
 //-----------------------------------------------------------------------------
@@ -291,8 +267,42 @@ uint32 CSoftwareRasterizer::SampleBilinear(int32 u, int32 v)
 template <bool TEXTURED, bool BILINEAR, int ZMODE, int FMT, bool BLEND, bool STQ>
 void CSoftwareRasterizer::DrawSpan(int32 y, int32 x0, int32 x1, INTERP& it)
 {
-	const auto& s = m_state;
+	// Local copies: stores into GS RAM go through a uint8 pointer, which may
+	// alias anything, so members would be reloaded after every pixel write.
+	const STATE s = m_state;
+	const GS_SURFACE frame = m_frame;
+	const GS_SURFACE depth = m_depth;
+	const bool depthFast = m_depthFast;
+	const bool depth16 = m_depth16;
+	const uint32 zMax = m_zMax;
+	const uint32 zpsmFull = m_zpsmFull;
+	CTextureCache::CTexture* const texture = m_texture;
+	const uint32* const texels = m_texels;
 	uint8* const ram = m_ram;
+	// REPEAT/CLAMP keep coordinates inside TW x TH, so decoded texels can be
+	// indexed directly.
+	const bool simpleWrap = (s.wms <= CGSHandler::CLAMP_MODE_CLAMP) && (s.wmt <= CGSHandler::CLAMP_MODE_CLAMP);
+	const bool direct = TEXTURED && (texels != nullptr) && simpleWrap;
+	const uint32 texWidth = s.tw;
+	auto fetchTexel = [&](int32 iu, int32 iv) -> uint32 {
+		if(direct)
+		{
+			uint32 uu = (s.wms == CGSHandler::CLAMP_MODE_REPEAT) ? (iu & (s.tw - 1)) : std::clamp<int32>(iu, 0, s.tw - 1);
+			uint32 vv = (s.wmt == CGSHandler::CLAMP_MODE_REPEAT) ? (iv & (s.th - 1)) : std::clamp<int32>(iv, 0, s.th - 1);
+			return texels[vv * texWidth + uu];
+		}
+		return texture->FetchAny(WrapCoord(iu, s.tw, s.wms, s.minu, s.maxu), WrapCoord(iv, s.th, s.wmt, s.minv, s.maxv));
+	};
+	auto sampleBilinear = [&](int32 u, int32 v) -> uint32 {
+		int32 iu = u >> 16, iv = v >> 16;
+		uint32 wu = (static_cast<uint32>(u) >> 8) & 0xFF;
+		uint32 wv = (static_cast<uint32>(v) >> 8) & 0xFF;
+		uint32 t00 = fetchTexel(iu, iv);
+		uint32 t10 = fetchTexel(iu + 1, iv);
+		uint32 t01 = fetchTexel(iu, iv + 1);
+		uint32 t11 = fetchTexel(iu + 1, iv + 1);
+		return Lerp2(Lerp2(t00, t10, wu), Lerp2(t01, t11, wu), wv);
+	};
 	constexpr bool fb16 = (FMT == 2);
 	constexpr bool fb24 = (FMT == 1);
 	const bool generic16 = (FMT == 3) && GsMemory::IsPsm16(s.fpsm);
@@ -305,13 +315,30 @@ void CSoftwareRasterizer::DrawSpan(int32 y, int32 x0, int32 x1, INTERP& it)
 	const uint32* depthTable = nullptr;
 	if(FMT != 3)
 	{
-		frameRow = m_frame.RowBase(y);
-		frameTable = m_frame.RowTable(y);
+		frameRow = frame.RowBase(y);
+		frameTable = frame.RowTable(y);
 	}
-	if((ZMODE != 0) && m_depthFast)
+	if((ZMODE != 0) && depthFast)
 	{
-		depthRow = m_depth.RowBase(y);
-		depthTable = m_depth.RowTable(y);
+		depthRow = depth.RowBase(y);
+		depthTable = depth.RowTable(y);
+	}
+
+	// Plain fills (clears, flat UI rectangles): nothing but a store per pixel.
+	if(!TEXTURED && (ZMODE == 0) && !BLEND && (FMT == 0 || FMT == 2) && !s.fog && !s.ate && !s.date &&
+	   (s.fbmsk == 0) && (it.dr == 0) && (it.dg == 0) && (it.db == 0) && (it.da == 0))
+	{
+		uint32 color = Clamp255(it.r >> 16) | (Clamp255(it.g >> 16) << 8) | (Clamp255(it.b >> 16) << 16) |
+		               ((Clamp255(it.a >> 16) | (s.fba ? 0x80 : 0)) << 24);
+		for(int32 x = x0; x <= x1; x++)
+		{
+			uint32 offset = frame.Offset(frameRow, frameTable, x);
+			if(FMT == 0)
+				*reinterpret_cast<uint32*>(ram + offset) = color;
+			else
+				*reinterpret_cast<uint16*>(ram + offset) = static_cast<uint16>(GsMemory::Color32To16(color));
+		}
+		return;
 	}
 
 	const float tw = static_cast<float>(s.tw);
@@ -339,7 +366,7 @@ void CSoftwareRasterizer::DrawSpan(int32 y, int32 x0, int32 x1, INTERP& it)
 				tu = it.u;
 				tv = it.v;
 			}
-			uint32 texel = BILINEAR ? SampleBilinear(tu - 0x8000, tv - 0x8000) : SampleNearest(tu, tv);
+			uint32 texel = BILINEAR ? sampleBilinear(tu - 0x8000, tv - 0x8000) : fetchTexel(tu >> 16, tv >> 16);
 			uint32 tr = texel & 0xFF;
 			uint32 tg = (texel >> 8) & 0xFF;
 			uint32 tb = (texel >> 16) & 0xFF;
@@ -377,7 +404,7 @@ void CSoftwareRasterizer::DrawSpan(int32 y, int32 x0, int32 x1, INTERP& it)
 		uint32 z = 0;
 		if(ZMODE != 0)
 		{
-			z = std::min(ClampZ(it.z), m_zMax);
+			z = std::min(ClampZ(it.z), zMax);
 		}
 
 		//Step now so that every early-out below can just 'continue'.
@@ -449,7 +476,7 @@ void CSoftwareRasterizer::DrawSpan(int32 y, int32 x0, int32 x1, INTERP& it)
 		}
 
 		uint32 frameOffset = 0;
-		if(FMT != 3) frameOffset = m_frame.Offset(frameRow, frameTable, x);
+		if(FMT != 3) frameOffset = frame.Offset(frameRow, frameTable, x);
 
 		uint32 dstRaw = 0;
 		bool dstLoaded = false;
@@ -474,15 +501,15 @@ void CSoftwareRasterizer::DrawSpan(int32 y, int32 x0, int32 x1, INTERP& it)
 		uint32 depthOffset = 0;
 		if(ZMODE != 0)
 		{
-			if(m_depthFast) depthOffset = m_depth.Offset(depthRow, depthTable, x);
+			if(depthFast) depthOffset = depth.Offset(depthRow, depthTable, x);
 			if(ZMODE == 2)
 			{
 				uint32 dstZ;
-				if(m_depthFast)
-					dstZ = m_depth16 ? *reinterpret_cast<const uint16*>(ram + depthOffset) : *reinterpret_cast<const uint32*>(ram + depthOffset);
+				if(depthFast)
+					dstZ = depth16 ? *reinterpret_cast<const uint16*>(ram + depthOffset) : *reinterpret_cast<const uint32*>(ram + depthOffset);
 				else
-					dstZ = GsMemory::ReadRaw(ram, m_zpsmFull, s.zbp, s.fbw, x, y);
-				dstZ &= m_zMax;
+					dstZ = GsMemory::ReadRaw(ram, zpsmFull, s.zbp, s.fbw, x, y);
+				dstZ &= zMax;
 				bool pass = (s.ztst == CGSHandler::DEPTH_TEST_GEQUAL) ? (z >= dstZ) : (z > dstZ);
 				if(!pass) continue;
 			}
@@ -547,13 +574,13 @@ void CSoftwareRasterizer::DrawSpan(int32 y, int32 x0, int32 x1, INTERP& it)
 
 		if((ZMODE != 0) && writeDepth)
 		{
-			if(m_depthFast)
+			if(depthFast)
 			{
-				if(m_depth16)
+				if(depth16)
 				{
 					*reinterpret_cast<uint16*>(ram + depthOffset) = static_cast<uint16>(z);
 				}
-				else if(m_zMax == 0x00FFFFFF)
+				else if(zMax == 0x00FFFFFF)
 				{
 					auto pixel = reinterpret_cast<uint32*>(ram + depthOffset);
 					*pixel = (*pixel & 0xFF000000) | z;
@@ -565,7 +592,7 @@ void CSoftwareRasterizer::DrawSpan(int32 y, int32 x0, int32 x1, INTERP& it)
 			}
 			else
 			{
-				GsMemory::WriteRaw(ram, m_zpsmFull, s.zbp, s.fbw, x, y, z);
+				GsMemory::WriteRaw(ram, zpsmFull, s.zbp, s.fbw, x, y, z);
 			}
 		}
 	}

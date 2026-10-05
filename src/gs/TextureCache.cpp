@@ -51,6 +51,7 @@ void CTextureCache::Reset(CTexture& texture)
 {
 	std::fill(texture.m_tileValid.begin(), texture.m_tileValid.end(), 0);
 	texture.m_decodeStamp = m_stamp;
+	texture.m_generation++;
 }
 
 CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
@@ -237,4 +238,16 @@ void CTextureCache::CTexture::DecodeTile(uint32 tileX, uint32 tileY)
 	}
 	m_tileValid[tileY * m_tilesW + tileX] = 1;
 	m_cache->m_decodedTiles++;
+}
+
+void CTextureCache::CTexture::DecodeAll()
+{
+	uint32 tilesH = static_cast<uint32>(m_tileValid.size()) / m_tilesW;
+	for(uint32 ty = 0; ty < tilesH; ty++)
+	{
+		for(uint32 tx = 0; tx < m_tilesW; tx++)
+		{
+			if(!m_tileValid[ty * m_tilesW + tx]) DecodeTile(tx, ty);
+		}
+	}
 }
