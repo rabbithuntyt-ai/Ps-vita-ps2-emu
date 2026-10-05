@@ -119,6 +119,18 @@ CEmuSession::CEmuSession(const CONFIG& config)
 	m_newFrameConnection = m_vm->OnNewFrame.Connect([this]() {
 		// Runs on the emulation thread (EE, IOP, VU, SPU).
 		if(m_vmFrames++ == 0) ThreadProfiler::RegisterCurrentThread("PS2 (EE/IOP/VU)");
+		// Called before the VM resets the frame's counters: average EE idle
+		// time over whole frames (half a second at 60 fps).
+		auto info = m_vm->GetCpuUtilisationInfo();
+		m_eeIdleTicks += std::max(info.eeIdleTicks, 0);
+		m_eeBusyTicks += std::max(info.eeTotalTicks, 0);
+		if(++m_eeIdleFrames >= 30)
+		{
+			int64_t total = m_eeIdleTicks + m_eeBusyTicks;
+			m_eeIdleRatio = (total > 0) ? static_cast<float>(m_eeIdleTicks) / static_cast<float>(total) : 0.0f;
+			m_eeIdleTicks = m_eeBusyTicks = 0;
+			m_eeIdleFrames = 0;
+		}
 	});
 }
 
@@ -210,9 +222,7 @@ uint32_t CEmuSession::GetGsRasterMicros()
 
 float CEmuSession::GetEeIdleRatio()
 {
-	auto info = m_vm->GetCpuUtilisationInfo();
-	if(info.eeTotalTicks <= 0) return 0;
-	return static_cast<float>(info.eeIdleTicks) / static_cast<float>(info.eeTotalTicks + info.eeIdleTicks);
+	return m_eeIdleRatio.load();
 }
 
 CEmuSession::DEBUG_STATE CEmuSession::GetDebugState()

@@ -88,7 +88,7 @@ public:
 	}
 
 	// Profiling: GS rasterization time of the last frame, and the share of EE
-	// cycles the game spent idling (waiting for vsync etc.) in the current frame.
+	// cycles the game spent idling (waiting for vsync etc.) over the last 30 frames.
 	uint32_t GetGsRasterMicros();
 	float GetEeIdleRatio();
 
@@ -122,6 +122,10 @@ private:
 	std::function<void()> m_vu1ThreadInit;
 	CFrameMailbox m_frames;
 	std::atomic<uint64_t> m_vmFrames{0};
+	// EE idle accounting (emulation thread), published every 30 frames.
+	int64_t m_eeIdleTicks = 0, m_eeBusyTicks = 0;
+	uint32_t m_eeIdleFrames = 0;
+	std::atomic<float> m_eeIdleRatio{0.0f};
 	Framework::CSignal<void()>::Connection m_newFrameConnection;
 	bool m_booted = false;
 	SPEED_HACKS m_speedHacks;

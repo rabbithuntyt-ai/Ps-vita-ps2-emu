@@ -38,17 +38,25 @@ int main(int argc, char** argv)
 	// Auto EE cycle rate.
 	CAutoCycleRate autoRate;
 	Check(autoRate.GetRate() == 100, "auto starts at 100");
-	Check(!autoRate.Update(0.0f, 30, 60), "one slow second is not enough");
+	Check(!autoRate.Update(0.0f, 30, 60) && !autoRate.Update(0.0f, 30, 60), "two slow seconds are not enough");
 	Check(autoRate.Update(0.0f, 30, 60) && autoRate.GetRate() == 90, "steps down when EE bound");
 	for(int i = 0; i < 20; i++) autoRate.Update(0.0f, 30, 60);
 	Check(autoRate.GetRate() == 60, "floor");
-	autoRate.Update(0.0f, 30, 60);
 	Check(!autoRate.Update(0.01f, 60, 60), "full speed does not step down");
 	Check(autoRate.GetRate() == 60, "holds at full speed without idle");
-	for(int i = 0; i < 4; i++) autoRate.Update(0.5f, 60, 60);
+	for(int i = 0; i < 12; i++) autoRate.Update(0.5f, 60, 60);
+	Check(autoRate.GetRate() == 60, "no climbing during the cooldown after a step down");
+	for(int i = 0; i < 30; i++) autoRate.Update(0.3f, 60, 60);
+	Check(autoRate.GetRate() == 60, "moderate idle does not climb");
+	for(int i = 0; i < 9; i++) autoRate.Update(0.5f, 60, 60);
 	Check(autoRate.GetRate() == 60, "climbs slowly");
 	autoRate.Update(0.5f, 60, 60);
 	Check(autoRate.GetRate() == 75, "climbs back with headroom");
+	// Alternating busy/idle seconds must not cause changes.
+	autoRate.Reset();
+	int changes = 0;
+	for(int i = 0; i < 120; i++) changes += autoRate.Update((i & 1) ? 0.5f : 0.0f, 30, 60) ? 1 : 0;
+	Check(changes == 0, "no flapping on alternating samples");
 	autoRate.Reset();
 	Check(autoRate.GetRate() == 100, "reset");
 
