@@ -76,7 +76,8 @@ public:
 		uint32 textureUploads = 0;
 		uint32 downloadedPixels = 0;
 		uint32 uploadedPixels = 0;
-		uint32 approximateBlends = 0; //state changes with a blend GL cannot express
+		uint32 approximateBlends = 0;
+		uint32 redundantStateChanges = 0; //state rewrites that did not break batching //state changes with a blend GL cannot express
 	};
 
 	// (A - B) * C + D with A, B, D in {Cs, Cd, 0}: fixed-function blending

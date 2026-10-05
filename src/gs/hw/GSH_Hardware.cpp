@@ -59,6 +59,65 @@ namespace
 		return (alpha + 1) / 2;
 	}
 
+	// Update SameState when fields are added to the drawing state.
+	static_assert((sizeof(void*) != 8) || (sizeof(CSoftwareRasterizer::STATE) == 180), "STATE changed");
+
+	bool SameState(const CSoftwareRasterizer::STATE& a, const CSoftwareRasterizer::STATE& b)
+	{
+		return (a.gouraud == b.gouraud) &&
+		       (a.textured == b.textured) &&
+		       (a.fog == b.fog) &&
+		       (a.alphaBlend == b.alphaBlend) &&
+		       (a.fst == b.fst) &&
+		       (a.fbp == b.fbp) &&
+		       (a.fbw == b.fbw) &&
+		       (a.fpsm == b.fpsm) &&
+		       (a.fbmsk == b.fbmsk) &&
+		       (a.zbp == b.zbp) &&
+		       (a.zpsm == b.zpsm) &&
+		       (a.zmsk == b.zmsk) &&
+		       (a.scax0 == b.scax0) &&
+		       (a.scax1 == b.scax1) &&
+		       (a.scay0 == b.scay0) &&
+		       (a.scay1 == b.scay1) &&
+		       (a.ate == b.ate) &&
+		       (a.atst == b.atst) &&
+		       (a.aref == b.aref) &&
+		       (a.afail == b.afail) &&
+		       (a.date == b.date) &&
+		       (a.datm == b.datm) &&
+		       (a.zte == b.zte) &&
+		       (a.ztst == b.ztst) &&
+		       (a.blendA == b.blendA) &&
+		       (a.blendB == b.blendB) &&
+		       (a.blendC == b.blendC) &&
+		       (a.blendD == b.blendD) &&
+		       (a.blendFix == b.blendFix) &&
+		       (a.pabe == b.pabe) &&
+		       (a.fba == b.fba) &&
+		       (a.colClamp == b.colClamp) &&
+		       (a.fogColor == b.fogColor) &&
+		       (a.tbp == b.tbp) &&
+		       (a.tbw == b.tbw) &&
+		       (a.tpsm == b.tpsm) &&
+		       (a.tw == b.tw) &&
+		       (a.th == b.th) &&
+		       (a.tcc == b.tcc) &&
+		       (a.tfx == b.tfx) &&
+		       (a.cpsm == b.cpsm) &&
+		       (a.csa == b.csa) &&
+		       (a.bilinear == b.bilinear) &&
+		       (a.wms == b.wms) &&
+		       (a.wmt == b.wmt) &&
+		       (a.minu == b.minu) &&
+		       (a.maxu == b.maxu) &&
+		       (a.minv == b.minv) &&
+		       (a.maxv == b.maxv) &&
+		       (a.ta0 == b.ta0) &&
+		       (a.ta1 == b.ta1) &&
+		       (a.aem == b.aem);
+	}
+
 	uint32 RoundUpTargetHeight(uint32 height)
 	{
 		if(height <= 256) return 256;
@@ -560,7 +619,9 @@ void CGSH_Hardware::SyncCLUT(const TEX0& tex0)
 	uint64 hash = XXH3_64bits(m_pCLUT, CLUTSIZE);
 	if(hash != m_clutHash)
 	{
+		FlushBatch();
 		m_clutHash = hash;
+		m_stateApplied = false; //the bound texture depends on the CLUT
 		MarkStateDirty();
 	}
 }
@@ -571,8 +632,16 @@ void CGSH_Hardware::SyncCLUT(const TEX0& tex0)
 
 void CGSH_Hardware::OnStateChanged()
 {
+	// Games rewrite registers with the same values all the time: keep
+	// batching when the decoded state did not change.
+	auto state = DecodeState();
+	if(m_stateApplied && SameState(state, m_state))
+	{
+		m_stats.redundantStateChanges++;
+		return;
+	}
 	FlushBatch();
-	m_state = DecodeState();
+	m_state = state;
 	m_stateApplied = false;
 }
 
