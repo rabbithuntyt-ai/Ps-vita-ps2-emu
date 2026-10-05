@@ -1,5 +1,7 @@
 #include "GSH_Software.h"
 #include "GsMemory.h"
+#include "gs/GsTransferRange.h"
+#include "xxhash.h"
 #include <cstring>
 
 CGSH_Software::CGSH_Software(bool gsThreaded)
@@ -25,6 +27,47 @@ void CGSH_Software::SetFrameSink(FrameSink sink)
 void CGSH_Software::InitializeImpl()
 {
 	m_rasterizer.SetMemory(m_pRAM, m_pCLUT);
+	m_rasterizer.SetClutHash(XXH3_64bits(m_pCLUT, CLUTSIZE));
+}
+
+void CGSH_Software::SetInterlacedRendering(bool enabled)
+{
+	m_interlaced = enabled;
+	UpdateRowFilter();
+}
+
+void CGSH_Software::SetFrameSkip(uint32 frameSkip)
+{
+	m_frameSkip = frameSkip;
+}
+
+void CGSH_Software::UpdateRowFilter()
+{
+	m_rasterizer.SetRowFilter(m_interlaced ? 1 : 0, m_frameCounter & 1);
+}
+
+void CGSH_Software::MarkNewFrame()
+{
+	m_frameCounter++;
+	m_skipThisFrame = (m_frameSkip != 0) && ((m_frameCounter % (m_frameSkip + 1)) != 0);
+	UpdateRowFilter();
+	CGSHandler::MarkNewFrame();
+}
+
+void CGSH_Software::TransferWrite(const uint8* data, uint32 length)
+{
+	CGSHandler::TransferWrite(data, length);
+	auto bltBuf = make_convertible<BITBLTBUF>(m_nReg[GS_REG_BITBLTBUF]);
+	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
+	auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
+	auto [start, size] = GsTransfer::GetDstRange(bltBuf, trxReg, trxPos);
+	m_rasterizer.NotifyMemoryWrite(start, size);
+}
+
+void CGSH_Software::SyncCLUT(const TEX0& tex0)
+{
+	CGSHandler::SyncCLUT(tex0);
+	m_rasterizer.SetClutHash(XXH3_64bits(m_pCLUT, CLUTSIZE));
 }
 
 void CGSH_Software::ReleaseImpl()
@@ -38,11 +81,27 @@ void CGSH_Software::ResetImpl()
 	m_pendingPrim = false;
 	m_pendingPrimValue = 0;
 	m_primitiveCount = 0;
+	m_stateDirty = true;
+	m_rasterizer.NotifyAllMemoryWritten();
 }
 
 void CGSH_Software::WriteRegisterImpl(uint8 registerId, uint64 data)
 {
 	CGSHandler::WriteRegisterImpl(registerId, data);
+
+	switch(registerId)
+	{
+	case GS_REG_RGBAQ:
+	case GS_REG_ST:
+	case GS_REG_UV:
+	case GS_REG_FOG:
+	case GS_REG_HWREG:
+		//Per-vertex data: no effect on rasterizer state.
+		break;
+	default:
+		m_stateDirty = true;
+		break;
+	}
 
 	switch(registerId)
 	{
@@ -93,7 +152,7 @@ void CGSH_Software::VertexKick(uint8 registerId, uint64 data)
 
 	if(m_vtxCount == 0) return;
 
-	bool drawingKick = ((registerId == GS_REG_XYZ2) || (registerId == GS_REG_XYZF2)) && m_drawEnabled;
+	bool drawingKick = ((registerId == GS_REG_XYZ2) || (registerId == GS_REG_XYZF2)) && m_drawEnabled && !m_skipThisFrame;
 	bool fog = (registerId == GS_REG_XYZF2) || (registerId == GS_REG_XYZF3);
 
 	auto& vertex = m_vtxBuffer[m_vtxCount - 1];
@@ -117,7 +176,13 @@ void CGSH_Software::VertexKick(uint8 registerId, uint64 data)
 
 	if(drawingKick)
 	{
-		BuildState();
+		uint64 primitiveMode = m_primitiveMode;
+		if(m_stateDirty || (primitiveMode != m_lastPrimitiveMode))
+		{
+			BuildState();
+			m_stateDirty = false;
+			m_lastPrimitiveMode = primitiveMode;
+		}
 		m_primitiveCount++;
 	}
 
@@ -283,6 +348,9 @@ void CGSH_Software::ProcessLocalToLocalTransfer()
 	uint32 width = trxReg.nRRW;
 	uint32 height = trxReg.nRRH;
 	if((width == 0) || (height == 0)) return;
+
+	auto [dstStart, dstSize] = GsTransfer::GetDstRange(bltBuf, trxReg, trxPos);
+	m_rasterizer.NotifyMemoryWrite(dstStart, dstSize);
 
 	// Gather first so that overlapping source/destination areas behave.
 	std::vector<uint32> pixels(width * height);

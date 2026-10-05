@@ -49,6 +49,10 @@ add_library(gsh_software STATIC
 	src/gs/GSH_Software.h
 	src/gs/SoftwareRasterizer.cpp
 	src/gs/SoftwareRasterizer.h
+	src/gs/TextureCache.cpp
+	src/gs/TextureCache.h
+	src/gs/GsSurface.h
+	src/gs/GsMemory.h
 )
 target_include_directories(gsh_software PUBLIC src/gs ${PLAY_DIR}/Source)
 target_link_libraries(gsh_software PUBLIC PlayCore)
@@ -79,6 +83,11 @@ else()
 	add_executable(gs_benchmark tests/gs_benchmark.cpp)
 	target_include_directories(gs_benchmark PRIVATE tests)
 	target_link_libraries(gs_benchmark PRIVATE vitaps2_common)
+
+	add_executable(gs_diff_tests tests/gs_diff_tests.cpp tests/reference/ReferenceRasterizer.cpp)
+	target_include_directories(gs_diff_tests PRIVATE tests)
+	target_link_libraries(gs_diff_tests PRIVATE vitaps2_common)
+	add_test(NAME gs_diff_tests COMMAND gs_diff_tests)
 
 	add_executable(jit_pool_tests tests/jit_pool_tests.cpp)
 	target_include_directories(jit_pool_tests PRIVATE src/common)

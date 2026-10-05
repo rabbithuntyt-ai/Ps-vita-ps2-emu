@@ -32,17 +32,28 @@ public:
 		return m_primitiveCount;
 	}
 
+	// Speed hacks -------------------------------------------------------------
+	// Interlaced rendering: rasterize only every other row, alternating each
+	// frame. Halves fill cost; can leave artifacts in render-to-texture effects.
+	void SetInterlacedRendering(bool);
+	// Skip drawing of N frames out of N+1 (0 = draw everything).
+	void SetFrameSkip(uint32);
+
 protected:
 	void InitializeImpl() override;
 	void ReleaseImpl() override;
 	void ResetImpl() override;
 	void WriteRegisterImpl(uint8, uint64) override;
 	void FlipImpl(const DISPLAY_INFO&) override;
+	void MarkNewFrame() override;
+	void TransferWrite(const uint8*, uint32) override;
+	void SyncCLUT(const TEX0&) override;
 
 private:
 	void VertexKick(uint8, uint64);
 	void BeginPrimitive(uint64);
 	void BuildState();
+	void UpdateRowFilter();
 	CSoftwareRasterizer::VERTEX ConvertVertex(const VERTEX&) const;
 
 	CSoftwareRasterizer m_rasterizer;
@@ -56,4 +67,11 @@ private:
 	bool m_pendingPrim = false;
 	uint64 m_pendingPrimValue = 0;
 	uint32 m_primitiveCount = 0;
+	bool m_stateDirty = true;
+	uint64 m_lastPrimitiveMode = ~0ULL;
+
+	bool m_interlaced = false;
+	uint32 m_frameSkip = 0;
+	uint32 m_frameCounter = 0;
+	bool m_skipThisFrame = false;
 };
