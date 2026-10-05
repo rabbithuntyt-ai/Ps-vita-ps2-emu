@@ -9,7 +9,7 @@ needed**) on the Vita through its 32-bit ARM JIT, with a new portable
 
 > **Set expectations:** the Vita's Cortex-A9 is roughly 10x slower than what
 > full-speed PS2 emulation needs on ARM. Commercial 3D games will run far
-> below full speed. See [docs/RESEARCH.md](docs/RESEARCH.md) for the analysis,
+> below full speed. See [docs/RESEARCH.md](docs/RESEARCH.md) for the analysis and [docs/ROADMAP.md](docs/ROADMAP.md) for the full checklist,
 > the options considered and the optimization roadmap.
 
 ## Status
