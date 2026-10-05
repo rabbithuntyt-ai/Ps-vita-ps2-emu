@@ -33,6 +33,9 @@
 #include <vitaGL.h>
 
 #include "AutoCycleRate.h"
+#ifndef VITAPS2_BUILD
+#define VITAPS2_BUILD "dev"
+#endif
 #include "CpuScreen.h"
 #include "EmuSession.h"
 #include "GameProfiles.h"
@@ -421,7 +424,7 @@ namespace
 
 			BeginFrame();
 			Gfx::Text(30, 45, COLOR_ACCENT, 1.4f, "VitaPS2");
-			Gfx::Text(180, 45, COLOR_GREY, 0.8f, "PlayStation 2 emulator (experimental)");
+			Gfx::Text(180, 45, COLOR_GREY, 0.8f, "PlayStation 2 emulator (experimental)  build " VITAPS2_BUILD);
 			for(int i = scroll; i < std::min(count, scroll + visible); i++)
 			{
 				int y = 95 + (i - scroll) * 26;
@@ -643,7 +646,7 @@ namespace
 			{
 				int lines = 5 + static_cast<int>(threadUsage.size());
 				Gfx::Rect(0, 0, 400, 10 + lines * 20, Gfx::Rgba(0, 0, 0, 160));
-				Gfx::Textf(8, 20, COLOR_WHITE, 0.7f, "VM %.1f fps  out %.1f fps  %ux%u", vmFps, presentFps, screen.width, screen.height);
+				Gfx::Textf(8, 20, COLOR_WHITE, 0.7f, "VM %.1f fps  out %.1f fps  %ux%u  " VITAPS2_BUILD, vmFps, presentFps, screen.width, screen.height);
 				uint32_t eeRate = (settings.eeCycleRate == 0) ? autoRate.GetRate() : settings.eeCycleRate;
 				Gfx::Textf(8, 40, COLOR_GREY, 0.7f, "EE idle %.0f%%  rate %u%%%s  JIT %u/%u KB  %s", session->GetEeIdleRatio() * 100.0f,
 				           eeRate, (settings.eeCycleRate == 0) ? " auto" : "",
@@ -685,7 +688,7 @@ int main()
 	// Everything printed (ours and Play!'s) goes to a log file for bug reports.
 	if(std::freopen(LOG_PATH, "w", stdout)) setvbuf(stdout, nullptr, _IOLBF, 0);
 	if(std::freopen(LOG_PATH, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
-	std::printf("VitaPS2 starting\n");
+	std::printf("VitaPS2 %s starting\n", VITAPS2_BUILD);
 	ThreadProfiler::RegisterCurrentThread("UI/GPU");
 
 	scePowerSetArmClockFrequency(444);
