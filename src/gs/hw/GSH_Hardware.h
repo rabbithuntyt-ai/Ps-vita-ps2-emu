@@ -108,9 +108,11 @@ private:
 
 	struct BATCH_VERTEX
 	{
-		float x, y, z;
+		// Clip space position; w = 1/Q makes the GPU's perspective correct
+		// interpolation reproduce STQ texturing with plain 2D texcoords.
+		float x, y, z, w;
 		uint8 r, g, b, a;
-		float s, t, p, q;
+		float s, t;
 	};
 
 	struct CACHED_TEXTURE

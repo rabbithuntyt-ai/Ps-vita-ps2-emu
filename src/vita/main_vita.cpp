@@ -4,10 +4,15 @@
 // ux0:data/VitaPS2/games. Configuration, memory cards and logs live in
 // ux0:data/VitaPS2.
 //
-// In game:  SELECT + START  -> pause menu (speed hacks, display, quit)
+// In game:  SELECT + START  -> pause menu (renderer, speed hacks, display, quit)
 //           SELECT + L      -> toggle the performance overlay
 //
 // Settings are remembered per game in ux0:data/VitaPS2/settings.
+//
+// Everything is drawn with vitaGL. The GPU GS renderer draws PS2 frames into
+// GPU render targets on this (the main) thread; menus and overlays use the
+// small Gfx layer on the same context. vitaGL compiles shaders at runtime and
+// needs libshacccg.suprx (ur0:data/libshacccg.suprx or ur0:data/external/).
 
 #include <algorithm>
 #include <cstdio>
@@ -22,19 +27,25 @@
 #include <psp2/ctrl.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/sysmem.h>
 #include <psp2/power.h>
-#include <vita2d.h>
+#include <vitaGL.h>
 
+#include "CpuScreen.h"
 #include "EmuSession.h"
+#include "GSH_Hardware.h"
+#include "Gfx.h"
 #include "GsBenchmark.h"
-#include "ThreadProfiler.h"
 #include "JitMemory.h"
 #include "PH_Vita.h"
+#include "PS2VM.h"
 #include "SH_Vita.h"
+#include "ThreadProfiler.h"
 
 // Memory layout: the newlib heap holds the emulated PS2 (EE/IOP RAM, VU, GS
-// RAM, recompiler tables). The JIT code pool is a separate VM block. Textures
-// live in CDRAM through vita2d. Requires ATTRIBUTE2=12 in param.sfo.
+// RAM, recompiler tables). The JIT code pool is a separate VM block allocated
+// before vitaGL creates its pools (render targets and textures in CDRAM plus a
+// RAM pool). Requires ATTRIBUTE2=12 in param.sfo.
 extern "C"
 {
 	// Leaves room for the JIT pool (VM block) inside the app's memory budget.
@@ -53,13 +64,35 @@ namespace
 	constexpr const char* BUILTIN_TEST_NAME = "[Built-in] GS self test";
 	constexpr size_t JIT_POOL_MIN = 8 * 1024 * 1024;
 	constexpr size_t JIT_POOL_MAX = 48 * 1024 * 1024;
+	// System RAM kept out of vitaGL's pools (thread stacks, audio, the shader
+	// compiler's own allocations).
+	constexpr int GL_RAM_LEFT_FREE = 24 * 1024 * 1024;
 
-	constexpr unsigned int COLOR_WHITE = RGBA8(255, 255, 255, 255);
-	constexpr unsigned int COLOR_GREY = RGBA8(150, 150, 160, 255);
-	constexpr unsigned int COLOR_ACCENT = RGBA8(90, 160, 255, 255);
-	constexpr unsigned int COLOR_BG = RGBA8(16, 18, 28, 255);
+	constexpr uint32_t SCREEN_WIDTH = 960, SCREEN_HEIGHT = 544;
+	constexpr uint32_t COLOR_WHITE = Gfx::Rgba(255, 255, 255, 255);
+	constexpr uint32_t COLOR_GREY = Gfx::Rgba(150, 150, 160, 255);
+	constexpr uint32_t COLOR_ACCENT = Gfx::Rgba(90, 160, 255, 255);
+	constexpr uint32_t COLOR_WARN = Gfx::Rgba(255, 110, 110, 255);
+	constexpr uint32_t COLOR_BG = Gfx::Rgba(16, 18, 28, 255);
+	constexpr uint32_t COLOR_SELECTION = Gfx::Rgba(40, 60, 110, 255);
 
-	vita2d_pgf* g_font = nullptr;
+	void BeginFrame()
+	{
+		Gfx::BeginFrame(SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BG);
+	}
+
+	void EndFrame()
+	{
+		Gfx::Flush();
+		vglSwapBuffers(GL_FALSE);
+	}
+
+	bool HasShaderCompiler()
+	{
+		SceIoStat stat;
+		return (sceIoGetstat("ur0:data/libshacccg.suprx", &stat) >= 0) ||
+		       (sceIoGetstat("ur0:data/external/libshacccg.suprx", &stat) >= 0);
+	}
 
 	struct INPUT
 	{
@@ -85,13 +118,11 @@ namespace
 		{
 			auto input = ReadInput(previous);
 			if(input.pressed & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE)) break;
-			vita2d_start_drawing();
-			vita2d_clear_screen();
-			vita2d_pgf_draw_text(g_font, 40, 70, COLOR_ACCENT, 1.4f, title.c_str());
-			vita2d_pgf_draw_text(g_font, 40, 130, COLOR_WHITE, 1.0f, body.c_str());
-			vita2d_pgf_draw_text(g_font, 40, 510, COLOR_GREY, 0.9f, "Press X to continue");
-			vita2d_end_drawing();
-			vita2d_swap_buffers();
+			BeginFrame();
+			Gfx::Text(40, 70, COLOR_ACCENT, 1.3f, title.c_str());
+			Gfx::Text(40, 130, COLOR_WHITE, 0.85f, body.c_str());
+			Gfx::Text(40, 510, COLOR_GREY, 0.8f, "Press X to continue");
+			EndFrame();
 		}
 	}
 
@@ -102,6 +133,7 @@ namespace
 		uint32_t frameSkip = 0;
 		bool showStats = true;
 		bool stretch = false; //fill the 16:9 screen instead of 4:3
+		bool softwareRenderer = false;
 	};
 
 	std::string SettingsPathFor(const std::string& gamePath)
@@ -126,6 +158,7 @@ namespace
 			else if(key == "frame_skip") settings.frameSkip = value;
 			else if(key == "show_stats") settings.showStats = value != 0;
 			else if(key == "stretch") settings.stretch = value != 0;
+			else if(key == "software_renderer") settings.softwareRenderer = value != 0;
 		}
 		return settings;
 	}
@@ -137,7 +170,8 @@ namespace
 		     << "interlaced=" << (settings.interlaced ? 1 : 0) << "\n"
 		     << "frame_skip=" << settings.frameSkip << "\n"
 		     << "show_stats=" << (settings.showStats ? 1 : 0) << "\n"
-		     << "stretch=" << (settings.stretch ? 1 : 0) << "\n";
+		     << "stretch=" << (settings.stretch ? 1 : 0) << "\n"
+		     << "software_renderer=" << (settings.softwareRenderer ? 1 : 0) << "\n";
 	}
 
 	CEmuSession::SPEED_HACKS ToSpeedHacks(const GAME_SETTINGS& settings)
@@ -149,16 +183,26 @@ namespace
 		return hacks;
 	}
 
-	void DrawScreen(vita2d_texture* screen, uint32_t width, uint32_t height, bool stretch)
+	// The emulated display: a region of a GL texture.
+	struct SCREEN
 	{
-		if(width == 0 || height == 0) return;
-		float dstH = 544.0f;
-		float dstW = stretch ? 960.0f : dstH * 4.0f / 3.0f;
-		vita2d_draw_texture_part_scale(screen, (960.0f - dstW) / 2.0f, 0, 0, 0, width, height, dstW / width, dstH / height);
+		GLuint texture = 0;
+		uint32_t textureWidth = 0, textureHeight = 0;
+		uint32_t x = 0, y = 0, width = 0, height = 0;
+	};
+
+	void DrawScreen(const SCREEN& screen, bool stretch)
+	{
+		if(!screen.texture || (screen.width == 0) || (screen.height == 0)) return;
+		float dstH = static_cast<float>(SCREEN_HEIGHT);
+		float dstW = stretch ? static_cast<float>(SCREEN_WIDTH) : dstH * 4.0f / 3.0f;
+		Gfx::Image(screen.texture, screen.textureWidth, screen.textureHeight, static_cast<float>(screen.x),
+		           static_cast<float>(screen.y), static_cast<float>(screen.width), static_cast<float>(screen.height),
+		           (SCREEN_WIDTH - dstW) / 2.0f, 0, dstW, dstH, true);
 	}
 
 	// Returns true if the player chose to quit to the game list.
-	bool RunPauseMenu(CEmuSession& session, GAME_SETTINGS& settings, vita2d_texture* screen, uint32_t width, uint32_t height)
+	bool RunPauseMenu(CEmuSession& session, GAME_SETTINGS& settings, const SCREEN& screen)
 	{
 		static const uint32_t eeRates[] = {50, 60, 75, 90, 100, 130};
 		enum ITEM
@@ -169,6 +213,7 @@ namespace
 			ITEM_FRAMESKIP,
 			ITEM_STRETCH,
 			ITEM_STATS,
+			ITEM_RENDERER,
 			ITEM_QUIT,
 			ITEM_COUNT
 		};
@@ -204,6 +249,7 @@ namespace
 				case ITEM_FRAMESKIP: settings.frameSkip = static_cast<uint32_t>(std::clamp<int>(static_cast<int>(settings.frameSkip) + delta, 0, 3)); break;
 				case ITEM_STRETCH: settings.stretch = !settings.stretch; break;
 				case ITEM_STATS: settings.showStats = !settings.showStats; break;
+				case ITEM_RENDERER: settings.softwareRenderer = !settings.softwareRenderer; break;
 				case ITEM_QUIT:
 					if(input.pressed & SCE_CTRL_CROSS)
 					{
@@ -218,26 +264,25 @@ namespace
 				char lines[ITEM_COUNT][96];
 				std::snprintf(lines[ITEM_RESUME], 96, "Resume");
 				std::snprintf(lines[ITEM_EE_RATE], 96, "EE cycle rate: %u%%  (lower = faster, may slow game logic)", settings.eeCycleRate);
-				std::snprintf(lines[ITEM_INTERLACED], 96, "Interlaced rendering: %s  (half the GS work)", settings.interlaced ? "On" : "Off");
-				std::snprintf(lines[ITEM_FRAMESKIP], 96, "Frame skip: %u", settings.frameSkip);
+				std::snprintf(lines[ITEM_INTERLACED], 96, "Interlaced rendering: %s  (software renderer)", settings.interlaced ? "On" : "Off");
+				std::snprintf(lines[ITEM_FRAMESKIP], 96, "Frame skip: %u  (software renderer)", settings.frameSkip);
 				std::snprintf(lines[ITEM_STRETCH], 96, "Aspect: %s", settings.stretch ? "Stretch 16:9" : "4:3");
 				std::snprintf(lines[ITEM_STATS], 96, "Performance overlay: %s", settings.showStats ? "On" : "Off");
+				std::snprintf(lines[ITEM_RENDERER], 96, "Renderer: %s  (applies when the game restarts)", settings.softwareRenderer ? "Software" : "GPU");
 				std::snprintf(lines[ITEM_QUIT], 96, "Quit to game list");
 
-				vita2d_start_drawing();
-				vita2d_clear_screen();
-				DrawScreen(screen, width, height, settings.stretch);
-				vita2d_draw_rectangle(120, 90, 720, 360, RGBA8(10, 12, 24, 220));
-				vita2d_pgf_draw_text(g_font, 150, 130, COLOR_ACCENT, 1.2f, "Paused");
+				BeginFrame();
+				DrawScreen(screen, settings.stretch);
+				Gfx::Rect(90, 70, 780, 400, Gfx::Rgba(10, 12, 24, 220));
+				Gfx::Text(120, 110, COLOR_ACCENT, 1.1f, "Paused");
 				for(int i = 0; i < ITEM_COUNT; i++)
 				{
-					int y = 180 + i * 34;
-					if(i == selected) vita2d_draw_rectangle(140, y - 24, 680, 32, RGBA8(40, 60, 110, 255));
-					vita2d_pgf_draw_text(g_font, 155, y, (i == selected) ? COLOR_WHITE : COLOR_GREY, 0.95f, lines[i]);
+					int y = 160 + i * 34;
+					if(i == selected) Gfx::Rect(110, y - 24, 740, 32, COLOR_SELECTION);
+					Gfx::Text(125, y, (i == selected) ? COLOR_WHITE : COLOR_GREY, 0.8f, lines[i]);
 				}
-				vita2d_pgf_draw_text(g_font, 150, 435, COLOR_GREY, 0.8f, "LEFT/RIGHT: change   X: select   O: resume");
-				vita2d_end_drawing();
-				vita2d_swap_buffers();
+				Gfx::Text(120, 450, COLOR_GREY, 0.7f, "LEFT/RIGHT: change   X: select   O: resume");
+				EndFrame();
 			}
 		}
 	done:
@@ -267,21 +312,19 @@ namespace
 		return games;
 	}
 
-	// Runs the renderer benchmark on the device and shows/saves the results.
+	// Runs the software renderer benchmark on the device and shows/saves the results.
 	void RunBenchmarkScreen()
 	{
 		std::vector<std::string> lines;
 		auto draw = [&](const char* status) {
-			vita2d_start_drawing();
-			vita2d_clear_screen();
-			vita2d_pgf_draw_text(g_font, 30, 45, COLOR_ACCENT, 1.3f, "GS benchmark (Mpix/s)");
+			BeginFrame();
+			Gfx::Text(30, 45, COLOR_ACCENT, 1.2f, "Software GS benchmark (Mpix/s)");
 			for(size_t i = 0; i < lines.size(); i++)
 			{
-				vita2d_pgf_draw_text(g_font, 30, 90 + static_cast<int>(i) * 28, COLOR_WHITE, 0.9f, lines[i].c_str());
+				Gfx::Text(30, 80 + static_cast<int>(i) * 20, COLOR_WHITE, 0.7f, lines[i].c_str());
 			}
-			vita2d_pgf_draw_text(g_font, 30, 520, COLOR_GREY, 0.9f, status);
-			vita2d_end_drawing();
-			vita2d_swap_buffers();
+			Gfx::Text(30, 525, COLOR_GREY, 0.8f, status);
+			EndFrame();
 		};
 
 		FILE* file = std::fopen(BENCHMARK_PATH, "w");
@@ -318,7 +361,7 @@ namespace
 		auto games = ScanGames();
 		int selected = 0;
 		int scroll = 0;
-		const int visible = 16;
+		const int visible = 15;
 		uint32_t previous = ~0u;
 
 		while(true)
@@ -352,69 +395,83 @@ namespace
 			if(selected < scroll) scroll = selected;
 			if(selected >= scroll + visible) scroll = selected - visible + 1;
 
-			vita2d_start_drawing();
-			vita2d_clear_screen();
-			vita2d_pgf_draw_text(g_font, 30, 45, COLOR_ACCENT, 1.5f, "VitaPS2");
-			vita2d_pgf_draw_text(g_font, 190, 45, COLOR_GREY, 0.9f, "PlayStation 2 emulator (experimental)");
-			if(games.empty())
-			{
-				vita2d_pgf_draw_textf(g_font, 30, 110, COLOR_WHITE, 1.0f, "No games found. Copy .iso/.cso/.chd/.elf files to\n%s", GAMES_PATH);
-			}
+			BeginFrame();
+			Gfx::Text(30, 45, COLOR_ACCENT, 1.4f, "VitaPS2");
+			Gfx::Text(180, 45, COLOR_GREY, 0.8f, "PlayStation 2 emulator (experimental)");
 			for(int i = scroll; i < std::min(count, scroll + visible); i++)
 			{
 				int y = 95 + (i - scroll) * 26;
-				if(i == selected)
-				{
-					vita2d_draw_rectangle(20, y - 20, 920, 26, RGBA8(40, 60, 110, 255));
-				}
-				vita2d_pgf_draw_text(g_font, 30, y, (i == selected) ? COLOR_WHITE : COLOR_GREY, 1.0f, games[i].c_str());
+				if(i == selected) Gfx::Rect(20, y - 20, 920, 26, COLOR_SELECTION);
+				Gfx::Text(30, y, (i == selected) ? COLOR_WHITE : COLOR_GREY, 0.8f, games[i].c_str());
 			}
-			vita2d_pgf_draw_text(g_font, 30, 530, COLOR_GREY, 0.85f,
-			                     "X: boot  TRIANGLE: refresh  SELECT: GS benchmark  START: quit  |  In game: SELECT+START menu");
-			vita2d_end_drawing();
-			vita2d_swap_buffers();
+			if(count <= 1)
+			{
+				Gfx::Textf(30, 490, COLOR_WHITE, 0.8f, "Copy .iso/.cso/.chd/.elf files to %s", GAMES_PATH);
+			}
+			Gfx::Text(30, 530, COLOR_GREY, 0.65f,
+			          "X: boot  TRIANGLE: refresh  SELECT: GS benchmark  START: quit  |  In game: SELECT+START menu");
+			EndFrame();
 		}
+	}
+
+	CGSH_Hardware* GetHardwareGs(CEmuSession* session)
+	{
+		return session ? static_cast<CGSH_Hardware*>(session->GetVm()->GetGSHandler()) : nullptr;
 	}
 
 	void RunGame(const std::string& path)
 	{
+		GAME_SETTINGS settings = LoadSettings(path);
+		const bool gpu = !settings.softwareRenderer;
+
 		CPH_Vita* pad = nullptr;
+		CEmuSession* sessionPtr = nullptr;
 		CEmuSession::CONFIG config;
 		config.dataPath = DATA_PATH;
 		config.resourcesPath = "app0:";
 		config.limitFrameRate = true;
-		config.gsThreaded = true;
-		// Vita: 3 cores for apps. Core usage: EE/IOP/VU (Play! VM thread), GS
-		// thread, one extra rasterizer worker.
-		config.rasterizerThreads = 2;
 		config.padFactory = CPH_Vita::GetFactoryFunction(&pad);
 		config.soundFactory = &CSH_Vita::HandlerFactory;
-
-		GAME_SETTINGS settings = LoadSettings(path);
 		config.interlacedRendering = settings.interlaced;
 		config.frameSkip = settings.frameSkip;
+		if(gpu)
+		{
+			// The GS runs on this thread (it owns the GL context): cores are
+			// the EE/IOP/VU thread, this thread and audio.
+			config.gsThreaded = false;
+			config.gsFactory = CGSH_Hardware::GetFactoryFunction(CGSH_Hardware::OPTIONS());
+			config.gsPump = [&sessionPtr]() {
+				if(auto gs = GetHardwareGs(sessionPtr)) gs->Pump(2);
+			};
+			config.gsShutdown = [&sessionPtr]() {
+				if(auto gs = GetHardwareGs(sessionPtr)) gs->ReleaseGpu();
+			};
+		}
+		else
+		{
+			// Vita: 3 cores for apps. EE/IOP/VU (Play! VM thread), GS thread,
+			// one extra rasterizer worker.
+			config.gsThreaded = true;
+			config.rasterizerThreads = 2;
+		}
 
 		std::unique_ptr<CEmuSession> session;
 		try
 		{
 			session = std::make_unique<CEmuSession>(config);
-			auto hacks = ToSpeedHacks(settings);
-			session->SetSpeedHacks(hacks);
+			sessionPtr = session.get();
+			session->SetSpeedHacks(ToSpeedHacks(settings));
 			session->Boot(path);
 		}
 		catch(const std::exception& e)
 		{
+			session.reset();
 			ShowMessage("Failed to boot", e.what());
 			return;
 		}
 
-		vita2d_texture* screen = vita2d_create_empty_texture(1024, 1024);
-		vita2d_texture_set_filters(screen, SCE_GXM_TEXTURE_FILTER_LINEAR, SCE_GXM_TEXTURE_FILTER_LINEAR);
-		uint32_t stride = vita2d_texture_get_stride(screen) / 4;
-		auto texels = reinterpret_cast<uint32_t*>(vita2d_texture_get_datap(screen));
-
+		SCREEN screen;
 		std::vector<uint32_t> pixels;
-		uint32_t width = 0, height = 0;
 		uint64_t serial = 0;
 		uint32_t previousButtons = ~0u;
 
@@ -431,7 +488,7 @@ namespace
 			previousButtons = buttons;
 			if((buttons & SCE_CTRL_SELECT) && (pressed & SCE_CTRL_START))
 			{
-				bool quit = RunPauseMenu(*session, settings, screen, width, height);
+				bool quit = RunPauseMenu(*session, settings, screen);
 				SaveSettings(path, settings);
 				if(quit) break;
 				previousButtons = ~0u;
@@ -443,14 +500,39 @@ namespace
 				SaveSettings(path, settings);
 			}
 
-			if(session->GetFrames().Fetch(serial, pixels, width, height))
+			if(gpu)
 			{
-				presented++;
-				width = std::min<uint32_t>(width, 1024);
-				height = std::min<uint32_t>(height, 1024);
-				for(uint32_t y = 0; y < height; y++)
+				// Run the GS until the game presents a frame, but keep the UI
+				// responsive when it does not.
+				auto gs = GetHardwareGs(session.get());
+				uint64_t start = sceKernelGetProcessTimeWide();
+				bool flipped = false;
+				while(!flipped && (sceKernelGetProcessTimeWide() - start < 16000))
 				{
-					std::memcpy(texels + y * stride, pixels.data() + y * width, width * 4);
+					flipped = gs->Pump(4);
+				}
+				if(flipped) presented++;
+				auto display = gs->GetDisplayTexture();
+				screen.texture = display.texture;
+				screen.textureWidth = display.textureWidth;
+				screen.textureHeight = display.textureHeight;
+				screen.x = display.x;
+				screen.y = display.y;
+				screen.width = display.width;
+				screen.height = display.height;
+			}
+			else
+			{
+				uint32_t width = 0, height = 0;
+				if(session->GetFrames().Fetch(serial, pixels, width, height))
+				{
+					presented++;
+					Gfx::UploadFrame(pixels.data(), width, height);
+					screen.texture = Gfx::FrameTexture();
+					screen.textureWidth = screen.textureHeight = Gfx::FRAME_TEXTURE_SIZE;
+					screen.x = screen.y = 0;
+					screen.width = std::min(width, Gfx::FRAME_TEXTURE_SIZE);
+					screen.height = std::min(height, Gfx::FRAME_TEXTURE_SIZE);
 				}
 			}
 
@@ -472,35 +554,40 @@ namespace
 				std::printf("fps vm %.1f out %.1f ee-idle %.0f%%\n", vmFps, presentFps, session->GetEeIdleRatio() * 100.0f);
 			}
 
-			vita2d_start_drawing();
-			vita2d_clear_screen();
-			DrawScreen(screen, width, height, settings.stretch);
+			BeginFrame();
+			DrawScreen(screen, settings.stretch);
 			if(settings.showStats)
 			{
-				int lines = 3 + static_cast<int>(threadUsage.size());
-				vita2d_draw_rectangle(0, 0, 380, 10 + lines * 24, RGBA8(0, 0, 0, 160));
-				vita2d_pgf_draw_textf(g_font, 8, 22, COLOR_WHITE, 0.8f, "VM %.1f fps  out %.1f fps  %ux%u",
-				                      vmFps, presentFps, width, height);
-				vita2d_pgf_draw_textf(g_font, 8, 46, COLOR_GREY, 0.8f, "EE idle %.0f%%  JIT %u/%u KB",
-				                      session->GetEeIdleRatio() * 100.0f,
-				                      static_cast<unsigned int>(VitaJit_GetUsedBytes() / 1024),
-				                      static_cast<unsigned int>(VitaJit_GetCapacity() / 1024));
-				vita2d_pgf_draw_text(g_font, 8, 70, COLOR_ACCENT, 0.8f, "CPU per thread (100% = one core):");
+				int lines = 4 + static_cast<int>(threadUsage.size());
+				Gfx::Rect(0, 0, 400, 10 + lines * 20, Gfx::Rgba(0, 0, 0, 160));
+				Gfx::Textf(8, 20, COLOR_WHITE, 0.7f, "VM %.1f fps  out %.1f fps  %ux%u", vmFps, presentFps, screen.width, screen.height);
+				Gfx::Textf(8, 40, COLOR_GREY, 0.7f, "EE idle %.0f%%  JIT %u/%u KB", session->GetEeIdleRatio() * 100.0f,
+				           static_cast<unsigned int>(VitaJit_GetUsedBytes() / 1024),
+				           static_cast<unsigned int>(VitaJit_GetCapacity() / 1024));
+				if(gpu)
+				{
+					auto stats = GetHardwareGs(session.get())->GetLastFrameStats();
+					Gfx::Textf(8, 60, COLOR_GREY, 0.7f, "GPU draws %u  tex up %u  rt dl %u up %u", stats.drawCalls,
+					           stats.textureUploads, stats.targetDownloads, stats.targetUploads);
+				}
+				else
+				{
+					Gfx::Text(8, 60, COLOR_GREY, 0.7f, "Software renderer");
+				}
+				Gfx::Text(8, 80, COLOR_ACCENT, 0.7f, "CPU per thread (100% = one core):");
 				int line = 0;
 				for(const auto& usage : threadUsage)
 				{
-					unsigned int color = (usage.cpuPercent > 90.0f) ? RGBA8(255, 110, 110, 255) : COLOR_GREY;
-					vita2d_pgf_draw_textf(g_font, 16, 94 + line * 24, color, 0.8f, "%-18s %5.1f%%", usage.name.c_str(), usage.cpuPercent);
+					uint32_t color = (usage.cpuPercent > 90.0f) ? COLOR_WARN : COLOR_GREY;
+					Gfx::Textf(16, 100 + line * 20, color, 0.7f, "%-18s %5.1f%%", usage.name.c_str(), usage.cpuPercent);
 					line++;
 				}
 			}
-			vita2d_end_drawing();
-			vita2d_swap_buffers();
+			EndFrame();
 		}
 
 		session.reset();
-		vita2d_wait_rendering_done();
-		vita2d_free_texture(screen);
+		sessionPtr = nullptr;
 	}
 }
 
@@ -511,7 +598,7 @@ int main()
 	if(std::freopen(LOG_PATH, "w", stdout)) setvbuf(stdout, nullptr, _IOLBF, 0);
 	if(std::freopen(LOG_PATH, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
 	std::printf("VitaPS2 starting\n");
-	ThreadProfiler::RegisterCurrentThread("UI");
+	ThreadProfiler::RegisterCurrentThread("UI/GPU");
 
 	scePowerSetArmClockFrequency(444);
 	scePowerSetBusClockFrequency(222);
@@ -520,21 +607,44 @@ int main()
 
 	sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
 
-	vita2d_init();
-	vita2d_set_clear_color(COLOR_BG);
-	g_font = vita2d_load_default_pgf();
-
-	sceIoMkdir(DATA_PATH, 0777);
 	sceIoMkdir(GAMES_PATH, 0777);
 	sceIoMkdir(SETTINGS_PATH, 0777);
 
+	// Before vitaGL, which takes most of the remaining memory for its pools.
 	if(!VitaJit_Init(JIT_POOL_MIN, JIT_POOL_MAX))
 	{
 		std::string details = VitaJit_GetDiagnostics() +
 		                      "\nIf the error is 0x80020??? check that \"Unsafe Homebrew\" is enabled\n"
 		                      "in HENkaku Settings. Please report this screen with log.txt.";
-		ShowMessage("Cannot allocate JIT memory", details);
-		vita2d_fini();
+		CpuScreen_ShowMessage("Cannot allocate JIT memory", details);
+		sceKernelExitProcess(0);
+		return 0;
+	}
+
+	if(!HasShaderCompiler())
+	{
+		CpuScreen_ShowMessage("Missing libshacccg.suprx",
+		                      "VitaPS2 draws with vitaGL, which needs the runtime shader compiler.\n"
+		                      "Extract it with ShaRKBR33D (or SharkF00D) so that this file exists:\n"
+		                      "  ur0:data/libshacccg.suprx\n\n"
+		                      "Many Vita ports need it; you only have to do this once.");
+		sceKernelExitProcess(0);
+		return 0;
+	}
+
+	SceKernelFreeMemorySizeInfo memInfo = {};
+	memInfo.size = sizeof(memInfo);
+	sceKernelGetFreeMemorySize(&memInfo);
+	std::printf("free memory before vitaGL: user %u KB, cdram %u KB, phycont %u KB\n", memInfo.size_user / 1024,
+	            memInfo.size_cdram / 1024, memInfo.size_phycont / 1024);
+	// Compiled fixed-function shaders are cached so they are only built once.
+	sceIoMkdir("ux0:data/VitaPS2/shaders", 0777);
+	vglSetShaderCachePath("ux0:data/VitaPS2/shaders/");
+	vglInitExtended(0x80000, SCREEN_WIDTH, SCREEN_HEIGHT, GL_RAM_LEFT_FREE, SCE_GXM_MULTISAMPLE_NONE);
+	vglWaitVblankStart(GL_TRUE);
+	if(!Gfx::Init())
+	{
+		CpuScreen_ShowMessage("Graphics initialization failed", "vitaGL could not create the UI textures.\nPlease report this with log.txt.");
 		sceKernelExitProcess(0);
 		return 0;
 	}
@@ -555,8 +665,7 @@ int main()
 		RunGame(path);
 	}
 
-	vita2d_free_pgf(g_font);
-	vita2d_fini();
+	Gfx::Shutdown();
 	sceKernelExitProcess(0);
 	return 0;
 }

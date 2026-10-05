@@ -33,6 +33,8 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src" -w /src vitasdk/vitasdk:latest /bin/sh -c '
             set -e
+            echo "vitaGL and dependencies in the SDK image:"
+            ls -l $VITASDK/arm-vita-eabi/lib/ | grep -i -E "vitagl|vitashark|shacccg|mathneon|taihen" || true
             cmake -S . -B build-vita \
               -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake \
               -DCMAKE_BUILD_TYPE=Release

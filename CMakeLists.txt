@@ -107,6 +107,15 @@ if(VITAPS2_HAS_GL)
 	if(NOT VITA)
 		target_link_libraries(gsh_hardware PUBLIC ${OSMESA_LIBRARY})
 	endif()
+
+	# 2D drawing for menus and overlays, on the same GL context.
+	add_library(vitaps2_ui STATIC
+		src/ui/Gfx.cpp
+		src/ui/Gfx.h
+		src/ui/FontData.h
+	)
+	target_include_directories(vitaps2_ui PUBLIC src/ui)
+	target_link_libraries(vitaps2_ui PUBLIC gsh_hardware)
 endif()
 
 # Frontend-independent glue shared by the Vita app and the host harness.
@@ -155,6 +164,10 @@ else()
 		target_include_directories(gs_hardware_tests PRIVATE tests)
 		target_link_libraries(gs_hardware_tests PRIVATE vitaps2_common gsh_hardware)
 		add_test(NAME gs_hardware_tests COMMAND gs_hardware_tests)
+
+		add_executable(ui_render_test tests/ui_render_test.cpp)
+		target_link_libraries(ui_render_test PRIVATE vitaps2_ui)
+		add_test(NAME ui_render_test COMMAND ui_render_test)
 	endif()
 
 	add_executable(jit_pool_tests tests/jit_pool_tests.cpp)

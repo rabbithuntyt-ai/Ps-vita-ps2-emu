@@ -11,6 +11,8 @@ set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d ATTRIBUTE2=12")
 
 add_executable(vitaps2
 	src/vita/main_vita.cpp
+	src/vita/CpuScreen.cpp
+	src/vita/CpuScreen.h
 	src/vita/JitMemory.cpp
 	src/vita/JitMemory.h
 	src/vita/PH_Vita.cpp
@@ -23,10 +25,15 @@ target_compile_options(vitaps2 PRIVATE -Wall)
 
 target_link_libraries(vitaps2
 	vitaps2_common
-	vita2d
-	freetype
-	png
-	jpeg
+	vitaps2_ui
+	gsh_hardware
+	# vitaGL and what it needs (runtime shader compiler, NEON math...)
+	vitaGL
+	vitashark
+	SceShaccCgExt
+	mathneon
+	taihen_stub
+	SceShaccCg_stub
 	z
 	m
 	# pthread comes from Threads::Threads (PlayCore); linking it again duplicates
@@ -40,7 +47,6 @@ target_link_libraries(vitaps2
 	SceGxm_stub
 	SceKernelDmacMgr_stub
 	SceLibKernel_stub
-	ScePgf_stub
 	ScePower_stub
 	SceSysmodule_stub
 	SceTouch_stub

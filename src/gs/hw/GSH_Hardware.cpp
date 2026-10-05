@@ -89,10 +89,13 @@ CGSHandler::FactoryFunction CGSH_Hardware::GetFactoryFunction(const OPTIONS& opt
 bool CGSH_Hardware::Pump(uint32 timeoutMs)
 {
 	m_mailBox.WaitForCall(timeoutMs);
+	// The frontend draws on the same context between pumps.
+	m_stateApplied = false;
 	while(m_mailBox.IsPending() && !m_flipped)
 	{
 		m_mailBox.ReceiveCall();
 	}
+	FlushBatch();
 	bool flipped = m_flipped;
 	m_flipped = false;
 	return flipped;
@@ -766,6 +769,7 @@ void CGSH_Hardware::AddVertex(const CSoftwareRasterizer::VERTEX& v)
 	out.y = py / static_cast<float>(target.height) * 2.0f - 1.0f;
 	double z = static_cast<double>(std::min(v.z, ZMaxForPsm(s.zpsm))) / static_cast<double>(ZMaxForPsm(s.zpsm));
 	out.z = static_cast<float>(z * 2.0 - 1.0);
+	out.w = 1.0f;
 	out.r = v.r;
 	out.g = v.g;
 	out.b = v.b;
@@ -774,16 +778,20 @@ void CGSH_Hardware::AddVertex(const CSoftwareRasterizer::VERTEX& v)
 	{
 		out.s = v.u / static_cast<float>(s.tw) * m_texScaleS + m_texOffsetS;
 		out.t = v.v / static_cast<float>(s.th) * m_texScaleT + m_texOffsetT;
-		out.p = 0;
-		out.q = 1;
 	}
 	else
 	{
-		float q = (v.q != 0) ? v.q : 1.0f;
-		out.s = v.s * m_texScaleS + m_texOffsetS * q;
-		out.t = v.t * m_texScaleT + m_texOffsetT * q;
-		out.p = 0;
-		out.q = q;
+		// Q <= 0 cannot be expressed as a clip space w; clamp.
+		float q = std::max(v.q, 1.0e-12f);
+		out.s = v.s / q * m_texScaleS + m_texOffsetS;
+		out.t = v.t / q * m_texScaleT + m_texOffsetT;
+		if(s.textured)
+		{
+			out.w = 1.0f / q;
+			out.x *= out.w;
+			out.y *= out.w;
+			out.z *= out.w;
+		}
 	}
 	m_batch.push_back(out);
 }
@@ -874,9 +882,9 @@ void CGSH_Hardware::FlushBatch()
 {
 	if(m_batch.empty()) return;
 	const GLsizei stride = sizeof(BATCH_VERTEX);
-	glVertexPointer(3, GL_FLOAT, stride, &m_batch[0].x);
+	glVertexPointer(4, GL_FLOAT, stride, &m_batch[0].x);
 	glColorPointer(4, GL_UNSIGNED_BYTE, stride, &m_batch[0].r);
-	glTexCoordPointer(4, GL_FLOAT, stride, &m_batch[0].s);
+	glTexCoordPointer(2, GL_FLOAT, stride, &m_batch[0].s);
 	glDrawArrays(m_batchMode, 0, static_cast<GLsizei>(m_batch.size()));
 	m_batch.clear();
 	m_stats.drawCalls++;
