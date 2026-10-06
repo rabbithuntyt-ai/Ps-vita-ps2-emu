@@ -1,0 +1,83 @@
+diff --git a/Source/app_shared/Log.h b/Source/app_shared/Log.h
+--- a/Source/app_shared/Log.h
++++ b/Source/app_shared/Log.h
+@@ -2,6 +2,7 @@
+ 
+ #include <string>
+ #include <map>
++#include <vector>
+ #include "filesystem_def.h"
+ #include "StdStream.h"
+ #include "Singleton.h"
+@@ -37,6 +38,9 @@ private:
+ 
+ #else
+ 
++//Release builds: debug prints are compiled out, but warnings (unknown
++//functions, unhandled cases) go to stdout, rate limited, and the most recent
++//ones are kept for frontends to display.
+ class CLog
+ {
+ public:
+@@ -49,9 +53,10 @@ public:
+ 	void Print(const char*, const char*, ...)
+ 	{
+ 	}
+-	void Warn(const char*, const char*, ...)
+-	{
+-	}
++	void Warn(const char*, const char*, ...);
++
++	//Most recent warnings, oldest first.
++	std::vector<std::string> GetRecentWarnings();
+ };
+ 
+ #endif
+diff --git a/Source/app_shared/Log.cpp b/Source/app_shared/Log.cpp
+--- a/Source/app_shared/Log.cpp
++++ b/Source/app_shared/Log.cpp
+@@ -60,4 +60,44 @@ Framework::CStdStream& CLog::GetLog(const char* logName)
+ 	return logIterator->second;
+ }
+ 
++#else
++
++#include <cstdio>
++#include <deque>
++#include <mutex>
++#include <unordered_map>
++
++namespace
++{
++	std::mutex g_warningMutex;
++	std::unordered_map<const char*, unsigned int> g_warningCounts; //by format string
++	std::deque<std::string> g_recentWarnings;
++	constexpr unsigned int g_maxReportsPerWarning = 20;
++	constexpr size_t g_maxRecentWarnings = 8;
++}
++
++void CLog::Warn(const char* logName, const char* format, ...)
++{
++	std::lock_guard<std::mutex> lock(g_warningMutex);
++	unsigned int& count = g_warningCounts[format];
++	if(count >= g_maxReportsPerWarning) return;
++	count++;
++	char message[256];
++	va_list args;
++	va_start(args, format);
++	vsnprintf(message, sizeof(message), format, args);
++	va_end(args);
++	std::string line = std::string(logName) + ": " + message;
++	while(!line.empty() && ((line.back() == '\n') || (line.back() == '\r'))) line.pop_back();
++	std::printf("warning %s%s\n", line.c_str(), (count == g_maxReportsPerWarning) ? " (further reports suppressed)" : "");
++	g_recentWarnings.push_back(line);
++	if(g_recentWarnings.size() > g_maxRecentWarnings) g_recentWarnings.pop_front();
++}
++
++std::vector<std::string> CLog::GetRecentWarnings()
++{
++	std::lock_guard<std::mutex> lock(g_warningMutex);
++	return std::vector<std::string>(g_recentWarnings.begin(), g_recentWarnings.end());
++}
++
+ #endif

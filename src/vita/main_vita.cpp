@@ -40,6 +40,7 @@
 #include "CpuScreen.h"
 #include "EmuSession.h"
 #include "EmuProfile.h"
+#include "Log.h"
 #include "GameProfiles.h"
 #include "GSH_Hardware.h"
 #include "Gfx.h"
@@ -762,6 +763,15 @@ namespace
 						for(int r = row * 8; r < row * 8 + 8; r++)
 							n += std::snprintf(line + n, sizeof(line) - n, " %08X", debug.eeGpr[r]);
 						detail += line;
+						detail += "\n";
+					}
+					std::snprintf(line, sizeof(line), "IPU ctrl %08X bp %08X  D4(to IPU) %X madr %08X qwc %X  D3(from) %X qwc %X", debug.ipuCtrl,
+					              debug.ipuBp, debug.d4Chcr, debug.d4Madr, debug.d4Qwc, debug.d3Chcr, debug.d3Qwc);
+					detail += line;
+					detail += "\n";
+					for(const auto& warning : CLog::GetInstance().GetRecentWarnings())
+					{
+						detail += warning.substr(0, 100);
 						detail += "\n";
 					}
 					stallDetail = detail;

@@ -268,6 +268,13 @@ CEmuSession::DEBUG_STATE CEmuSession::GetDebugState()
 	state.intcMask = m_vm->m_ee->m_intc.GetRegister(CINTC::INTC_MASK);
 	state.dmacStat = m_vm->m_ee->m_dmac.GetRegister(CDMAC::D_STAT);
 	for(int i = 0; i < 32; i++) state.eeGpr[i] = ee.nGPR[i].nV0;
+	state.ipuCtrl = m_vm->m_ee->m_ipu.GetRegister(CIPU::IPU_CTRL);
+	state.ipuBp = m_vm->m_ee->m_ipu.GetRegister(CIPU::IPU_BP);
+	state.d3Chcr = m_vm->m_ee->m_dmac.GetRegister(CDMAC::D3_CHCR);
+	state.d3Qwc = m_vm->m_ee->m_dmac.GetRegister(CDMAC::D3_QWC);
+	state.d4Chcr = m_vm->m_ee->m_dmac.GetRegister(CDMAC::D4_CHCR);
+	state.d4Madr = m_vm->m_ee->m_dmac.GetRegister(CDMAC::D4_MADR);
+	state.d4Qwc = m_vm->m_ee->m_dmac.GetRegister(CDMAC::D4_QWC);
 	auto& vpu1 = *m_vm->m_ee->m_vpu1;
 	state.vu1Start = vpu1.GetProgramStart();
 	state.vu1Pc = vpu1.GetCurrentPc();

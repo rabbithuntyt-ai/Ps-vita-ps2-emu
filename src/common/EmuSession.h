@@ -111,6 +111,9 @@ public:
 		// VU1: microprogram start, current PC, ms it has been running (0: idle).
 		uint32_t vu1Start = 0, vu1Pc = 0, vu1RunMs = 0;
 		uint32_t eeGpr[32] = {}; // low 32 bits of the EE registers
+		// IPU (MPEG decoder) and its DMA channels (3: from IPU, 4: to IPU).
+		uint32_t ipuCtrl = 0, ipuBp = 0;
+		uint32_t d3Chcr = 0, d3Qwc = 0, d4Chcr = 0, d4Madr = 0, d4Qwc = 0;
 	};
 	DEBUG_STATE GetDebugState();
 
