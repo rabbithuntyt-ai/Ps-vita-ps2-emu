@@ -1,0 +1,67 @@
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -435,6 +435,43 @@ void CSubSystem::SetupEePageTable()
+ 	m_EE.MapPages(0x80000000, PS2::EE_RAM_SIZE, m_ram);
+ }
+ 
++//Registers games poll while waiting for something else to happen (vblank,
++//a DMA transfer, the IPU, VIF or GIF). A read can't change their value until
++//other units advance, so a loop that keeps polling one from the same place
++//is idle: see the check in IOPortReadHandler.
++bool CSubSystem::IsWaitStatusRegister(uint32 address)
++{
++	switch(address)
++	{
++	//Upstream Play!
++	case CINTC::INTC_STAT:
++	case CGSHandler::GS_CSR:
++	case CTimer::T1_COUNT:
++	//IPU busy / done (MPEG decoding: movies)
++	case CIPU::IPU_CMD:
++	case CIPU::IPU_CMD + 4:
++	case CIPU::IPU_CTRL:
++	//DMA completion
++	case CDMAC::D_STAT:
++	case CDMAC::D0_CHCR:
++	case CDMAC::D1_CHCR:
++	case CDMAC::D2_CHCR:
++	case CDMAC::D3_CHCR:
++	case CDMAC::D4_CHCR:
++	case CDMAC::D5_CHCR:
++	case CDMAC::D6_CHCR:
++	case CDMAC::D8_CHCR:
++	case CDMAC::D9_CHCR:
++	//VIF / GIF idle
++	case CVif::VIF0_STAT:
++	case CVif::VIF1_STAT:
++	case CGIF::GIF_STAT:
++		return true;
++	default:
++		return false;
++	}
++}
++
+ uint32 CSubSystem::IOPortReadHandler(uint32 nAddress)
+ {
+ 	uint32 nReturn = 0;
+@@ -488,7 +525,7 @@ uint32 CSubSystem::IOPortReadHandler(uint32 nAddress)
+ 		                         nAddress, m_EE.m_State.nPC);
+ 	}
+ 
+-	if((nAddress == CINTC::INTC_STAT) || (nAddress == CGSHandler::GS_CSR) || (nAddress == CTimer::T1_COUNT))
++	if(IsWaitStatusRegister(nAddress))
+ 	{
+ 		//Some games will loop checking for the vblank start interrupt or vblank event
+ 		//This is usually a good sign indicating that the game is idling
+diff --git a/Source/ee/Ee_SubSystem.h b/Source/ee/Ee_SubSystem.h
+--- a/Source/ee/Ee_SubSystem.h
++++ b/Source/ee/Ee_SubSystem.h
+@@ -84,6 +84,7 @@ namespace Ee
+ 		void SetupEePageTable();
+ 
+ 		uint32 IOPortReadHandler(uint32);
++		static bool IsWaitStatusRegister(uint32);
+ 		uint32 IOPortWriteHandler(uint32, uint32);
+ 
+ 		uint32 Vu0MicroMemWriteHandler(uint32, uint32);
