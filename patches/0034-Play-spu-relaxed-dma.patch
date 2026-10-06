@@ -1,0 +1,43 @@
+diff --git a/Source/iop/Iop_SubSystem.cpp b/Source/iop/Iop_SubSystem.cpp
+--- a/Source/iop/Iop_SubSystem.cpp
++++ b/Source/iop/Iop_SubSystem.cpp
+@@ -82,11 +82,25 @@ CSubSystem::CSubSystem(bool ps2Mode)
+ 
+ 	m_dmac.SetReceiveFunction(CDmac::CHANNEL_SPU0,
+ 	                          [this](uint8* buffer, uint32 blockSize, uint32 blockAmount, uint32 direction) {
++		                          //Same rule as register reads: the game picks where to write from
++		                          //the playback position it reads, which lags as much as the mixer
++		                          if(m_spuReadAccess)
++		                          {
++			                          uint32 result = 0;
++			                          m_spuReadAccess([&]() { result = m_spuCore0.ReceiveDma(buffer, blockSize, blockAmount, direction); });
++			                          return result;
++		                          }
+ 		                          SyncSpu();
+ 		                          return m_spuCore0.ReceiveDma(buffer, blockSize, blockAmount, direction);
+ 	                          });
+ 	m_dmac.SetReceiveFunction(CDmac::CHANNEL_SPU1,
+ 	                          [this](uint8* buffer, uint32 blockSize, uint32 blockAmount, uint32 direction) {
++		                          if(m_spuReadAccess)
++		                          {
++			                          uint32 result = 0;
++			                          m_spuReadAccess([&]() { result = m_spuCore1.ReceiveDma(buffer, blockSize, blockAmount, direction); });
++			                          return result;
++		                          }
+ 		                          SyncSpu();
+ 		                          return m_spuCore1.ReceiveDma(buffer, blockSize, blockAmount, direction);
+ 	                          });
+diff --git a/Source/iop/Iop_SubSystem.h b/Source/iop/Iop_SubSystem.h
+--- a/Source/iop/Iop_SubSystem.h
++++ b/Source/iop/Iop_SubSystem.h
+@@ -50,8 +50,8 @@ namespace Iop
+ 		std::function<bool(uint32, uint32, bool)> m_spuQueueWrite;
+ 		//Applies an SPU (spu2 = false: SPU1 range) register write.
+ 		void ApplySpuWrite(uint32 address, uint32 value, bool spu2);
+-		//When set, runs a register read with the mixer paused, after all queued
+-		//writes (mixing may lag a few blocks behind instead of a full sync).
++		//When set, runs a register read or DMA with the mixer paused, after all
++		//queued writes (mixing may lag a few blocks behind instead of a full sync).
+ 		std::function<void(const std::function<void()>&)> m_spuReadAccess;
+ 
+ 		CMIPS m_cpu;
