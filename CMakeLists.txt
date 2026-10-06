@@ -151,6 +151,15 @@ else()
 	target_link_libraries(gs_software_tests PRIVATE vitaps2_common)
 	add_test(NAME gs_software_tests COMMAND gs_software_tests)
 
+	add_executable(spu_mixer_tests tests/spu_mixer_tests.cpp)
+	target_link_libraries(spu_mixer_tests PRIVATE vitaps2_common)
+	target_include_directories(spu_mixer_tests PRIVATE ${PLAY_DIR}/Source)
+	add_test(NAME spu_mixer_tests COMMAND spu_mixer_tests)
+
+	add_executable(spu_benchmark tests/spu_benchmark.cpp)
+	target_link_libraries(spu_benchmark PRIVATE vitaps2_common)
+	target_include_directories(spu_benchmark PRIVATE ${PLAY_DIR}/Source)
+
 	add_executable(gs_benchmark tests/gs_benchmark.cpp)
 	target_include_directories(gs_benchmark PRIVATE tests)
 	target_link_libraries(gs_benchmark PRIVATE vitaps2_common)
@@ -269,7 +278,18 @@ else()
 				-DRUNNER_ARGS=--mtvu
 				-DSUFFIX=_vu1_wait_mtvu
 				-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/elf_boot_test.cmake)
-		set_tests_properties(elf_boot_test_vu1_wait elf_boot_test_vu1_wait_mtvu PROPERTIES TIMEOUT 180)
+		# ...with SPU2 mixing (and VU1) on worker threads
+		add_test(NAME elf_boot_test_mtspu
+			COMMAND ${CMAKE_COMMAND}
+				-DPYTHON=${Python3_EXECUTABLE}
+				-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+				-DRUNNER=$<TARGET_FILE:vitaps2_host>
+				"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
+				-DELF_ARGS=--vu1-wait
+				"-DRUNNER_ARGS=--mtspu;--mtvu"
+				-DSUFFIX=_mtspu
+				-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/elf_boot_test.cmake)
+		set_tests_properties(elf_boot_test_vu1_wait elf_boot_test_vu1_wait_mtvu elf_boot_test_mtspu PROPERTIES TIMEOUT 180)
 		if(TARGET gsh_hardware)
 			add_test(NAME elf_boot_test_hw
 				COMMAND ${CMAKE_COMMAND}

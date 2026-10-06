@@ -1,0 +1,288 @@
+diff --git a/Source/iop/Iop_SpuBase.h b/Source/iop/Iop_SpuBase.h
+--- a/Source/iop/Iop_SpuBase.h
++++ b/Source/iop/Iop_SpuBase.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <atomic>
++
+ #include <map>
+ #include "Types.h"
+ #include "BasicUnion.h"
+@@ -410,7 +412,7 @@ namespace Iop
+ 		uint32 m_baseSamplingRate;
+ 
+ 		uint32 m_irqAddr = 0;
+-		bool m_irqPending = false;
++		std::atomic<bool> m_irqPending = false; //set by the mixer, polled by the IOP
+ 		uint16 m_transferMode;
+ 		uint32 m_transferAddr;
+ 		uint32 m_core0OutputOffset;
+diff --git a/Source/iop/Iop_SubSystem.cpp b/Source/iop/Iop_SubSystem.cpp
+--- a/Source/iop/Iop_SubSystem.cpp
++++ b/Source/iop/Iop_SubSystem.cpp
+@@ -80,8 +80,16 @@ CSubSystem::CSubSystem(bool ps2Mode)
+ 	m_cpu.m_pCOP[0] = &m_copScu;
+ 	m_cpu.m_pAddrTranslator = &CMIPS::TranslateAddress64;
+ 
+-	m_dmac.SetReceiveFunction(CDmac::CHANNEL_SPU0, std::bind(&CSpuBase::ReceiveDma, &m_spuCore0, PLACEHOLDER_1, PLACEHOLDER_2, PLACEHOLDER_3, PLACEHOLDER_4));
+-	m_dmac.SetReceiveFunction(CDmac::CHANNEL_SPU1, std::bind(&CSpuBase::ReceiveDma, &m_spuCore1, PLACEHOLDER_1, PLACEHOLDER_2, PLACEHOLDER_3, PLACEHOLDER_4));
++	m_dmac.SetReceiveFunction(CDmac::CHANNEL_SPU0,
++	                          [this](uint8* buffer, uint32 blockSize, uint32 blockAmount, uint32 direction) {
++		                          SyncSpu();
++		                          return m_spuCore0.ReceiveDma(buffer, blockSize, blockAmount, direction);
++	                          });
++	m_dmac.SetReceiveFunction(CDmac::CHANNEL_SPU1,
++	                          [this](uint8* buffer, uint32 blockSize, uint32 blockAmount, uint32 direction) {
++		                          SyncSpu();
++		                          return m_spuCore1.ReceiveDma(buffer, blockSize, blockAmount, direction);
++	                          });
+ 	m_dmac.SetReceiveFunction(CDmac::CHANNEL_DEV9, std::bind(&CSpeed::ReceiveDma, &m_speed, PLACEHOLDER_1, PLACEHOLDER_2, PLACEHOLDER_3, PLACEHOLDER_4));
+ 	m_dmac.SetReceiveFunction(CDmac::CHANNEL_SIO2in, std::bind(&CSio2::ReceiveDmaIn, &m_sio2, PLACEHOLDER_1, PLACEHOLDER_2, PLACEHOLDER_3, PLACEHOLDER_4));
+ 	m_dmac.SetReceiveFunction(CDmac::CHANNEL_SIO2out, std::bind(&CSio2::ReceiveDmaOut, &m_sio2, PLACEHOLDER_1, PLACEHOLDER_2, PLACEHOLDER_3, PLACEHOLDER_4));
+@@ -111,6 +119,7 @@ void CSubSystem::NotifyVBlankEnd()
+ 
+ void CSubSystem::SaveState(Framework::CZipArchiveWriter& archive)
+ {
++	SyncSpu();
+ 	archive.InsertFile(std::make_unique<CMemoryStateFile>(STATE_CPU, &m_cpu.m_State, sizeof(MIPSSTATE)));
+ 	archive.InsertFile(std::make_unique<CMemoryStateFile>(STATE_RAM, m_ram, IOP_RAM_SIZE));
+ 	archive.InsertFile(std::make_unique<CMemoryStateFile>(STATE_SCRATCH, m_scratchPad, IOP_SCRATCH_SIZE));
+@@ -156,6 +165,7 @@ void CSubSystem::LoadState(Framework::CZipArchiveReader& archive)
+ 		}
+ 	}
+ 
++	SyncSpu();
+ 	archive.BeginReadFile(STATE_CPU)->Read(&m_cpu.m_State, sizeof(MIPSSTATE));
+ 	archive.BeginReadFile(STATE_SCRATCH)->Read(m_scratchPad, IOP_SCRATCH_SIZE);
+ 	archive.BeginReadFile(STATE_SPURAM)->Read(m_spuRam, SPU_RAM_SIZE);
+@@ -182,6 +192,7 @@ void CSubSystem::LoadState(Framework::CZipArchiveReader& archive)
+ 
+ void CSubSystem::Reset()
+ {
++	SyncSpu();
+ 	memset(m_ram, 0, IOP_RAM_SIZE);
+ 	memset(m_scratchPad, 0, IOP_SCRATCH_SIZE);
+ 	memset(m_spuRam, 0, SPU_RAM_SIZE);
+@@ -233,6 +244,7 @@ uint32 CSubSystem::ReadIoRegister(uint32 address)
+ 	}
+ 	else if(address >= CSpu::SPU_BEGIN && address <= CSpu::SPU_END)
+ 	{
++		SyncSpu();
+ 		return m_spu.ReadRegister(address);
+ 	}
+ 	else if(
+@@ -260,6 +272,7 @@ uint32 CSubSystem::ReadIoRegister(uint32 address)
+ #endif
+ 	else if(address >= CSpu2::REGS_BEGIN && address <= CSpu2::REGS_END)
+ 	{
++		SyncSpu();
+ 		return m_spu2.ReadRegister(address);
+ 	}
+ 	else if((address >= 0x1F801000 && address <= 0x1F801020) || (address >= 0x1F801400 && address <= 0x1F801420))
+@@ -289,6 +302,7 @@ uint32 CSubSystem::WriteIoRegister(uint32 address, uint32 value)
+ {
+ 	if(address >= CSpu::SPU_BEGIN && address <= CSpu::SPU_END)
+ 	{
++		SyncSpu();
+ 		m_spu.WriteRegister(address, static_cast<uint16>(value));
+ 	}
+ 	else if(
+@@ -316,6 +330,7 @@ uint32 CSubSystem::WriteIoRegister(uint32 address, uint32 value)
+ #endif
+ 	else if(address >= CSpu2::REGS_BEGIN && address <= CSpu2::REGS_END)
+ 	{
++		SyncSpu();
+ 		return m_spu2.WriteRegister(address, value);
+ 	}
+ 	else if((address >= 0x1F801000 && address <= 0x1F801020) || (address >= 0x1F801400 && address <= 0x1F801420))
+diff --git a/Source/iop/Iop_SubSystem.h b/Source/iop/Iop_SubSystem.h
+--- a/Source/iop/Iop_SubSystem.h
++++ b/Source/iop/Iop_SubSystem.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <functional>
+ #include "../MIPS.h"
+ #include "../MA_MIPSIV.h"
+ #include "../COP_SCU.h"
+@@ -36,6 +37,15 @@ namespace Iop
+ 		void SaveState(Framework::CZipArchiveWriter&);
+ 		void LoadState(Framework::CZipArchiveReader&);
+ 
++		//When SPU mixing runs on another thread, called before anything that
++		//touches SPU state (registers, DMA, save states) so that it happens
++		//after all the audio rendered so far, as when mixing inline.
++		std::function<void()> m_spuSync;
++		void SyncSpu()
++		{
++			if(m_spuSync) m_spuSync();
++		}
++
+ 		CMIPS m_cpu;
+ 		CMA_MIPSIV m_cpuArch;
+ 		CCOP_SCU m_copScu;
+diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
+--- a/Source/PS2VM.cpp
++++ b/Source/PS2VM.cpp
+@@ -647,6 +647,7 @@ void CPS2VM::ResumeImpl()
+ 
+ void CPS2VM::DestroyImpl()
+ {
++	SetSpuThreaded(false);
+ 	DestroyGsHandlerImpl();
+ 	DestroyPadHandlerImpl();
+ 	DestroySoundHandlerImpl();
+@@ -693,12 +694,14 @@ void CPS2VM::DestroyPadHandlerImpl()
+ 
+ void CPS2VM::CreateSoundHandlerImpl(const CSoundHandler::FactoryFunction& factoryFunction)
+ {
++	SyncSpu();
+ 	m_soundHandler = factoryFunction();
+ }
+ 
+ void CPS2VM::ReloadSpuBlockCountImpl()
+ {
+ 	ValidateThreadContext();
++	SyncSpu();
+ 	m_currentSpuBlock = 0;
+ 	auto spuBlockCount = CAppConfig::GetInstance().GetPreferenceInteger(PREF_AUDIO_SPUBLOCKCOUNT);
+ 	assert(spuBlockCount <= MAX_BLOCK_COUNT);
+@@ -709,6 +712,7 @@ void CPS2VM::ReloadSpuBlockCountImpl()
+ void CPS2VM::DestroySoundHandlerImpl()
+ {
+ 	if(m_soundHandler == nullptr) return;
++	SyncSpu();
+ 	delete m_soundHandler;
+ 	m_soundHandler = nullptr;
+ }
+@@ -772,6 +776,72 @@ void CPS2VM::UpdateIop()
+ }
+ 
+ void CPS2VM::UpdateSpu()
++{
++	if(m_spuThreaded)
++	{
++		{
++			std::lock_guard<std::mutex> lock(m_spuMutex);
++			m_spuPendingBlocks++;
++		}
++		m_spuWorkCondition.notify_one();
++		return;
++	}
++	RenderSpuBlock();
++}
++
++void CPS2VM::SetSpuThreaded(bool threaded, const std::function<void()>& workerInit)
++{
++	if(threaded == m_spuThreaded) return;
++	if(m_spuThreaded)
++	{
++		SyncSpu();
++		{
++			std::lock_guard<std::mutex> lock(m_spuMutex);
++			m_spuStopWorker = true;
++		}
++		m_spuWorkCondition.notify_all();
++		m_spuWorker.join();
++		m_spuThreaded = false;
++		m_iop->m_spuSync = nullptr;
++		return;
++	}
++	m_spuStopWorker = false;
++	m_spuPendingBlocks = 0;
++	m_spuRendering = false;
++	m_spuThreaded = true;
++	m_iop->m_spuSync = [this]() { SyncSpu(); };
++	m_spuWorker = std::thread(
++	    [this, workerInit]() {
++		    if(workerInit) workerInit();
++		    SpuWorkerProc();
++	    });
++}
++
++void CPS2VM::SpuWorkerProc()
++{
++	std::unique_lock<std::mutex> lock(m_spuMutex);
++	while(true)
++	{
++		m_spuWorkCondition.wait(lock, [this]() { return (m_spuPendingBlocks != 0) || m_spuStopWorker; });
++		if(m_spuPendingBlocks == 0) break; //stop requested and nothing left
++		m_spuPendingBlocks--;
++		m_spuRendering = true;
++		lock.unlock();
++		RenderSpuBlock();
++		lock.lock();
++		m_spuRendering = false;
++		if(m_spuPendingBlocks == 0) m_spuIdleCondition.notify_all();
++	}
++}
++
++void CPS2VM::SyncSpu()
++{
++	if(!m_spuThreaded) return;
++	std::unique_lock<std::mutex> lock(m_spuMutex);
++	m_spuIdleCondition.wait(lock, [this]() { return (m_spuPendingBlocks == 0) && !m_spuRendering; });
++}
++
++void CPS2VM::RenderSpuBlock()
+ {
+ #ifdef PROFILE
+ 	CProfilerZone profilerZone(m_spuProfilerZone);
+diff --git a/Source/PS2VM.h b/Source/PS2VM.h
+--- a/Source/PS2VM.h
++++ b/Source/PS2VM.h
+@@ -1,6 +1,9 @@
+ #pragma once
+ 
+ #include <thread>
++#include <mutex>
++#include <functional>
++#include <condition_variable>
+ #include <future>
+ #include "filesystem_def.h"
+ #include "Types.h"
+@@ -71,6 +74,16 @@ public:
+ 	void SetEeFrequencyScale(uint32, uint32);
+ 	void ReloadFrameRateLimit();
+ 
++	//SPU2 mixing on its own thread. The VM queues blocks to render; the IOP
++	//waits for them before touching SPU state, so audio is identical to
++	//inline mixing except that SPU interrupts may be seen up to one block
++	//(~1 ms) later. Switch while the VM is paused.
++	void SetSpuThreaded(bool, const std::function<void()>& workerInit = std::function<void()>());
++	bool IsSpuThreaded() const
++	{
++		return m_spuThreaded;
++	}
++
+ 	static fs::path GetStateDirectoryPath();
+ 	fs::path GenerateStatePath(unsigned int) const;
+ 
+@@ -122,6 +135,10 @@ private:
+ 	void SaveVmTimingState(Framework::CZipArchiveWriter&);
+ 	void LoadVmTimingState(Framework::CZipArchiveReader&);
+ 
++	void RenderSpuBlock();
++	void SpuWorkerProc();
++	void SyncSpu();
++
+ 	void ReloadExecutable(const char*, const CPS2OS::ArgumentList&);
+ 	void OnExecutableChange();
+ 	void OnCrtModeChange();
+@@ -194,6 +211,15 @@ private:
+ 	int m_spuBlockCount = 0;
+ 	CSoundHandler* m_soundHandler = nullptr;
+ 
++	bool m_spuThreaded = false;
++	std::thread m_spuWorker;
++	std::mutex m_spuMutex;
++	std::condition_variable m_spuWorkCondition;
++	std::condition_variable m_spuIdleCondition;
++	unsigned int m_spuPendingBlocks = 0;
++	bool m_spuRendering = false;
++	bool m_spuStopWorker = false;
++
+ 	CScreenPositionListener* m_gunListener = nullptr;
+ 	CScreenPositionListener* m_touchListener = nullptr;
+ 

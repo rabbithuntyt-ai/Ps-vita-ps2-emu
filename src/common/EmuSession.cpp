@@ -94,6 +94,8 @@ CEmuSession::CEmuSession(const CONFIG& config)
 
 	m_gsPump = config.gsPump;
 	m_vu1ThreadInit = config.vu1ThreadInit;
+	m_spuThreadInit = config.spuThreadInit;
+	m_emuThreadInit = config.emuThreadInit;
 	m_gsShutdown = config.gsShutdown;
 	auto frames = &m_frames;
 	if(config.gsFactory)
@@ -122,7 +124,11 @@ CEmuSession::CEmuSession(const CONFIG& config)
 
 	m_newFrameConnection = m_vm->OnNewFrame.Connect([this]() {
 		// Runs on the emulation thread (EE, IOP, VU, SPU).
-		if(m_vmFrames++ == 0) ThreadProfiler::RegisterCurrentThread("PS2 (EE/IOP/VU)");
+		if(m_vmFrames++ == 0)
+		{
+			ThreadProfiler::RegisterCurrentThread("PS2 (EE/IOP/VU)");
+			if(m_emuThreadInit) m_emuThreadInit();
+		}
 		// Called before the VM resets the frame's counters: average EE idle
 		// time over whole frames (half a second at 60 fps).
 		auto info = m_vm->GetCpuUtilisationInfo();
@@ -144,6 +150,7 @@ CEmuSession::~CEmuSession()
 	{
 		RunPumped([this]() { m_vm->Pause(); });
 		m_vm->m_ee->m_vpu1->SetThreaded(false);
+		m_vm->SetSpuThreaded(false);
 		if(m_gsShutdown) m_gsShutdown();
 		m_vm->DestroyPadHandler();
 		m_vm->DestroySoundHandler();
@@ -201,6 +208,11 @@ void CEmuSession::SetSpeedHacks(const SPEED_HACKS& hacks)
 		uint32_t percent = std::clamp<uint32_t>(hacks.eeCycleRatePercent, 25, 300);
 		m_vm->SetEeFrequencyScale(percent, 100);
 		// The VM is paused: VU1 is idle (or gets synchronized) while switching.
+		auto spuInit = m_spuThreadInit;
+		m_vm->SetSpuThreaded(hacks.threadedSpu, [spuInit]() {
+			ThreadProfiler::RegisterCurrentThread("SPU2 audio");
+			if(spuInit) spuInit();
+		});
 		auto init = m_vu1ThreadInit;
 		m_vm->m_ee->m_vpu1->SetThreaded(hacks.threadedVu1, [init]() {
 			ThreadProfiler::RegisterCurrentThread("VU1");

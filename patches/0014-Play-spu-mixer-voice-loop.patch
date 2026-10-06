@@ -1,0 +1,183 @@
+diff --git a/Source/iop/Iop_SpuBase.cpp b/Source/iop/Iop_SpuBase.cpp
+--- a/Source/iop/Iop_SpuBase.cpp
++++ b/Source/iop/Iop_SpuBase.cpp
+@@ -714,76 +714,116 @@ void CSpuBase::MixSamples(int32 inputSample, int32 volumeLevel, int16* output)
+ 	*output = static_cast<int16>(resultSample);
+ }
+ 
+-void CSpuBase::Render(int16* samples, unsigned int sampleCount)
+-{
+-	bool updateReverb = m_reverbEnabled && (m_ctrl & CONTROL_REVERB) && (m_reverbWorkAddrStart < m_reverbWorkAddrEnd);
+-	bool irqEnabled = (m_ctrl & CONTROL_IRQ);
+-
+-	int16* samplesBase = samples;
+-	assert((sampleCount & 0x01) == 0);
+-	unsigned int ticks = sampleCount / 2;
+-	memset(samples, 0, sizeof(int16) * sampleCount);
++void CSpuBase::RenderVoice(unsigned int i, int16* samples, int16* reverbSamples, unsigned int ticks, bool reverb)
++{
++	//Renders one voice for a whole block and mixes it in. Voices are mixed
++	//in the same order for every output sample as when looping over samples
++	//first, so the (saturating) result is identical, but the voice state
++	//stays in registers and per block invariants are computed once.
++	auto& channel(m_channel[i]);
++	auto& reader(m_reader[i]);
++
++	//Fixed volumes only depend on registers, which can't change during a block.
++	bool fixedLeft = !channel.volumeLeft.mode.mode;
++	bool fixedRight = !channel.volumeRight.mode.mode;
++	if(fixedLeft) channel.volumeLeftAbs = ComputeChannelVolume(channel.volumeLeft, channel.volumeLeftAbs);
++	if(fixedRight) channel.volumeRightAbs = ComputeChannelVolume(channel.volumeRight, channel.volumeRightAbs);
++
++	const auto mix =
++	    [](int32 inputSample, int32 volumeLevel, int16* output) {
++		    inputSample = (inputSample * volumeLevel) / 0x7FFF;
++		    int32 resultSample = inputSample + static_cast<int32>(*output);
++		    resultSample = std::clamp<int32>(resultSample, SHRT_MIN, SHRT_MAX);
++		    *output = static_cast<int16>(resultSample);
++	    };
+ 
+ 	for(unsigned int j = 0; j < ticks; j++)
+ 	{
+-		int16 reverbSample[2] = {};
+-		//Update channels
+-		for(unsigned int i = 0; i < 24; i++)
++		if(channel.status == KEY_ON)
+ 		{
+-			auto& channel(m_channel[i]);
+-			auto& reader(m_reader[i]);
+-			if(channel.status == KEY_ON)
++			reader.SetParamsRead(channel.address, channel.repeat);
++			reader.ClearEndFlag();
++			channel.status = ATTACK;
++			channel.adsrVolume = 0;
++		}
++		else
++		{
++			if(reader.IsDone())
+ 			{
+-				reader.SetParamsRead(channel.address, channel.repeat);
+-				reader.ClearEndFlag();
+-				channel.status = ATTACK;
++				channel.status = STOPPED;
+ 				channel.adsrVolume = 0;
++				reader.ClearIsDone();
+ 			}
+-			else
++			if(reader.DidChangeRepeat() && !channel.repeatSet)
+ 			{
+-				if(reader.IsDone())
+-				{
+-					channel.status = STOPPED;
+-					channel.adsrVolume = 0;
+-					reader.ClearIsDone();
+-				}
+-				if(reader.DidChangeRepeat() && !channel.repeatSet)
+-				{
+-					channel.repeat = reader.GetRepeat();
+-					reader.ClearDidChangeRepeat();
+-				}
+-				//Update repeat in case it has been changed externally (needed for FFX)
+-				reader.SetRepeat(channel.repeat);
++				channel.repeat = reader.GetRepeat();
++				reader.ClearDidChangeRepeat();
+ 			}
++			//Update repeat in case it has been changed externally (needed for FFX)
++			reader.SetRepeat(channel.repeat);
++		}
+ 
+-			int32 readSample = reader.GetSample();
+-			channel.current = reader.GetCurrent();
++		int32 readSample = reader.GetSample();
++		channel.current = reader.GetCurrent();
+ 
+-			UpdateAdsr(channel);
+-			channel.volumeLeftAbs = ComputeChannelVolume(channel.volumeLeft, channel.volumeLeftAbs);
+-			channel.volumeRightAbs = ComputeChannelVolume(channel.volumeRight, channel.volumeRightAbs);
++		UpdateAdsr(channel);
++		if(!fixedLeft) channel.volumeLeftAbs = ComputeChannelVolume(channel.volumeLeft, channel.volumeLeftAbs);
++		if(!fixedRight) channel.volumeRightAbs = ComputeChannelVolume(channel.volumeRight, channel.volumeRightAbs);
+ 
+-			if(readSample == 0) continue;
++		if(readSample == 0) continue;
+ 
+-			//Mix in adsrVolume
+-			int32 inputSample = (readSample * static_cast<int32>(channel.adsrVolume >> 16)) / static_cast<int32>(MAX_ADSR_VOLUME >> 16);
++		//Mix in adsrVolume
++		int32 inputSample = (readSample * static_cast<int32>(channel.adsrVolume >> 16)) / static_cast<int32>(MAX_ADSR_VOLUME >> 16);
+ 
+-			if(inputSample == 0) continue;
++		if(inputSample == 0) continue;
+ 
+-			int32 volumeLeft = channel.volumeLeftAbs >> 16;
+-			int32 volumeRight = channel.volumeRightAbs >> 16;
++		int32 volumeLeft = channel.volumeLeftAbs >> 16;
++		int32 volumeRight = channel.volumeRightAbs >> 16;
+ 
+-			MixSamples(inputSample, volumeLeft, samples + 0);
+-			MixSamples(inputSample, volumeRight, samples + 1);
++		mix(inputSample, volumeLeft, samples + j * 2 + 0);
++		mix(inputSample, volumeRight, samples + j * 2 + 1);
+ 
+-			//Mix in reverb if enabled for this channel
+-			if(updateReverb && (m_channelReverb.f & (1 << i)))
+-			{
+-				MixSamples(inputSample, volumeLeft, reverbSample + 0);
+-				MixSamples(inputSample, volumeRight, reverbSample + 1);
+-			}
++		//Mix in reverb if enabled for this channel
++		if(reverb)
++		{
++			mix(inputSample, volumeLeft, reverbSamples + j * 2 + 0);
++			mix(inputSample, volumeRight, reverbSamples + j * 2 + 1);
+ 		}
++	}
++}
++
++void CSpuBase::Render(int16* samples, unsigned int sampleCount)
++{
++	//Long requests are rendered in chunks (per voice buffers live on the stack)
++	constexpr unsigned int maxChunk = 256;
++	while(sampleCount > maxChunk)
++	{
++		RenderChunk(samples, maxChunk);
++		samples += maxChunk;
++		sampleCount -= maxChunk;
++	}
++	RenderChunk(samples, sampleCount);
++}
+ 
++void CSpuBase::RenderChunk(int16* samples, unsigned int sampleCount)
++{
++	bool updateReverb = m_reverbEnabled && (m_ctrl & CONTROL_REVERB) && (m_reverbWorkAddrStart < m_reverbWorkAddrEnd);
++	bool irqEnabled = (m_ctrl & CONTROL_IRQ);
++
++	int16* samplesBase = samples;
++	assert((sampleCount & 0x01) == 0);
++	unsigned int ticks = sampleCount / 2;
++	memset(samples, 0, sizeof(int16) * sampleCount);
++
++	int16 reverbSamples[256] = {};
++	for(unsigned int i = 0; i < 24; i++)
++	{
++		RenderVoice(i, samples, reverbSamples, ticks, updateReverb && (m_channelReverb.f & (1 << i)));
++	}
++
++	for(unsigned int j = 0; j < ticks; j++)
++	{
++		int16* reverbSample = reverbSamples + j * 2;
+ 		if(!m_blockReader.CanReadSamples() && (m_blockWritePtr == SOUND_INPUT_DATA_SIZE))
+ 		{
+ 			//We're ready to consume some data
+diff --git a/Source/iop/Iop_SpuBase.h b/Source/iop/Iop_SpuBase.h
+--- a/Source/iop/Iop_SpuBase.h
++++ b/Source/iop/Iop_SpuBase.h
+@@ -389,6 +389,8 @@ namespace Iop
+ 			MAX_ADSR_VOLUME = 0x7FFFFFFF,
+ 		};
+ 
++		void RenderChunk(int16*, unsigned int);
++		void RenderVoice(unsigned int, int16*, int16*, unsigned int, bool);
+ 		void UpdateAdsr(CHANNEL&);
+ 		void UpdateReverb(int16[2], int16*);
+ 		uint32 GetAdsrDelta(unsigned int) const;

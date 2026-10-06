@@ -144,6 +144,7 @@ namespace
 		bool softwareRenderer = false;
 		bool threadedVu1 = true; //VU1 microprograms on the third core
 		bool safeJit = false;    //no NEON/VFP register allocation in the JIT
+		bool threadedSpu = true; //SPU2 audio mixing on the second core
 	};
 
 	std::string SettingsPathFor(const std::string& gamePath)
@@ -163,6 +164,7 @@ namespace
 		else if(key == "software_renderer") settings.softwareRenderer = value != 0;
 		else if(key == "threaded_vu1") settings.threadedVu1 = value != 0;
 		else if(key == "safe_jit") settings.safeJit = value != 0;
+		else if(key == "threaded_spu") settings.threadedSpu = value != 0;
 	}
 
 	// Defaults, then the bundled per-game profile, then the player's choices.
@@ -194,7 +196,8 @@ namespace
 		     << "stretch=" << (settings.stretch ? 1 : 0) << "\n"
 		     << "software_renderer=" << (settings.softwareRenderer ? 1 : 0) << "\n"
 		     << "threaded_vu1=" << (settings.threadedVu1 ? 1 : 0) << "\n"
-		     << "safe_jit=" << (settings.safeJit ? 1 : 0) << "\n";
+		     << "safe_jit=" << (settings.safeJit ? 1 : 0) << "\n"
+		     << "threaded_spu=" << (settings.threadedSpu ? 1 : 0) << "\n";
 	}
 
 	// eeCycleRate 0 (Auto) runs at the rate the auto controller picked.
@@ -205,6 +208,7 @@ namespace
 		hacks.interlacedRendering = settings.interlaced;
 		hacks.frameSkip = settings.frameSkip;
 		hacks.threadedVu1 = settings.threadedVu1;
+		hacks.threadedSpu = settings.threadedSpu;
 		return hacks;
 	}
 
@@ -241,6 +245,7 @@ namespace
 			ITEM_STATS,
 			ITEM_RENDERER,
 			ITEM_VU1_THREAD,
+			ITEM_SPU_THREAD,
 			ITEM_SAFE_JIT,
 			ITEM_QUIT,
 			ITEM_COUNT
@@ -279,6 +284,7 @@ namespace
 				case ITEM_STATS: settings.showStats = !settings.showStats; break;
 				case ITEM_RENDERER: settings.softwareRenderer = !settings.softwareRenderer; break;
 				case ITEM_VU1_THREAD: settings.threadedVu1 = !settings.threadedVu1; break;
+				case ITEM_SPU_THREAD: settings.threadedSpu = !settings.threadedSpu; break;
 				case ITEM_SAFE_JIT: settings.safeJit = !settings.safeJit; break;
 				case ITEM_QUIT:
 					if(input.pressed & SCE_CTRL_CROSS)
@@ -303,6 +309,7 @@ namespace
 				std::snprintf(lines[ITEM_STATS], 96, "Performance overlay: %s", settings.showStats ? "On" : "Off");
 				std::snprintf(lines[ITEM_RENDERER], 96, "Renderer: %s  (applies when the game restarts)", settings.softwareRenderer ? "Software" : "GPU");
 				std::snprintf(lines[ITEM_VU1_THREAD], 96, "VU1 on its own core: %s  (faster 3D; turn off if a game glitches)", settings.threadedVu1 ? "On" : "Off");
+				std::snprintf(lines[ITEM_SPU_THREAD], 96, "Audio on its own core: %s  (faster; turn off if sound glitches)", settings.threadedSpu ? "On" : "Off");
 				std::snprintf(lines[ITEM_SAFE_JIT], 96, "Safe JIT: %s  (slower; try if a game hangs - applies on restart)", settings.safeJit ? "On" : "Off");
 				std::snprintf(lines[ITEM_QUIT], 96, "Quit to game list");
 
@@ -312,8 +319,8 @@ namespace
 				Gfx::Text(120, 100, COLOR_ACCENT, 1.1f, "Paused");
 				for(int i = 0; i < ITEM_COUNT; i++)
 				{
-					int y = 140 + i * 29;
-					if(i == selected) Gfx::Rect(110, y - 22, 740, 29, COLOR_SELECTION);
+					int y = 135 + i * 27;
+					if(i == selected) Gfx::Rect(110, y - 21, 740, 27, COLOR_SELECTION);
 					Gfx::Text(125, y, (i == selected) ? COLOR_WHITE : COLOR_GREY, 0.8f, lines[i]);
 				}
 				Gfx::Text(120, 480, COLOR_GREY, 0.7f, "LEFT/RIGHT: change   X: select   O: resume");
@@ -504,7 +511,11 @@ namespace
 		config.limitFrameRate = true;
 		config.padFactory = CPH_Vita::GetFactoryFunction(&pad);
 		// Third core: VU1 (the audio thread there is light)
+		// Cores: 0 = EE/IOP (the bottleneck, alone), 1 = UI/GPU + SPU2 audio
+		// mixing, 2 = VU1 + audio output.
+		config.emuThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x10000 /* SCE_KERNEL_CPU_MASK_USER_0 */); };
 		config.vu1ThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */); };
+		config.spuThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x20000 /* SCE_KERNEL_CPU_MASK_USER_1 */); };
 		config.soundFactory = &CSH_Vita::HandlerFactory;
 		config.interlacedRendering = settings.interlaced;
 		config.frameSkip = settings.frameSkip;

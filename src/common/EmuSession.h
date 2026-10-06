@@ -38,6 +38,10 @@ public:
 		std::function<void()> gsShutdown;
 		// Runs first on the VU1 worker thread (e.g. to pin it to a core).
 		std::function<void()> vu1ThreadInit;
+		// Same for the SPU2 mixing worker.
+		std::function<void()> spuThreadInit;
+		// Runs once on the emulation (EE/IOP) thread when it starts.
+		std::function<void()> emuThreadInit;
 		CPadHandler::FactoryFunction padFactory;
 		CSoundHandler::FactoryFunction soundFactory;
 	};
@@ -48,6 +52,7 @@ public:
 		bool interlacedRendering = false;  // draw alternate lines per frame
 		uint32_t frameSkip = 0;            // skip N of N+1 frames
 		bool threadedVu1 = false;          // run VU1 microprograms on their own thread/core
+		bool threadedSpu = false;          // mix SPU2 audio on its own thread/core
 	};
 
 	explicit CEmuSession(const CONFIG&);
@@ -130,6 +135,8 @@ private:
 	std::function<void()> m_gsPump;
 	std::function<void()> m_gsShutdown;
 	std::function<void()> m_vu1ThreadInit;
+	std::function<void()> m_spuThreadInit;
+	std::function<void()> m_emuThreadInit;
 	CFrameMailbox m_frames;
 	std::atomic<uint64_t> m_vmFrames{0};
 	// EE idle accounting (emulation thread), published every 30 frames.

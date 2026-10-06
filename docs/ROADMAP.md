@@ -78,6 +78,9 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 - [x] IPU/MPEG movies: integer IDCT (IEEE 1180 compliant) and fixed-point color conversion
 - [ ] IPU: NEON IDCT/CSC, profile VLC decoding on device
 - [x] Threaded VU1 (MTVU): microprograms run on the third core; XGKICK packets are copied and sent to the GIF in order on the EE thread; sync at vblank, VU1 register/micro memory access, CMSAR1 (per-game toggle)
+- [x] MTVU: no deadlock when a program waits for VIF1 data (bounded vblank / register waits)
+- [x] SPU2 mixer: per-voice block loop (bit-identical output, ~1.45x faster; golden test)
+- [x] SPU2 mixing on its own core: the IOP syncs before touching SPU state; IRQ flag polled atomically
 - [ ] MTVU: sync EE direct VU1 data memory accesses (currently unsynchronized, like unsafe games on real hardware)
 - [ ] Thread and core layout tuning (affinity for EE, GS, worker, audio)
 - [ ] Explore unlocking part of the 4th core for audio/IOP

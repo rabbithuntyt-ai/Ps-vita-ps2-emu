@@ -67,6 +67,7 @@ int main(int argc, char** argv)
 	uint32_t frameSkip = 0;
 	bool hardware = false;
 	bool threadedVu1 = false;
+	bool threadedSpu = false;
 	for(int i = 2; i < argc; i++)
 	{
 		if(!std::strcmp(argv[i], "--frames") && (i + 1 < argc)) targetFrames = std::strtoull(argv[++i], nullptr, 10);
@@ -77,6 +78,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--frameskip") && (i + 1 < argc)) frameSkip = std::atoi(argv[++i]);
 		else if(!std::strcmp(argv[i], "--hw")) hardware = true;
 		else if(!std::strcmp(argv[i], "--mtvu")) threadedVu1 = true;
+		else if(!std::strcmp(argv[i], "--mtspu")) threadedSpu = true;
 	}
 
 	const char* home = std::getenv("HOME");
@@ -135,10 +137,11 @@ int main(int argc, char** argv)
 	{
 		CEmuSession session(config);
 		sessionPtr = &session;
-		if(threadedVu1)
+		if(threadedVu1 || threadedSpu)
 		{
 			auto hacks = session.GetSpeedHacks();
-			hacks.threadedVu1 = true;
+			hacks.threadedVu1 = threadedVu1;
+			hacks.threadedSpu = threadedSpu;
 			session.SetSpeedHacks(hacks);
 		}
 		session.Boot(bootPath);
