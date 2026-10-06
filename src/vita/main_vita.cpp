@@ -49,6 +49,7 @@
 #include "JitMemory.h"
 #include "PH_Vita.h"
 #include "PS2VM.h"
+#include "ee/IPU.h"
 #include "SH_Vita.h"
 #include "ThreadProfiler.h"
 
@@ -796,6 +797,7 @@ namespace
 			{
 				int lines = 7 + static_cast<int>(threadUsage.size());
 				Gfx::Rect(0, 0, 640, 10 + lines * 20, Gfx::Rgba(0, 0, 0, 160));
+				std::string ipuLine;
 				Gfx::Textf(8, 20, COLOR_WHITE, 0.7f, "VM %.1f fps  out %.1f fps  %ux%u  " VITAPS2_BUILD, vmFps, presentFps, screen.width, screen.height);
 				uint32_t eeRate = (settings.eeCycleRate == 0) ? autoRate.GetRate() : settings.eeCycleRate;
 				Gfx::Textf(8, 40, COLOR_GREY, 0.7f, "EE idle %.0f%%  rate %u%%%s  JIT %u/%u KB  %s", session->GetEeIdleRatio() * 100.0f,
@@ -831,6 +833,29 @@ namespace
 					Gfx::Textf(8, 80, COLOR_GREY, 0.7f, "Audio tempo %.0f%%  underruns %u  spu waits/s %u+%u", CSH_Vita::GetTempo() * 100.0f,
 					           CSH_Vita::GetUnderruns(), spuFullRate, spuReadRate);
 				}
+				{
+					//IPU (movie decoder) activity per second: commands, output, DMA3 stalls
+					static uint64_t ipuRateTime = 0;
+					static CIPU::STATS ipuLast, ipuRate;
+					const auto& ipuNow = CIPU::GetStats();
+					uint64_t now = sceKernelGetProcessTimeWide();
+					if(now - ipuRateTime >= 1000000)
+					{
+						for(int c = 0; c < 16; c++) ipuRate.commands[c] = ipuNow.commands[c] - ipuLast.commands[c];
+						ipuRate.outBytes = ipuNow.outBytes - ipuLast.outBytes;
+						ipuRate.outStalls = ipuNow.outStalls - ipuLast.outStalls;
+						ipuLast = ipuNow;
+						ipuRateTime = now;
+					}
+					if(ipuRate.outBytes || ipuRate.commands[1] || ipuRate.commands[2] || ipuRate.commands[3])
+					{
+						char text[160];
+						std::snprintf(text, sizeof(text), "IPU/s: idec %u bdec %u vdec %u fdec %u csc %u  out %u KB  stalls %u",
+						              ipuRate.commands[1], ipuRate.commands[2], ipuRate.commands[3], ipuRate.commands[4],
+						              ipuRate.commands[7], static_cast<unsigned int>(ipuRate.outBytes / 1024), ipuRate.outStalls);
+						ipuLine = text;
+					}
+				}
 				if(gpu)
 				{
 					const auto& d = displayLastSecond;
@@ -853,6 +878,10 @@ namespace
 					uint32_t color = (usage.cpuPercent > 90.0f) ? COLOR_WARN : COLOR_GREY;
 					Gfx::Textf(16, 160 + line * 20, color, 0.7f, "%-18s %5.1f%%", usage.name.c_str(), usage.cpuPercent);
 					line++;
+				}
+				if(!ipuLine.empty())
+				{
+					Gfx::Text(8, 160 + line * 20, COLOR_ACCENT, 0.7f, ipuLine.c_str());
 				}
 			}
 			EndFrame();

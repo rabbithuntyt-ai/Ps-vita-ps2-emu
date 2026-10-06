@@ -1,0 +1,48 @@
+diff --git a/Source/ee/IPU.h b/Source/ee/IPU.h
+--- a/Source/ee/IPU.h
++++ b/Source/ee/IPU.h
+@@ -23,6 +23,19 @@ public:
+ 	CIPU(CINTC&);
+ 	virtual ~CIPU() = default;
+ 
++	//Activity counters (since start, for the performance overlay)
++	struct STATS
++	{
++		uint32 commands[16] = {}; //by command id
++		uint64 outBytes = 0;      //bytes accepted by DMA3
++		uint32 outStalls = 0;     //flushes where DMA3 accepted nothing
++	};
++	static STATS& GetStats()
++	{
++		static STATS stats;
++		return stats;
++	}
++
+ 	// Converts one 16x16 macroblock in RAW8 layout (256 Y, 64 Cb, 64 Cr) to
+ 	// RGBA32 with the CSC alpha thresholds. Integer arithmetic.
+ 	static void ConvertMacroblockToRgba32(const uint8* block, uint32* pixels, uint16 th0, uint16 th1);
+diff --git a/Source/ee/IPU.cpp b/Source/ee/IPU.cpp
+--- a/Source/ee/IPU.cpp
++++ b/Source/ee/IPU.cpp
+@@ -422,6 +422,7 @@ void CIPU::FlushOUTFIFOData()
+ void CIPU::InitializeCommand(uint32 value)
+ {
+ 	unsigned int cmd = (value >> 28);
++	GetStats().commands[cmd & 0xF]++;
+ 	switch(cmd)
+ 	{
+ 	case IPU_CMD_BCLR:
+@@ -841,7 +842,12 @@ void CIPU::COUTFIFO::Flush()
+ 	uint32 copied = m_receiveHandler(m_buffer, m_size / 0x10);
+ 	copied *= 0x10;
+ 
+-	if(copied == 0) return;
++	if(copied == 0)
++	{
++		CIPU::GetStats().outStalls++;
++		return;
++	}
++	CIPU::GetStats().outBytes += copied;
+ 
+ 	memmove(m_buffer, m_buffer + copied, m_size - copied);
+ 	m_size -= copied;
