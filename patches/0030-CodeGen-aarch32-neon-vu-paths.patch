@@ -1,0 +1,444 @@
+diff --git a/include/AArch32Assembler.h b/include/AArch32Assembler.h
+--- a/include/AArch32Assembler.h
++++ b/include/AArch32Assembler.h
+@@ -310,6 +310,9 @@ public:
+ 	void Vorn(QUAD_REGISTER, QUAD_REGISTER, QUAD_REGISTER);
+ 	void Vorr(QUAD_REGISTER, QUAD_REGISTER, QUAD_REGISTER);
+ 	void Vorr(DOUBLE_REGISTER, DOUBLE_REGISTER, DOUBLE_REGISTER);
++	void Vbit(DOUBLE_REGISTER, DOUBLE_REGISTER, DOUBLE_REGISTER);
++	//Each bit of imm8 expands to a byte of 0x00 or 0xFF (bit 0 -> byte 0)
++	void Vmov_I64(DOUBLE_REGISTER, uint8);
+ 	void Veor(QUAD_REGISTER, QUAD_REGISTER, QUAD_REGISTER);
+ 	void Vmvn(QUAD_REGISTER, QUAD_REGISTER);
+ 	void Vshl_I16(QUAD_REGISTER, QUAD_REGISTER, uint8);
+diff --git a/include/Jitter.h b/include/Jitter.h
+--- a/include/Jitter.h
++++ b/include/Jitter.h
+@@ -233,6 +233,12 @@ namespace Jitter
+ 		void MD_ExpandW();
+ 		void MD_MakeClip();
+ 		void MD_MakeSignZero();
++		//Accumulates the sign/zero flags of a value in a 128-bit accumulator without
++		//leaving vector registers (pops value, pops accumulator, pushes accumulator)
++		bool SupportsMdSignZeroAccumulate() const;
++		void MD_AccumulateSignZero(uint8 destMask);
++		//Pops accumulator, pushes the MD_MakeSignZero bits of the accumulated flags
++		void MD_MakeSignZeroFromAccumulator();
+ 		void MD_MaxH();
+ 		void MD_MaxW();
+ 		void MD_MaxS();
+diff --git a/include/Jitter_Statement.h b/include/Jitter_Statement.h
+--- a/include/Jitter_Statement.h
++++ b/include/Jitter_Statement.h
+@@ -128,6 +128,10 @@ namespace Jitter
+ 
+ 		OP_MD_MAKECLIP,
+ 		OP_MD_MAKESZ,
++		//dst128 = src1_128 | per lane (sign bit, zero flag in bit 0) of src2_128, lanes selected by jmpCondition (VU dest mask)
++		OP_MD_ACCUMSZ,
++		//dst = OP_MD_MAKESZ result for flags accumulated by OP_MD_ACCUMSZ
++		OP_MD_MAKESZ_ACC,
+ 
+ 		OP_MD_TOINT32_TRUNC_S,
+ 		OP_MD_TOSINGLE_I32,
+diff --git a/include/Jitter_CodeGen.h b/include/Jitter_CodeGen.h
+--- a/include/Jitter_CodeGen.h
++++ b/include/Jitter_CodeGen.h
+@@ -56,6 +56,12 @@ namespace Jitter
+ 			return false;
+ 		}
+ 
++		//Whether OP_MD_ACCUMSZ/OP_MD_MAKESZ_ACC are implemented
++		virtual bool SupportsMdSignZeroAccumulate() const
++		{
++			return false;
++		}
++
+ 	protected:
+ 		enum MATCHTYPE
+ 		{
+diff --git a/include/Jitter_CodeGen_AArch32.h b/include/Jitter_CodeGen_AArch32.h
+--- a/include/Jitter_CodeGen_AArch32.h
++++ b/include/Jitter_CodeGen_AArch32.h
+@@ -55,6 +55,7 @@ namespace Jitter
+ 		bool SupportsExternalJumps() const override;
+ 		bool SupportsCmpSelect() const override;
+ 		bool SupportsGuestMemoryOps() const override;
++		bool SupportsMdSignZeroAccumulate() const override;
+ 		uint32 GetPointerSize() const override;
+ 
+ 	private:
+@@ -117,6 +118,7 @@ namespace Jitter
+ 
+ 		static uint16 GetSavedRegisterList(uint32);
+ 
++		void LoadClampConstants();
+ 		void Emit_Prolog();
+ 		void Emit_Epilog();
+ 
+@@ -803,6 +805,9 @@ namespace Jitter
+ 
+ 		void Emit_Md_MakeClip_VarVarVarVar(const STATEMENT&);
+ 		void Emit_Md_MakeSz_VarVar(const STATEMENT&);
++		void Emit_Md_AccumSz_VarVarVar(const STATEMENT&);
++		void Emit_Md_MakeSzAcc_VarVar(const STATEMENT&);
++		void MdMakeSignZero(CAArch32Assembler::REGISTER, CAArch32Assembler::QUAD_REGISTER);
+ 
+ 		void Emit_Md_PackHB_VarVarVar(const STATEMENT&);
+ 		void Emit_Md_PackWH_VarVarVar(const STATEMENT&);
+@@ -825,6 +830,8 @@ namespace Jitter
+ 		//Single precision values allocated from the MD register pool (same ids)
+ 		static CAArch32Assembler::SINGLE_REGISTER g_registersFp32[MAX_MDREGISTERS];
+ 		static CAArch32Assembler::REGISTER g_md128AddressRegister;
++		static CAArch32Assembler::QUAD_REGISTER g_clampMask1Register;
++		static CAArch32Assembler::QUAD_REGISTER g_clampMask2Register;
+ 		static CAArch32Assembler::REGISTER g_paramRegs[MAX_PARAM_REGS];
+ 		static CAArch32Assembler::REGISTER g_baseRegister;
+ 		static CAArch32Assembler::REGISTER g_callAddressRegister;
+@@ -852,7 +859,8 @@ namespace Jitter
+ 			PARAM128_SPILL_SLOTS = 4,
+ 		};
+ 		uint32 m_param128SpillBase = 0;
+-		bool m_saveFpRegisters = false; //d8-d11 (callee saved) hold allocated FP32 values
++		bool m_saveFpRegisters = false; //d8-d15 (callee saved): allocated FP32 values (d8-d11), clamp masks (d12-d15)
++		bool m_usesClampConstants = false;
+ 		//Range of MD registers (caller saved) used by the function, saved around guest memory handler calls
+ 		int m_mdRegisterFirst = -1;
+ 		int m_mdRegisterLast = -1;
+diff --git a/src/AArch32Assembler.cpp b/src/AArch32Assembler.cpp
+--- a/src/AArch32Assembler.cpp
++++ b/src/AArch32Assembler.cpp
+@@ -1293,6 +1293,29 @@ void CAArch32Assembler::Vmov_F32(SINGLE_REGISTER sd, SINGLE_REGISTER sm)
+ 	WriteWord(opcode);
+ }
+ 
++void CAArch32Assembler::Vbit(DOUBLE_REGISTER dd, DOUBLE_REGISTER dn, DOUBLE_REGISTER dm)
++{
++	uint32 opcode = 0xF3200110;
++	opcode |= ((dd >> 4) & 1) << 22;
++	opcode |= (dn & 0xF) << 16;
++	opcode |= (dd & 0xF) << 12;
++	opcode |= ((dn >> 4) & 1) << 7;
++	opcode |= ((dm >> 4) & 1) << 5;
++	opcode |= (dm & 0xF);
++	WriteWord(opcode);
++}
++
++void CAArch32Assembler::Vmov_I64(DOUBLE_REGISTER dd, uint8 imm8)
++{
++	uint32 opcode = 0xF2800E30;
++	opcode |= ((imm8 >> 7) & 1) << 24;
++	opcode |= ((dd >> 4) & 1) << 22;
++	opcode |= ((imm8 >> 4) & 7) << 16;
++	opcode |= (dd & 0xF) << 12;
++	opcode |= (imm8 & 0xF);
++	WriteWord(opcode);
++}
++
+ void CAArch32Assembler::Vpush(DOUBLE_REGISTER firstReg, uint8 count)
+ {
+ 	//VSTMDB sp!, {firstReg - firstReg + count - 1}
+diff --git a/src/Jitter.cpp b/src/Jitter.cpp
+--- a/src/Jitter.cpp
++++ b/src/Jitter.cpp
+@@ -1604,6 +1604,39 @@ void CJitter::MD_MakeClip()
+ 	m_shadow.Push(tempSym);
+ }
+ 
++bool CJitter::SupportsMdSignZeroAccumulate() const
++{
++	return m_codeGen->SupportsMdSignZeroAccumulate();
++}
++
++void CJitter::MD_AccumulateSignZero(uint8 destMask)
++{
++	auto tempSym = MakeSymbol(SYM_TEMPORARY128, m_nextTemporary++);
++
++	STATEMENT statement;
++	statement.op = OP_MD_ACCUMSZ;
++	statement.jmpCondition = static_cast<CONDITION>(destMask & 0xF);
++	statement.src2 = MakeSymbolRef(m_shadow.Pull());
++	statement.src1 = MakeSymbolRef(m_shadow.Pull());
++	statement.dst = MakeSymbolRef(tempSym);
++	InsertStatement(statement);
++
++	m_shadow.Push(tempSym);
++}
++
++void CJitter::MD_MakeSignZeroFromAccumulator()
++{
++	auto tempSym = MakeSymbol(SYM_TEMPORARY, m_nextTemporary++);
++
++	STATEMENT statement;
++	statement.op = OP_MD_MAKESZ_ACC;
++	statement.src1 = MakeSymbolRef(m_shadow.Pull());
++	statement.dst = MakeSymbolRef(tempSym);
++	InsertStatement(statement);
++
++	m_shadow.Push(tempSym);
++}
++
+ void CJitter::MD_MakeSignZero()
+ {
+ 	auto tempSym = MakeSymbol(SYM_TEMPORARY, m_nextTemporary++);
+diff --git a/src/Jitter_CodeGen_AArch32.cpp b/src/Jitter_CodeGen_AArch32.cpp
+--- a/src/Jitter_CodeGen_AArch32.cpp
++++ b/src/Jitter_CodeGen_AArch32.cpp
+@@ -54,6 +54,10 @@ CAArch32Assembler::QUAD_REGISTER CCodeGen_AArch32::g_registersMd[MAX_MDREGISTERS
+ 
+ CAArch32Assembler::REGISTER CCodeGen_AArch32::g_md128AddressRegister = CAArch32Assembler::r12;
+ 
++//Float clamp masks, loaded in the prologue of functions that clamp (and of every chained frame)
++CAArch32Assembler::QUAD_REGISTER CCodeGen_AArch32::g_clampMask1Register = CAArch32Assembler::q6;
++CAArch32Assembler::QUAD_REGISTER CCodeGen_AArch32::g_clampMask2Register = CAArch32Assembler::q7;
++
+ //s16-s23 (d8-d11) are callee saved: functions using them save them.
+ CAArch32Assembler::SINGLE_REGISTER CCodeGen_AArch32::g_registersFp32[MAX_MDREGISTERS] =
+ {
+@@ -407,7 +411,7 @@ namespace
+ 			assembler.Add(CAArch32Assembler::rSP, CAArch32Assembler::rSP, CAArch32Assembler::MakeImmediateAluOperand(g_chainedStackSize >> 8, 12));
+ 			assembler.Ldmia(CAArch32Assembler::rSP, (1 << CAArch32Assembler::r3));
+ 			assembler.Mov(CAArch32Assembler::rSP, CAArch32Assembler::r3);
+-			assembler.Vpop(CAArch32Assembler::d8, 4);
++			assembler.Vpop(CAArch32Assembler::d8, 8);
+ 			assembler.Ldmia(CAArch32Assembler::rSP, g_chainedRegisterSave);
+ 			assembler.Ldr_Pc(CAArch32Assembler::rPC, -4);
+ 			stream.Write32(static_cast<uint32>(target));
+@@ -497,6 +501,17 @@ void CCodeGen_AArch32::GenerateCode(const StatementList& statements, unsigned in
+ 		    });
+ 		if(m_saveFpRegisters) break;
+ 	}
++	//Clamp masks are kept in q6/q7 (d12-d15, callee saved), loaded in the prologue
++	m_usesClampConstants = false;
++	for(const auto& statement : statements)
++	{
++		if(statement.op == OP_MD_CLAMP_S)
++		{
++			m_usesClampConstants = true;
++			break;
++		}
++	}
++	if(m_usesClampConstants) m_saveFpRegisters = true;
+ 	if(m_chained) m_saveFpRegisters = true;
+ 
+ 	m_mdRegisterFirst = -1;
+@@ -581,13 +596,23 @@ uint16 CCodeGen_AArch32::GetSavedRegisterList(uint32 registerUsage)
+ 	return registerSave;
+ }
+ 
++void CCodeGen_AArch32::LoadClampConstants()
++{
++	m_assembler.Adrl(CAArch32Assembler::r1, g_fpClampMask1);
++	m_assembler.Vld1_32x4(g_clampMask1Register, CAArch32Assembler::r1);
++	m_assembler.Adrl(CAArch32Assembler::r1, g_fpClampMask2);
++	m_assembler.Vld1_32x4(g_clampMask2Register, CAArch32Assembler::r1);
++}
++
+ void CCodeGen_AArch32::Emit_Prolog()
+ {
+ 	if(m_chained)
+ 	{
+ 		m_assembler.Stmdb(CAArch32Assembler::rSP, m_registerSave);
+-		m_assembler.Vpush(CAArch32Assembler::d8, 4);
++		m_assembler.Vpush(CAArch32Assembler::d8, 8);
+ 		m_assembler.Mov(CAArch32Assembler::r11, CAArch32Assembler::r0);
++		//Every chained function may clamp: the masks stay loaded across the chain
++		LoadClampConstants();
+ 		m_assembler.Mov(CAArch32Assembler::r0, CAArch32Assembler::rSP);
+ 		m_assembler.Bic(CAArch32Assembler::rSP, CAArch32Assembler::rSP, CAArch32Assembler::MakeImmediateAluOperand(0xF, 0));
+ 		m_assembler.Sub(CAArch32Assembler::rSP, CAArch32Assembler::rSP, CAArch32Assembler::MakeImmediateAluOperand(0xC, 0));
+@@ -608,9 +633,13 @@ void CCodeGen_AArch32::Emit_Prolog()
+ 	m_assembler.Stmdb(CAArch32Assembler::rSP, m_registerSave);
+ 	if(m_saveFpRegisters)
+ 	{
+-		m_assembler.Vpush(CAArch32Assembler::d8, 4);
++		m_assembler.Vpush(CAArch32Assembler::d8, 8);
+ 	}
+ 	m_assembler.Mov(CAArch32Assembler::r11, CAArch32Assembler::r0);
++	if(m_usesClampConstants)
++	{
++		LoadClampConstants();
++	}
+ 
+ 	//Align stack to 16 bytes boundary
+ 	m_assembler.Mov(CAArch32Assembler::r0, CAArch32Assembler::rSP);
+@@ -653,7 +682,7 @@ void CCodeGen_AArch32::Emit_Epilog()
+ 		m_assembler.Add(CAArch32Assembler::rSP, CAArch32Assembler::rSP, CAArch32Assembler::MakeImmediateAluOperand(g_chainedStackSize >> 8, 12));
+ 		m_assembler.Ldmia(CAArch32Assembler::rSP, (1 << stackTempRegister));
+ 		m_assembler.Mov(CAArch32Assembler::rSP, stackTempRegister);
+-		m_assembler.Vpop(CAArch32Assembler::d8, 4);
++		m_assembler.Vpop(CAArch32Assembler::d8, 8);
+ 		m_assembler.Ldmia(CAArch32Assembler::rSP, m_registerSave);
+ 		return;
+ 	}
+@@ -679,7 +708,7 @@ void CCodeGen_AArch32::Emit_Epilog()
+ 
+ 	if(m_saveFpRegisters)
+ 	{
+-		m_assembler.Vpop(CAArch32Assembler::d8, 4);
++		m_assembler.Vpop(CAArch32Assembler::d8, 8);
+ 	}
+ 	m_assembler.Ldmia(CAArch32Assembler::rSP, m_registerSave);
+ }
+diff --git a/src/Jitter_CodeGen_AArch32_Md.cpp b/src/Jitter_CodeGen_AArch32_Md.cpp
+--- a/src/Jitter_CodeGen_AArch32_Md.cpp
++++ b/src/Jitter_CodeGen_AArch32_Md.cpp
+@@ -84,14 +84,27 @@ void CCodeGen_AArch32::MdBlendRegisters(
+ 	auto srcRegLo = static_cast<CAArch32Assembler::DOUBLE_REGISTER>(srcReg + 0);
+ 	auto srcRegHi = static_cast<CAArch32Assembler::DOUBLE_REGISTER>(srcReg + 1);
+ 
+-	//AArch32 NEON doesn't have an instruction to assign between two NEON register elements.
+-	//We can use VEXT to do some better things for some masks, but others are quite complicated.
+-	for(unsigned int i = 0; i < 4; i++)
++	//Per 64-bit half: whole register move when both lanes are selected,
++	//otherwise a bit insert with an immediate lane mask (in d6, q3 is free
++	//in all callers).
++	(void)tmpReg;
++	auto maskReg = CAArch32Assembler::d6;
++	for(unsigned int half = 0; half < 2; half++)
+ 	{
+-		if(mask & (1 << i))
++		auto dstHalf = half ? dstRegHi : dstRegLo;
++		auto srcHalf = half ? srcRegHi : srcRegLo;
++		uint8 halfMask = (mask >> (half * 2)) & 3;
++		switch(halfMask)
+ 		{
+-			m_assembler.Vmov(tmpReg, (i & 2) ? srcRegHi : srcRegLo, (i & 1));
+-			m_assembler.Vmov((i & 2) ? dstRegHi : dstRegLo, tmpReg, (i & 1));
++		case 0:
++			break;
++		case 3:
++			m_assembler.Vorr(dstHalf, srcHalf, srcHalf);
++			break;
++		default:
++			m_assembler.Vmov_I64(maskReg, (halfMask == 1) ? 0x0F : 0xF0);
++			m_assembler.Vbit(dstHalf, srcHalf, maskReg);
++			break;
+ 		}
+ 	}
+ }
+@@ -512,14 +525,9 @@ void CCodeGen_AArch32::Emit_Md_ClampS_VarVar(const STATEMENT& statement)
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 
+-	auto cstAddrReg = CAArch32Assembler::r2;
+-	auto cst0Reg = CAArch32Assembler::q2;
+-	auto cst1Reg = CAArch32Assembler::q3;
+-
+-	m_assembler.Adrl(cstAddrReg, g_fpClampMask1);
+-	m_assembler.Vld1_32x4(cst0Reg, cstAddrReg);
+-	m_assembler.Adrl(cstAddrReg, g_fpClampMask2);
+-	m_assembler.Vld1_32x4(cst1Reg, cstAddrReg);
++	//Masks loaded in the prologue
++	auto cst0Reg = g_clampMask1Register;
++	auto cst1Reg = g_clampMask2Register;
+ 
+ 	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q1);
+ 	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
+@@ -581,6 +589,77 @@ void CCodeGen_AArch32::Emit_Md_MakeSz_VarVar(const STATEMENT& statement)
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q0);
++	auto dstReg = PrepareSymbolRegisterDef(dst, CAArch32Assembler::r0);
++	MdMakeSignZero(dstReg, src1Reg);
++	CommitSymbolRegister(dst, dstReg);
++}
++
++bool CCodeGen_AArch32::SupportsMdSignZeroAccumulate() const
++{
++	return true;
++}
++
++//Lane flags: sign in bit 31, zero in bit 0. Lanes outside the dest mask (bit 3 = x)
++//are not accumulated.
++void CCodeGen_AArch32::Emit_Md_AccumSz_VarVarVar(const STATEMENT& statement)
++{
++	auto dst = statement.dst->GetSymbol().get();
++	auto src1 = statement.src1->GetSymbol().get();
++	auto src2 = statement.src2->GetSymbol().get();
++	uint8 dest = static_cast<uint8>(statement.jmpCondition) & 0xF;
++
++	auto valueReg = PrepareSymbolRegisterUseMd(src2, CAArch32Assembler::q0);
++	auto flagsReg = CAArch32Assembler::q1;
++	auto zeroReg = CAArch32Assembler::q2;
++
++	m_assembler.Vceqz_F32(zeroReg, valueReg);
++	m_assembler.Vshr_U32(zeroReg, zeroReg, 31);
++	m_assembler.Vshr_U32(flagsReg, valueReg, 31);
++	m_assembler.Vshl_I32(flagsReg, flagsReg, 31);
++	m_assembler.Vorr(flagsReg, flagsReg, zeroReg);
++	if(dest != 0xF)
++	{
++		auto maskReg = CAArch32Assembler::q3;
++		//VU dest: x = bit 3 = lane 0
++		uint8 lo = ((dest & 8) ? 0x0F : 0) | ((dest & 4) ? 0xF0 : 0);
++		uint8 hi = ((dest & 2) ? 0x0F : 0) | ((dest & 1) ? 0xF0 : 0);
++		m_assembler.Vmov_I64(static_cast<CAArch32Assembler::DOUBLE_REGISTER>(maskReg + 0), lo);
++		m_assembler.Vmov_I64(static_cast<CAArch32Assembler::DOUBLE_REGISTER>(maskReg + 1), hi);
++		m_assembler.Vand(flagsReg, flagsReg, maskReg);
++	}
++	auto accReg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q0);
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
++	m_assembler.Vorr(dstReg, accReg, flagsReg);
++	CommitSymbolRegisterMd(dst, dstReg);
++}
++
++void CCodeGen_AArch32::Emit_Md_MakeSzAcc_VarVar(const STATEMENT& statement)
++{
++	auto dst = statement.dst->GetSymbol().get();
++	auto src1 = statement.src1->GetSymbol().get();
++
++	//Rebuild a value with the accumulated flags: sign bit kept, zero lanes as +/-0,
++	//other lanes 0x7FFFFFFF (NaN, not equal to zero)
++	auto accReg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q0);
++	auto valueReg = CAArch32Assembler::q0;
++	auto nonZeroReg = CAArch32Assembler::q2;
++	auto zeroCstReg = CAArch32Assembler::q3;
++	m_assembler.Vshl_I32(nonZeroReg, accReg, 31);
++	m_assembler.Veor(zeroCstReg, zeroCstReg, zeroCstReg);
++	m_assembler.Vceq_I32(nonZeroReg, nonZeroReg, zeroCstReg);
++	m_assembler.Vshr_U32(nonZeroReg, nonZeroReg, 1);
++	m_assembler.Vshr_U32(valueReg, accReg, 31);
++	m_assembler.Vshl_I32(valueReg, valueReg, 31);
++	m_assembler.Vorr(valueReg, valueReg, nonZeroReg);
++
++	auto dstReg = PrepareSymbolRegisterDef(dst, CAArch32Assembler::r0);
++	MdMakeSignZero(dstReg, valueReg);
++	CommitSymbolRegister(dst, dstReg);
++}
++
++void CCodeGen_AArch32::MdMakeSignZero(CAArch32Assembler::REGISTER dstReg, CAArch32Assembler::QUAD_REGISTER src1Reg)
++{
+ 	auto cstAddrReg = CAArch32Assembler::r1;
+ 	auto signReg = CAArch32Assembler::q1;
+ 	auto zeroReg = CAArch32Assembler::q2;
+@@ -589,10 +668,6 @@ void CCodeGen_AArch32::Emit_Md_MakeSz_VarVar(const STATEMENT& statement)
+ 	static const LITERAL128 lit1(0x0004080C1014181CUL, 0xFFFFFFFFFFFFFFFFUL);
+ 	static const LITERAL128 lit2(0x8040201008040201UL, 0x0000000000000000UL);
+ 
+-	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q0);
+-
+-	auto dstReg = PrepareSymbolRegisterDef(dst, CAArch32Assembler::r0);
+-
+ 	m_assembler.Vcltz_I32(signReg, src1Reg);
+ 	m_assembler.Vceqz_F32(zeroReg, src1Reg);
+ 
+@@ -609,8 +684,6 @@ void CCodeGen_AArch32::Emit_Md_MakeSz_VarVar(const STATEMENT& statement)
+ 	m_assembler.Vpaddl_U16(cstReg, zeroReg);
+ 	m_assembler.Vpaddl_U32(signReg, cstReg);
+ 	m_assembler.Vmov(dstReg, static_cast<CAArch32Assembler::DOUBLE_REGISTER>(signReg), 0);
+-
+-	CommitSymbolRegister(dst, dstReg);
+ }
+ 
+ void CCodeGen_AArch32::Emit_Md_PackHB_VarVarVar(const STATEMENT& statement)
+@@ -792,6 +865,8 @@ CCodeGen_AArch32::CONSTMATCHER CCodeGen_AArch32::g_mdConstMatchers[] =
+ 
+ 	{ OP_MD_MAKECLIP, MATCH_VARIABLE, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, &CCodeGen_AArch32::Emit_Md_MakeClip_VarVarVarVar },
+ 	{ OP_MD_MAKESZ,   MATCH_VARIABLE, MATCH_VARIABLE128, MATCH_NIL,         MATCH_NIL,         &CCodeGen_AArch32::Emit_Md_MakeSz_VarVar         },
++	{ OP_MD_ACCUMSZ,  MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL,    &CCodeGen_AArch32::Emit_Md_AccumSz_VarVarVar     },
++	{ OP_MD_MAKESZ_ACC, MATCH_VARIABLE, MATCH_VARIABLE128, MATCH_NIL,       MATCH_NIL,         &CCodeGen_AArch32::Emit_Md_MakeSzAcc_VarVar      },
+ 
+ 	{ OP_MD_TOSINGLE_I32,    MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVar<MDOP_TOSINGLE_I32> },
+ 	{ OP_MD_TOINT32_TRUNC_S, MATCH_VARIABLE128, MATCH_VARIABLE128, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Md_VarVar<MDOP_TOINT32_S>    },

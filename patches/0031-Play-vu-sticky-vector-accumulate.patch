@@ -1,0 +1,106 @@
+diff --git a/Source/MIPS.h b/Source/MIPS.h
+--- a/Source/MIPS.h
++++ b/Source/MIPS.h
+@@ -174,6 +174,7 @@ public:
+ 	//Scratch for the VU compiler: sticky flags accumulated within a block
+ 	//(only live while a block runs, not part of the saved state)
+ 	uint32 m_vuStickyAccumulator = 0;
++	alignas(16) uint128 m_vuStickyAccumulator128 = {};
+ 
+ 	std::function<void(CMIPS*)> m_emptyBlockHandler;
+ 
+diff --git a/Source/ee/VUShared.cpp b/Source/ee/VUShared.cpp
+--- a/Source/ee/VUShared.cpp
++++ b/Source/ee/VUShared.cpp
+@@ -254,6 +254,18 @@ void VUShared::MakeComparableFromFloat(CMipsJitter* codeGen)
+ 
+ void VUShared::TestSZFlags(CMipsJitter* codeGen, uint8 dest, size_t regOffset, uint32 relativePipeTime, uint32 compileHints)
+ {
++	//MAC flags unused and sticky flags deferred: accumulate them in a vector
++	//register (no transfer from the vector unit, which stalls on ARM)
++	if((compileHints & COMPILEHINT_DEFER_STICKY) && (compileHints & COMPILEHINT_SKIP_FMAC_UPDATE) &&
++	   codeGen->SupportsMdSignZeroAccumulate())
++	{
++		codeGen->MD_PushRel(offsetof(CMIPS, m_vuStickyAccumulator128));
++		codeGen->MD_PushRel(regOffset);
++		codeGen->MD_AccumulateSignZero(dest);
++		codeGen->MD_PullRel(offsetof(CMIPS, m_vuStickyAccumulator128));
++		return;
++	}
++
+ 	codeGen->MD_PushRel(regOffset);
+ 	codeGen->MD_MakeSignZero();
+ 
+@@ -306,6 +318,12 @@ void VUShared::TestSZFlags(CMipsJitter* codeGen, uint8 dest, size_t regOffset, u
+ void VUShared::FlushDeferredSticky(CMipsJitter* codeGen, uint32 relativePipeTime)
+ {
+ 	codeGen->PushRel(offsetof(CMIPS, m_vuStickyAccumulator));
++	if(codeGen->SupportsMdSignZeroAccumulate())
++	{
++		codeGen->MD_PushRel(offsetof(CMIPS, m_vuStickyAccumulator128));
++		codeGen->MD_MakeSignZeroFromAccumulator();
++		codeGen->Or();
++	}
+ 
+ 	//Load previous value
+ 	{
+diff --git a/Source/ee/VuBasicBlock.cpp b/Source/ee/VuBasicBlock.cpp
+--- a/Source/ee/VuBasicBlock.cpp
++++ b/Source/ee/VuBasicBlock.cpp
+@@ -47,6 +47,11 @@ void CVuBasicBlock::CompileRange(CMipsJitter* jitter)
+ 	{
+ 		jitter->PushCst(0);
+ 		jitter->PullRel(offsetof(CMIPS, m_vuStickyAccumulator));
++		if(jitter->SupportsMdSignZeroAccumulate())
++		{
++			jitter->MD_PushCstExpandW(0U);
++			jitter->MD_PullRel(offsetof(CMIPS, m_vuStickyAccumulator128));
++		}
+ 	}
+ 
+ 	uint32 relativePipeTime = 0;
+diff --git a/tools/VuTest/StickyFlagsTest.cpp b/tools/VuTest/StickyFlagsTest.cpp
+--- a/tools/VuTest/StickyFlagsTest.cpp
++++ b/tools/VuTest/StickyFlagsTest.cpp
+@@ -80,4 +80,41 @@ void CStickyFlagsTest::Execute(CTestVm& virtualMachine)
+ 	}
+ 	TEST_VERIFY(virtualMachine.m_cpu.m_State.nCOP2VI[1] == 0x00C0);
+ 	TEST_VERIFY(virtualMachine.m_cpu.m_State.nCOP2VI[2] == 0x00C0);
++
++	//Flags of lanes outside the destination mask must not be accumulated:
++	//VF3 - VF0 = (1, 1, 1, 0), only x written
++	virtualMachine.Reset();
++	{
++		CVuAssembler assembler2(microMem);
++		auto label = assembler2.CreateLabel();
++		assembler2.Write(
++		    CVuAssembler::Upper::SUB(CVuAssembler::DEST_X, CVuAssembler::VF7, CVuAssembler::VF3, CVuAssembler::VF0),
++		    CVuAssembler::Lower::NOP());
++		for(uint32 i = 0; i < 6; i++)
++		{
++			assembler2.Write(
++			    CVuAssembler::Upper::ADDbc(CVuAssembler::DEST_XYZW, CVuAssembler::VF4, CVuAssembler::VF3, CVuAssembler::VF3, CVuAssembler::BC_X),
++			    CVuAssembler::Lower::NOP());
++		}
++		assembler2.Write(CVuAssembler::Upper::NOP(), CVuAssembler::Lower::B(label));
++		assembler2.Write(CVuAssembler::Upper::NOP(), CVuAssembler::Lower::NOP());
++		assembler2.MarkLabel(label);
++		for(uint32 i = 0; i < 6; i++)
++		{
++			assembler2.Write(CVuAssembler::Upper::NOP(), CVuAssembler::Lower::NOP());
++		}
++		assembler2.Write(CVuAssembler::Upper::NOP(), CVuAssembler::Lower::FSAND(CVuAssembler::VI3, 0xFFF));
++		assembler2.Write(CVuAssembler::Upper::NOP() | CVuAssembler::Upper::E_BIT, CVuAssembler::Lower::NOP());
++		assembler2.Write(CVuAssembler::Upper::NOP(), CVuAssembler::Lower::NOP());
++	}
++	for(uint32 i = 0; i < 4; i++)
++	{
++		virtualMachine.m_cpu.m_State.nCOP2[3].nV[i] = 0x3F800000;
++	}
++	virtualMachine.ExecuteTest(0);
++	if(getenv("STICKY_TEST_PRINT"))
++	{
++		fprintf(stderr, "sticky test: VI3 %04X\n", virtualMachine.m_cpu.m_State.nCOP2VI[3]);
++	}
++	TEST_VERIFY(virtualMachine.m_cpu.m_State.nCOP2VI[3] == 0x0000);
+ }

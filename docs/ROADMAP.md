@@ -87,6 +87,8 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 - [ ] Optional accurate VU rounding (round toward zero) for games that need it (tri-Ace): ARMv7 NEON always rounds to nearest
 - [ ] VU1 microprogram recompiler profiling and tuning (often the 3D bottleneck)
 - [x] VU: sticky flags of FMAC instructions merged into one pipeline entry per block when the block doesn't read/set the status (was ~15 memory operations per FMAC instruction); VuTest case added
+- [x] VU (AArch32): float clamp masks kept in q6/q7 (loaded once per function/chain instead of per clamp); lane-masked writes with VBIT/whole-register moves (was 2 core-register transfers per lane)
+- [x] VU (AArch32): sign/zero flags of FMAC instructions whose MAC result is unused accumulated in a vector register (no NEON to ARM transfer per instruction, which stalls the Cortex-A9); one conversion per block
 - [ ] Idle-loop and busy-wait detection, per game when the generic one misses
 - [ ] Ahead-of-time block cache: prerecord and ship translated code per game
 - [ ] Hot-function native replacements (hand-tuned C++/NEON) for top functions
