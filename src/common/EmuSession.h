@@ -133,9 +133,10 @@ public:
 		return m_vm.get();
 	}
 
-	// ARM JIT: keep vector/float values in memory instead of NEON/VFP
-	// registers (slower; to rule out register allocation bugs). Takes effect
-	// for code compiled afterwards: set before booting. No-op elsewhere.
+	// ARM JIT: safe mode keeps vector/float values in memory instead of
+	// NEON/VFP registers and gives every block its own frame (no chained
+	// frames between linked blocks): slower, to rule out JIT bugs. Set before
+	// booting (code is compiled in one mode). No-op on other CPUs.
 	static void SetSafeJit(bool);
 
 	// Called once at startup before anything touches CAppConfig.

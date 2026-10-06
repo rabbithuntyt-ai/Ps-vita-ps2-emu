@@ -1,0 +1,72 @@
+diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
+--- a/Source/BasicBlock.cpp
++++ b/Source/BasicBlock.cpp
+@@ -58,6 +58,7 @@ CBasicBlock::CBasicBlock(CMIPS& context, uint32 begin, uint32 end, BLOCK_CATEGOR
+ 		m_linkBlock[i] = nullptr;
+ #endif
+ 		m_linkBlockTrampolineOffset[i] = INVALID_LINK_SLOT;
++		m_linkSlotDefault[i] = 0;
+ 	}
+ }
+ 
+@@ -93,9 +94,16 @@ void CBasicBlock::Compile()
+ 		jitter->Begin();
+ 		CompileRange(jitter);
+ 		jitter->End();
++		m_linkEntryOffset = jitter->GetCodeGen()->GetLinkEntryOffset();
+ 	}
+ 
+ 	m_function = CMemoryFunction(stream.GetBuffer(), stream.GetSize());
++	for(uint32 i = 0; i < LINK_SLOT_MAX; i++)
++	{
++		if(m_linkBlockTrampolineOffset[i] == INVALID_LINK_SLOT) continue;
++		auto code = reinterpret_cast<const uint8*>(m_function.GetCode());
++		m_linkSlotDefault[i] = *reinterpret_cast<const uintptr_t*>(code + m_linkBlockTrampolineOffset[i]);
++	}
+ 
+ #ifdef VTUNE_ENABLED
+ 	if(iJIT_IsProfilingActive() == iJIT_SAMPLING_ON)
+@@ -404,7 +412,7 @@ void CBasicBlock::LinkBlock(LINK_SLOT linkSlot, CBasicBlock* otherBlock)
+ 	assert(m_linkBlock[linkSlot] == nullptr);
+ 	m_linkBlock[linkSlot] = otherBlock;
+ #endif
+-	auto patchValue = reinterpret_cast<uintptr_t>(otherBlock->m_function.GetCode());
++	auto patchValue = reinterpret_cast<uintptr_t>(otherBlock->m_function.GetCode()) + otherBlock->m_linkEntryOffset;
+ 	auto code = reinterpret_cast<uint8*>(m_function.GetCode());
+ 	m_function.BeginModify();
+ 	*reinterpret_cast<uintptr_t*>(code + m_linkBlockTrampolineOffset[linkSlot]) = patchValue;
+@@ -423,6 +431,11 @@ void CBasicBlock::UnlinkBlock(LINK_SLOT linkSlot)
+ 	m_linkBlock[linkSlot] = nullptr;
+ #endif
+ 	auto patchValue = (linkSlot == LINK_SLOT_NEXT) ? reinterpret_cast<uintptr_t>(&NextBlockTrampoline) : reinterpret_cast<uintptr_t>(&BranchBlockTrampoline);
++	if(m_linkSlotDefault[linkSlot] != 0)
++	{
++		//The code generator may route unlinked slots through its own code
++		patchValue = m_linkSlotDefault[linkSlot];
++	}
+ 	auto code = reinterpret_cast<uint8*>(m_function.GetCode());
+ 	m_function.BeginModify();
+ 	*reinterpret_cast<uintptr_t*>(code + m_linkBlockTrampolineOffset[linkSlot]) = patchValue;
+@@ -451,6 +464,8 @@ void CBasicBlock::CopyFunctionFrom(const std::shared_ptr<CBasicBlock>& other)
+ #ifndef AOT_USE_CACHE
+ 	m_function = other->m_function.CreateInstance();
+ 	std::copy(std::begin(other->m_linkBlockTrampolineOffset), std::end(other->m_linkBlockTrampolineOffset), m_linkBlockTrampolineOffset);
++	std::copy(std::begin(other->m_linkSlotDefault), std::end(other->m_linkSlotDefault), m_linkSlotDefault);
++	m_linkEntryOffset = other->m_linkEntryOffset;
+ #ifdef _DEBUG
+ 	std::copy(std::begin(other->m_linkBlock), std::end(other->m_linkBlock), m_linkBlock);
+ #endif
+diff --git a/Source/BasicBlock.h b/Source/BasicBlock.h
+--- a/Source/BasicBlock.h
++++ b/Source/BasicBlock.h
+@@ -132,6 +132,10 @@ private:
+ 	uint32 m_recycleCount = 0;
+ 	BlockOutLinkPointer m_outLinks[LINK_SLOT_MAX];
+ 	uint32 m_linkBlockTrampolineOffset[LINK_SLOT_MAX];
++	//Value of each link slot when unlinked (what the code generator wrote)
++	uintptr_t m_linkSlotDefault[LINK_SLOT_MAX];
++	//Where linked blocks jump into this one (see CCodeGen::GetLinkEntryOffset)
++	uint32 m_linkEntryOffset = 0;
+ #ifdef _DEBUG
+ 	CBasicBlock* m_linkBlock[LINK_SLOT_MAX];
+ #endif

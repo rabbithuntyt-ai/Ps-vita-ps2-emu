@@ -286,6 +286,8 @@ void CEmuSession::SetSafeJit(bool safe)
 {
 #if defined(__arm__)
 	Jitter::CCodeGen_AArch32::SetConservativeAllocation(safe);
+	// Shared frames across linked blocks (no prolog/epilog between blocks).
+	Jitter::CCodeGen_AArch32::SetChainedFrames(!safe);
 #else
 	(void)safe;
 #endif

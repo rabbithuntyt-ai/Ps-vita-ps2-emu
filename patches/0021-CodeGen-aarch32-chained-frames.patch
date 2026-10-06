@@ -1,0 +1,229 @@
+diff --git a/include/Jitter_CodeGen.h b/include/Jitter_CodeGen.h
+--- a/include/Jitter_CodeGen.h
++++ b/include/Jitter_CodeGen.h
+@@ -41,6 +41,14 @@ namespace Jitter
+ 		virtual void RegisterExternalSymbols(CObjectFile*) const = 0;
+ 		virtual uint32 GetPointerSize() const = 0;
+ 
++		//Offset of the entry point used when jumping from another generated
++		//function through a link slot (EXTERNJMP_DYN), when it differs from
++		//the start of the code.
++		virtual uint32 GetLinkEntryOffset() const
++		{
++			return 0;
++		}
++
+ 	protected:
+ 		enum MATCHTYPE
+ 		{
+diff --git a/include/Jitter_CodeGen_AArch32.h b/include/Jitter_CodeGen_AArch32.h
+--- a/include/Jitter_CodeGen_AArch32.h
++++ b/include/Jitter_CodeGen_AArch32.h
+@@ -29,6 +29,18 @@ namespace Jitter
+ 		static void SetConservativeAllocation(bool);
+ 		static bool GetConservativeAllocation();
+ 
++		//Chained frames: every function uses the same frame (all callee saved
++		//registers, d8-d11, a fixed temporary area), built at the normal entry.
++		//Link slot jumps (EXTERNJMP_DYN) go straight to the target's link entry
++		//(after its prolog) without unwinding; unlinked slots go through a
++		//shared thunk that unwinds and tail calls the original target. Must
++		//not change while code generated in one mode can link to the other.
++		//Default: off, or on when CODEGEN_AARCH32_CHAINED is set (tests).
++		static void SetChainedFrames(bool);
++		static bool GetChainedFrames();
++
++		uint32 GetLinkEntryOffset() const override;
++
+ 		void GenerateCode(const StatementList&, unsigned int) override;
+ 		void SetStream(Framework::CStream*) override;
+ 		void RegisterExternalSymbols(CObjectFile*) const override;
+@@ -812,6 +824,9 @@ namespace Jitter
+ 		LabelMapType m_labels;
+ 		ParamStack m_params;
+ 		uint32 m_stackSize = 0;
++		bool m_chained = false;
++		uint32 m_chainedExtraStack = 0; //temporaries beyond the fixed area
++		uint32 m_linkEntryOffset = 0;
+ 		uint16 m_registerSave = 0;
+ 		uint32 m_stackLevel = 0;
+ 		//Stack area where 128-bit register values passed by reference to
+diff --git a/src/Jitter_CodeGen_AArch32.cpp b/src/Jitter_CodeGen_AArch32.cpp
+--- a/src/Jitter_CodeGen_AArch32.cpp
++++ b/src/Jitter_CodeGen_AArch32.cpp
+@@ -1,6 +1,11 @@
+ #include <cstdlib>
++#include <map>
++#include <memory>
++#include <mutex>
+ #include <stdexcept>
+ #include "Jitter_CodeGen_AArch32.h"
++#include "MemStream.h"
++#include "MemoryFunction.h"
+ #include "ObjectFile.h"
+ #include "BitManip.h"
+ #include "maybe_unused.h"
+@@ -345,6 +350,62 @@ bool CCodeGen_AArch32::GetConservativeAllocation()
+ 	return g_conservativeAllocation;
+ }
+ 
++static bool g_chainedFrames = (getenv("CODEGEN_AARCH32_CHAINED") != nullptr);
++
++//Chained frame layout (identical for every function)
++static constexpr uint16 g_chainedRegisterSave =
++    (1 << CAArch32Assembler::r4) | (1 << CAArch32Assembler::r5) | (1 << CAArch32Assembler::r6) | (1 << CAArch32Assembler::r7) |
++    (1 << CAArch32Assembler::r8) | (1 << CAArch32Assembler::r10) | (1 << CAArch32Assembler::r11) | (1 << CAArch32Assembler::rLR);
++static constexpr uint32 g_chainedStackSize = 0x200; //temporaries and 128-bit parameter spill slots
++
++void CCodeGen_AArch32::SetChainedFrames(bool chained)
++{
++	g_chainedFrames = chained;
++}
++
++bool CCodeGen_AArch32::GetChainedFrames()
++{
++	return g_chainedFrames;
++}
++
++uint32 CCodeGen_AArch32::GetLinkEntryOffset() const
++{
++	return m_linkEntryOffset;
++}
++
++namespace
++{
++	//Unwinds a chained frame and tail calls 'target' with the context in r0.
++	//One per target, shared by all functions.
++	class CChainedThunks
++	{
++	public:
++		static uintptr_t Get(uintptr_t target)
++		{
++			static std::mutex mutex;
++			static std::map<uintptr_t, std::unique_ptr<CMemoryFunction>> thunks;
++			std::lock_guard<std::mutex> lock(mutex);
++			auto thunkIterator = thunks.find(target);
++			if(thunkIterator != thunks.end()) return reinterpret_cast<uintptr_t>(thunkIterator->second->GetCode());
++
++			Framework::CMemStream stream;
++			CAArch32Assembler assembler;
++			assembler.SetStream(&stream);
++			assembler.Mov(CAArch32Assembler::r0, CAArch32Assembler::r11);
++			assembler.Add(CAArch32Assembler::rSP, CAArch32Assembler::rSP, CAArch32Assembler::MakeImmediateAluOperand(g_chainedStackSize >> 8, 12));
++			assembler.Ldmia(CAArch32Assembler::rSP, (1 << CAArch32Assembler::r3));
++			assembler.Mov(CAArch32Assembler::rSP, CAArch32Assembler::r3);
++			assembler.Vpop(CAArch32Assembler::d8, 4);
++			assembler.Ldmia(CAArch32Assembler::rSP, g_chainedRegisterSave);
++			assembler.Ldr_Pc(CAArch32Assembler::rPC, -4);
++			stream.Write32(static_cast<uint32>(target));
++			auto& thunk = thunks[target];
++			thunk = std::make_unique<CMemoryFunction>(stream.GetBuffer(), stream.GetSize());
++			return reinterpret_cast<uintptr_t>(thunk->GetCode());
++		}
++	};
++}
++
+ unsigned int CCodeGen_AArch32::GetAvailableMdRegisterCount() const
+ {
+ 	return g_conservativeAllocation ? 0 : MAX_MDREGISTERS;
+@@ -406,6 +467,15 @@ void CCodeGen_AArch32::GenerateCode(const StatementList& statements, unsigned in
+ 
+ 	m_registerSave = GetSavedRegisterList(GetRegisterUsage(statements));
+ 
++	m_chained = g_chainedFrames;
++	m_chainedExtraStack = 0;
++	m_linkEntryOffset = 0;
++	if(m_chained)
++	{
++		m_registerSave = g_chainedRegisterSave;
++		if(m_stackSize > g_chainedStackSize) m_chainedExtraStack = m_stackSize - g_chainedStackSize;
++	}
++
+ 	m_saveFpRegisters = false;
+ 	for(const auto& statement : statements)
+ 	{
+@@ -415,6 +485,7 @@ void CCodeGen_AArch32::GenerateCode(const StatementList& statements, unsigned in
+ 		    });
+ 		if(m_saveFpRegisters) break;
+ 	}
++	if(m_chained) m_saveFpRegisters = true;
+ 
+ 	Emit_Prolog();
+ 
+@@ -486,6 +557,28 @@ uint16 CCodeGen_AArch32::GetSavedRegisterList(uint32 registerUsage)
+ 
+ void CCodeGen_AArch32::Emit_Prolog()
+ {
++	if(m_chained)
++	{
++		m_assembler.Stmdb(CAArch32Assembler::rSP, m_registerSave);
++		m_assembler.Vpush(CAArch32Assembler::d8, 4);
++		m_assembler.Mov(CAArch32Assembler::r11, CAArch32Assembler::r0);
++		m_assembler.Mov(CAArch32Assembler::r0, CAArch32Assembler::rSP);
++		m_assembler.Bic(CAArch32Assembler::rSP, CAArch32Assembler::rSP, CAArch32Assembler::MakeImmediateAluOperand(0xF, 0));
++		m_assembler.Sub(CAArch32Assembler::rSP, CAArch32Assembler::rSP, CAArch32Assembler::MakeImmediateAluOperand(0xC, 0));
++		m_assembler.Stmdb(CAArch32Assembler::rSP, (1 << CAArch32Assembler::r0));
++		m_assembler.Sub(CAArch32Assembler::rSP, CAArch32Assembler::rSP, CAArch32Assembler::MakeImmediateAluOperand(g_chainedStackSize >> 8, 12));
++		//Functions jumping here through a link slot already built the frame
++		m_linkEntryOffset = static_cast<uint32>(m_stream->GetLength());
++		if(m_chainedExtraStack != 0)
++		{
++			LoadConstantInRegister(CAArch32Assembler::r0, m_chainedExtraStack);
++			m_assembler.Sub(CAArch32Assembler::rSP, CAArch32Assembler::rSP, CAArch32Assembler::r0);
++			m_assembler.Mov(CAArch32Assembler::r0, CAArch32Assembler::r11);
++		}
++		m_stackLevel = 0;
++		return;
++	}
++
+ 	m_assembler.Stmdb(CAArch32Assembler::rSP, m_registerSave);
+ 	if(m_saveFpRegisters)
+ 	{
+@@ -524,6 +617,21 @@ void CCodeGen_AArch32::Emit_Epilog()
+ 	//transmit the function's parameter (r11) to the target
+ 	static const auto stackTempRegister = CAArch32Assembler::r3;
+ 
++	if(m_chained)
++	{
++		if(m_chainedExtraStack != 0)
++		{
++			LoadConstantInRegister(stackTempRegister, m_chainedExtraStack);
++			m_assembler.Add(CAArch32Assembler::rSP, CAArch32Assembler::rSP, stackTempRegister);
++		}
++		m_assembler.Add(CAArch32Assembler::rSP, CAArch32Assembler::rSP, CAArch32Assembler::MakeImmediateAluOperand(g_chainedStackSize >> 8, 12));
++		m_assembler.Ldmia(CAArch32Assembler::rSP, (1 << stackTempRegister));
++		m_assembler.Mov(CAArch32Assembler::rSP, stackTempRegister);
++		m_assembler.Vpop(CAArch32Assembler::d8, 4);
++		m_assembler.Ldmia(CAArch32Assembler::rSP, m_registerSave);
++		return;
++	}
++
+ 	if(m_stackSize != 0)
+ 	{
+ 		uint8 allocImm = 0, allocSa = 0;
+@@ -1189,6 +1297,25 @@ void CCodeGen_AArch32::Emit_ExternJmpDynamic(const STATEMENT& statement)
+ 
+ 	assert(src1->m_type == SYM_CONSTANTPTR);
+ 
++	if(m_chained)
++	{
++		//Keep the frame: the slot points at a linked function's link entry,
++		//or (unlinked) at a thunk that unwinds and calls the original target.
++		if(m_chainedExtraStack != 0)
++		{
++			LoadConstantInRegister(CAArch32Assembler::r3, m_chainedExtraStack);
++			m_assembler.Add(CAArch32Assembler::rSP, CAArch32Assembler::rSP, CAArch32Assembler::r3);
++		}
++		m_assembler.Ldr_Pc(CAArch32Assembler::rPC, -4);
++		if(m_externalSymbolReferencedHandler)
++		{
++			auto position = m_stream->GetLength();
++			m_externalSymbolReferencedHandler(src1->GetConstantPtr(), position, CCodeGen::SYMBOL_REF_TYPE::NATIVE_POINTER);
++		}
++		m_stream->Write32(static_cast<uint32>(CChainedThunks::Get(src1->GetConstantPtr())));
++		return;
++	}
++
+ 	m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
+ 	Emit_Epilog();
+ 

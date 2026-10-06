@@ -221,6 +221,13 @@ else()
 		endif()
 		add_test(NAME VuTest_safe_jit COMMAND VuTest)
 		set_tests_properties(VuTest_safe_jit PROPERTIES ENVIRONMENT CODEGEN_AARCH32_CONSERVATIVE=1)
+		# Chained frames (default in the Vita app): shared frame across linked blocks.
+		if(TARGET CodeGenTestSuite)
+			add_test(NAME codegen_tests_chained COMMAND CodeGenTestSuite)
+			set_tests_properties(codegen_tests_chained PROPERTIES ENVIRONMENT CODEGEN_AARCH32_CHAINED=1)
+		endif()
+		add_test(NAME VuTest_chained COMMAND VuTest)
+		set_tests_properties(VuTest_chained PROPERTIES ENVIRONMENT CODEGEN_AARCH32_CHAINED=1)
 	endif()
 
 	add_executable(jit_pool_tests tests/jit_pool_tests.cpp)
@@ -290,6 +297,20 @@ else()
 				-DSUFFIX=_mtspu
 				-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/elf_boot_test.cmake)
 		set_tests_properties(elf_boot_test_vu1_wait elf_boot_test_vu1_wait_mtvu elf_boot_test_mtspu PROPERTIES TIMEOUT 180)
+		if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
+			# Everything the app enables by default: threaded VU1 and SPU, chained frames
+			add_test(NAME elf_boot_test_vita_defaults
+				COMMAND ${CMAKE_COMMAND}
+					-DPYTHON=${Python3_EXECUTABLE}
+					-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+					-DRUNNER=$<TARGET_FILE:vitaps2_host>
+					"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
+					-DELF_ARGS=--vu1-wait
+					"-DRUNNER_ARGS=--mtspu;--mtvu"
+					-DSUFFIX=_vita_defaults
+					-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/elf_boot_test.cmake)
+			set_tests_properties(elf_boot_test_vita_defaults PROPERTIES TIMEOUT 180 ENVIRONMENT CODEGEN_AARCH32_CHAINED=1)
+		endif()
 		if(TARGET gsh_hardware)
 			add_test(NAME elf_boot_test_hw
 				COMMAND ${CMAKE_COMMAND}
