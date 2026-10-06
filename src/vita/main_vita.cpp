@@ -858,10 +858,14 @@ int main()
 	// Core 1: keep core 0 free for the EE/IOP thread (the bottleneck).
 	sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x20000 /* SCE_KERNEL_CPU_MASK_USER_1 */);
 
-	scePowerSetArmClockFrequency(444);
-	scePowerSetBusClockFrequency(222);
-	scePowerSetGpuClockFrequency(222);
-	scePowerSetGpuXbarClockFrequency(166);
+	// Maximum clocks. Only raise them: an overclocking plugin (PSVshell,
+	// LOLIcon) may already run the CPU at 500 MHz, which must be kept.
+	if(scePowerGetArmClockFrequency() < 444) scePowerSetArmClockFrequency(444);
+	if(scePowerGetBusClockFrequency() < 222) scePowerSetBusClockFrequency(222);
+	if(scePowerGetGpuClockFrequency() < 222) scePowerSetGpuClockFrequency(222);
+	if(scePowerGetGpuXbarClockFrequency() < 166) scePowerSetGpuXbarClockFrequency(166);
+	std::printf("clocks: cpu %d MHz, bus %d, gpu %d, xbar %d\n", scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(),
+	            scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency());
 
 	sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
 
