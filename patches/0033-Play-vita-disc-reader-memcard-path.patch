@@ -1,0 +1,149 @@
+diff --git a/Source/DiskUtils.cpp b/Source/DiskUtils.cpp
+--- a/Source/DiskUtils.cpp
++++ b/Source/DiskUtils.cpp
+@@ -33,6 +33,121 @@
+ #ifdef __APPLE__
+ #include "TargetConditionals.h"
+ #endif
++#ifdef __vita__
++#include <psp2/io/fcntl.h>
++#include <stdexcept>
++#include <vector>
++
++//Disc image reader with 64-bit offsets (images over 2GB) and read-ahead:
++//the ISO9660 layer reads one 2KB sector at a time, and every read is a
++//system call to the memory card.
++class CVitaImageStream : public Framework::CStream
++{
++public:
++	explicit CVitaImageStream(const char* path)
++	{
++		m_fd = sceIoOpen(path, SCE_O_RDONLY, 0);
++		if(m_fd < 0)
++		{
++			throw std::runtime_error("Invalid file handle.");
++		}
++		m_size = sceIoLseek(m_fd, 0, SCE_SEEK_END);
++		if(m_size < 0) m_size = 0;
++		m_buffer.resize(BUFFER_SIZE);
++	}
++
++	~CVitaImageStream() override
++	{
++		if(m_fd >= 0) sceIoClose(m_fd);
++	}
++
++	void Seek(int64 position, Framework::STREAM_SEEK_DIRECTION direction) override
++	{
++		switch(direction)
++		{
++		case Framework::STREAM_SEEK_SET:
++			m_position = position;
++			break;
++		case Framework::STREAM_SEEK_CUR:
++			m_position += position;
++			break;
++		case Framework::STREAM_SEEK_END:
++			m_position = m_size + position;
++			break;
++		}
++		if(m_position < 0) m_position = 0;
++	}
++
++	uint64 Tell() override
++	{
++		return m_position;
++	}
++
++	uint64 Read(void* data, uint64 length) override
++	{
++		auto output = reinterpret_cast<uint8*>(data);
++		uint64 total = 0;
++		while(length != 0)
++		{
++			if(m_position >= m_size) break;
++			if((m_position < m_bufferStart) || (m_position >= m_bufferStart + m_bufferValid))
++			{
++				//Large aligned reads go straight to the destination
++				if(length >= BUFFER_SIZE)
++				{
++					uint64 direct = length - (length % SECTOR_SIZE);
++					if(sceIoLseek(m_fd, m_position, SCE_SEEK_SET) != m_position) break;
++					int result = sceIoRead(m_fd, output, static_cast<SceSize>(direct));
++					if(result <= 0) break;
++					m_position += result;
++					output += result;
++					total += result;
++					length -= result;
++					continue;
++				}
++				int64 start = m_position - (m_position % SECTOR_SIZE);
++				if(sceIoLseek(m_fd, start, SCE_SEEK_SET) != start) break;
++				int result = sceIoRead(m_fd, m_buffer.data(), BUFFER_SIZE);
++				if(result <= 0) break;
++				m_bufferStart = start;
++				m_bufferValid = result;
++				if(m_position >= m_bufferStart + m_bufferValid) break;
++			}
++			uint64 offset = m_position - m_bufferStart;
++			uint64 chunk = std::min<uint64>(length, m_bufferValid - offset);
++			memcpy(output, m_buffer.data() + offset, chunk);
++			m_position += chunk;
++			output += chunk;
++			total += chunk;
++			length -= chunk;
++		}
++		return total;
++	}
++
++	uint64 Write(const void*, uint64) override
++	{
++		throw std::runtime_error("Disc images are read only.");
++	}
++
++	bool IsEOF() override
++	{
++		return m_position >= m_size;
++	}
++
++private:
++	enum
++	{
++		SECTOR_SIZE = 2048,
++		BUFFER_SIZE = 128 * 1024,
++	};
++	SceUID m_fd = -1;
++	int64 m_size = 0;
++	int64 m_position = 0;
++	int64 m_bufferStart = 0;
++	int64 m_bufferValid = 0;
++	std::vector<uint8> m_buffer;
++};
++#endif
+ 
+ static std::unique_ptr<Framework::CStream> CreateImageStream(const fs::path& imagePath)
+ {
+@@ -67,6 +182,8 @@ static std::unique_ptr<Framework::CStream> CreateImageStream(const fs::path& ima
+ 	}
+ #elif defined(__EMSCRIPTEN__)
+ 	return std::make_unique<CJsDiscImageDeviceStream>();
++#elif defined(__vita__)
++	return std::make_unique<CVitaImageStream>(imagePathString.c_str());
+ #else
+ 	return std::make_unique<Framework::CStdStream>(imagePathString.c_str(), Framework::GetInputStdStreamMode<fs::path::string_type>());
+ #endif
+diff --git a/Source/iop/Iop_McServ.cpp b/Source/iop/Iop_McServ.cpp
+--- a/Source/iop/Iop_McServ.cpp
++++ b/Source/iop/Iop_McServ.cpp
+@@ -780,7 +780,11 @@ void CMcServ::GetDir(uint32* args, uint32 argsSize, uint32* ret, uint32 retSize,
+ 			{
+ 				mcPath = Iop::PathUtils::MakeHostPath(mcPath, m_currentDirectory[cmd->port].c_str());
+ 			}
++#ifndef __vita__
++			//(Vita paths like "ux0:data/..." are absolute but not recognized
++			//as such: the current directory, app0:, would be prepended)
+ 			mcPath = fs::absolute(mcPath);
++#endif
+ 
+ 			if(!fs::exists(mcPath))
+ 			{
