@@ -845,6 +845,8 @@ int main()
 	if(std::freopen(LOG_PATH, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
 	std::printf("VitaPS2 %s starting\n", VITAPS2_BUILD);
 	ThreadProfiler::RegisterCurrentThread("UI/GPU");
+	// Core 1: keep core 0 free for the EE/IOP thread (the bottleneck).
+	sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x20000 /* SCE_KERNEL_CPU_MASK_USER_1 */);
 
 	scePowerSetArmClockFrequency(444);
 	scePowerSetBusClockFrequency(222);
