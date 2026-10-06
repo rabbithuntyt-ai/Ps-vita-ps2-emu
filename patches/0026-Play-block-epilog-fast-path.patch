@@ -1,0 +1,157 @@
+diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
+--- a/Source/BasicBlock.cpp
++++ b/Source/BasicBlock.cpp
+@@ -262,75 +262,75 @@ void CBasicBlock::CompileProlog(CMipsJitter* jitter)
+ 
+ void CBasicBlock::CompileEpilog(CMipsJitter* jitter, bool loopsOnItself)
+ {
+-	//Update cycle quota
++	//Fast path (quota left, no exception): dispatch to the next block directly.
++	//Slow path: flag the quota and leave with nPC updated.
+ 	jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
+ 	jitter->PushCst(((m_end - m_begin) / 4) + 1);
+ 	jitter->Sub();
+ 	jitter->PullRel(offsetof(CMIPS, m_State.cycleQuota));
+ 
++#if !defined(AOT_BUILD_CACHE) && !defined(__EMSCRIPTEN__)
+ 	jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
+ 	jitter->PushCst(0);
+-	jitter->BeginIf(Jitter::CONDITION_LE);
++	jitter->BeginIf(Jitter::CONDITION_GT);
+ 	{
+ 		jitter->PushRel(offsetof(CMIPS, m_State.nHasException));
+-		jitter->PushCst(MIPS_EXCEPTION_STATUS_QUOTADONE);
+-		jitter->Or();
+-		jitter->PullRel(offsetof(CMIPS, m_State.nHasException));
+-	}
+-	jitter->EndIf();
+-
+-	//We probably don't need to pay for this since we know in advance if there's a branch
+-	jitter->PushCst(MIPS_INVALID_PC);
+-	jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
+-	jitter->BeginIf(Jitter::CONDITION_NE);
+-	{
+-		jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
+-		jitter->PullRel(offsetof(CMIPS, m_State.nPC));
+-
+-		jitter->PushCst(MIPS_INVALID_PC);
+-		jitter->PullRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
+-
+-		if(loopsOnItself)
+-		{
+-			jitter->PushRel(offsetof(CMIPS, m_State.nHasException));
+-			jitter->PushCst(0);
+-			jitter->BeginIf(Jitter::CONDITION_EQ);
+-			{
+-				jitter->Goto(jitter->GetFirstBlockLabel());
+-			}
+-			jitter->EndIf();
+-		}
+-		else
++		jitter->PushCst(0);
++		jitter->BeginIf(Jitter::CONDITION_EQ);
+ 		{
+-#if !defined(AOT_BUILD_CACHE) && !defined(__EMSCRIPTEN__)
+-			jitter->PushRel(offsetof(CMIPS, m_State.nHasException));
+-			jitter->PushCst(0);
+-			jitter->BeginIf(Jitter::CONDITION_EQ);
++			jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++			jitter->PushCst(MIPS_INVALID_PC);
++			jitter->BeginIf(Jitter::CONDITION_NE);
+ 			{
+-				jitter->JumpToDynamic(reinterpret_cast<void*>(&BranchBlockTrampoline));
++				jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++				jitter->PullRel(offsetof(CMIPS, m_State.nPC));
++				jitter->PushCst(MIPS_INVALID_PC);
++				jitter->PullRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++
++				if(loopsOnItself)
++				{
++					jitter->Goto(jitter->GetFirstBlockLabel());
++				}
++				else
++				{
++					jitter->JumpToDynamic(reinterpret_cast<void*>(&BranchBlockTrampoline));
++				}
+ 			}
+ 			jitter->EndIf();
+-#endif
+-		}
+-	}
+-	jitter->Else();
+-	{
+-		jitter->PushRel(offsetof(CMIPS, m_State.nPC));
+-		jitter->PushCst(m_end - m_begin + 4);
+-		jitter->Add();
+-		jitter->PullRel(offsetof(CMIPS, m_State.nPC));
+ 
+-#if !defined(AOT_BUILD_CACHE) && !defined(__EMSCRIPTEN__)
+-		jitter->PushRel(offsetof(CMIPS, m_State.nHasException));
+-		jitter->PushCst(0);
+-		jitter->BeginIf(Jitter::CONDITION_EQ);
+-		{
++			jitter->PushRel(offsetof(CMIPS, m_State.nPC));
++			jitter->PushCst(m_end - m_begin + 4);
++			jitter->Add();
++			jitter->PullRel(offsetof(CMIPS, m_State.nPC));
+ 			jitter->JumpToDynamic(reinterpret_cast<void*>(&NextBlockTrampoline));
+ 		}
+ 		jitter->EndIf();
+-#endif
+ 	}
+ 	jitter->EndIf();
++#endif
++
++	//Slow path (the only path without block linking)
++	static_assert(MIPS_EXCEPTION_STATUS_QUOTADONE == 0x80, "QUOTADONE must be 0x80");
++	jitter->PushRel(offsetof(CMIPS, m_State.nHasException));
++	jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
++	jitter->PushCst(0);
++	jitter->Cmp(Jitter::CONDITION_LE);
++	jitter->Shl(7);
++	jitter->Or();
++	jitter->PullRel(offsetof(CMIPS, m_State.nHasException));
++
++	jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++	jitter->PushCst(MIPS_INVALID_PC);
++	jitter->Cmp(Jitter::CONDITION_NE);
++	jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++	jitter->PushRel(offsetof(CMIPS, m_State.nPC));
++	jitter->PushCst(m_end - m_begin + 4);
++	jitter->Add();
++	jitter->Select();
++	jitter->PullRel(offsetof(CMIPS, m_State.nPC));
++
++	jitter->PushCst(MIPS_INVALID_PC);
++	jitter->PullRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
+ }
+ 
+ void CBasicBlock::Execute()
+diff --git a/Source/MIPSInstructionFactory.cpp b/Source/MIPSInstructionFactory.cpp
+--- a/Source/MIPSInstructionFactory.cpp
++++ b/Source/MIPSInstructionFactory.cpp
+@@ -169,17 +169,15 @@ void CMIPSInstructionFactory::Branch(Jitter::CONDITION condition)
+ {
+ 	uint16 nImmediate = (uint16)(m_nOpcode & 0xFFFF);
+ 
++	//Branchless: nDelayedJumpAddr = condition ? target : MIPS_INVALID_PC
++	//(keeps the block in one jitter basic block for register allocation)
++	m_codeGen->Cmp(condition);
++	m_codeGen->PushRel(offsetof(CMIPS, m_State.nPC));
++	m_codeGen->PushCst((m_instrPosition + 4) + CMIPS::GetBranch(nImmediate));
++	m_codeGen->Add();
+ 	m_codeGen->PushCst(MIPS_INVALID_PC);
++	m_codeGen->Select();
+ 	m_codeGen->PullRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
+-
+-	m_codeGen->BeginIf(condition);
+-	{
+-		m_codeGen->PushRel(offsetof(CMIPS, m_State.nPC));
+-		m_codeGen->PushCst((m_instrPosition + 4) + CMIPS::GetBranch(nImmediate));
+-		m_codeGen->Add();
+-		m_codeGen->PullRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
+-	}
+-	m_codeGen->EndIf();
+ }
+ 
+ void CMIPSInstructionFactory::BranchLikely(Jitter::CONDITION condition)

@@ -1,0 +1,536 @@
+diff --git a/include/Jitter.h b/include/Jitter.h
+--- a/include/Jitter.h
++++ b/include/Jitter.h
+@@ -4,6 +4,7 @@
+ #include <memory>
+ #include <list>
+ #include <map>
++#include <set>
+ #include <unordered_map>
+ #include <vector>
+ #include <stack>
+@@ -381,8 +382,14 @@ namespace Jitter
+ 		void AllocateRegisters(BASIC_BLOCK&);
+ 		static AllocationRangeArray ComputeAllocationRanges(const BASIC_BLOCK&);
+ 		void ComputeLivenessForRange(const BASIC_BLOCK&, const AllocationRange&, SymbolRegAllocInfo&) const;
+-		void MarkAliasedSymbols(const BASIC_BLOCK&, const AllocationRange&, SymbolRegAllocInfo&) const;
+-		void AssociateSymbolsToRegisters(SymbolRegAllocInfo&) const;
++		//Live intervals (statement indices) held by each register (pool type, index)
++		typedef std::map<std::pair<SYM_TYPE, unsigned int>, std::vector<std::pair<unsigned int, unsigned int>>> RegisterOccupancy;
++		void MarkAliasedSymbols(const BASIC_BLOCK&, const AllocationRange&, SymbolRegAllocInfo&, bool = true) const;
++		//Statements to insert before the statement at an index (may be the list's size)
++		typedef std::multimap<unsigned int, STATEMENT> InsertionMap;
++		void AssociateSymbolsToRegisters(SymbolRegAllocInfo&, const AllocationRange&, RegisterOccupancy&) const;
++		void CommitRegisterAllocation(BASIC_BLOCK&, const AllocationRange&, bool, const SymbolRegAllocInfo&, InsertionMap&, InsertionMap&);
++		void AllocateGuestMemoryUnsafeSymbols(BASIC_BLOCK&, const AllocationRange&, RegisterOccupancy&, InsertionMap&, InsertionMap&);
+ 
+ 		void NormalizeStatements(BASIC_BLOCK&);
+ 		unsigned int AllocateStack(BASIC_BLOCK&);
+diff --git a/include/Jitter_CodeGen_AArch32.h b/include/Jitter_CodeGen_AArch32.h
+--- a/include/Jitter_CodeGen_AArch32.h
++++ b/include/Jitter_CodeGen_AArch32.h
+@@ -95,7 +95,7 @@ namespace Jitter
+ 
+ 		enum
+ 		{
+-			MAX_REGISTERS = 6,
++			MAX_REGISTERS = 7,
+ 		};
+ 
+ 		enum MAX_MDREGISTERS
+diff --git a/src/Jitter_CodeGen_AArch32.cpp b/src/Jitter_CodeGen_AArch32.cpp
+--- a/src/Jitter_CodeGen_AArch32.cpp
++++ b/src/Jitter_CodeGen_AArch32.cpp
+@@ -32,6 +32,9 @@ CAArch32Assembler::REGISTER CCodeGen_AArch32::g_registers[MAX_REGISTERS] =
+ 	CAArch32Assembler::r7,
+ 	CAArch32Assembler::r8,
+ 	CAArch32Assembler::r10,
++	//r9 is a callee saved general purpose register in the AAPCS used by the
++	//Vita and Linux (it is not on Apple platforms)
++	CAArch32Assembler::r9,
+ };
+ 
+ //q8-q15 (d16-d31) do not alias the single precision registers used by FPU
+@@ -363,7 +366,7 @@ static bool g_chainedFrames = (getenv("CODEGEN_AARCH32_CHAINED") != nullptr);
+ //Chained frame layout (identical for every function)
+ static constexpr uint16 g_chainedRegisterSave =
+     (1 << CAArch32Assembler::r4) | (1 << CAArch32Assembler::r5) | (1 << CAArch32Assembler::r6) | (1 << CAArch32Assembler::r7) |
+-    (1 << CAArch32Assembler::r8) | (1 << CAArch32Assembler::r10) | (1 << CAArch32Assembler::r11) | (1 << CAArch32Assembler::rLR);
++    (1 << CAArch32Assembler::r8) | (1 << CAArch32Assembler::r9) | (1 << CAArch32Assembler::r10) | (1 << CAArch32Assembler::r11) | (1 << CAArch32Assembler::rLR);
+ static constexpr uint32 g_chainedStackSize = 0x200; //temporaries and 128-bit parameter spill slots
+ 
+ void CCodeGen_AArch32::SetChainedFrames(bool chained)
+diff --git a/src/Jitter_Optimize.cpp b/src/Jitter_Optimize.cpp
+--- a/src/Jitter_Optimize.cpp
++++ b/src/Jitter_Optimize.cpp
+@@ -607,8 +607,17 @@ bool CJitter::FoldConstantOperation(STATEMENT& statement)
+ 	}
+ 	else if(statement.op == OP_SELECT)
+ 	{
++		//Known condition (code generators only take a variable condition)
++		if(src1cst)
++		{
++			statement.op = OP_MOV;
++			statement.src1 = (src1cst->m_valueLow != 0) ? statement.src2 : statement.src3;
++			statement.src2.reset();
++			statement.src3.reset();
++			changed = true;
++		}
+ 		//If true and false values are the same, we don't care about the test
+-		if(src2cst && src3cst && (src2cst->m_valueLow == src3cst->m_valueLow))
++		else if(src2cst && src3cst && (src2cst->m_valueLow == src3cst->m_valueLow))
+ 		{
+ 			uint32 value = src2cst->m_valueLow;
+ 			statement.op = OP_MOV;
+diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
+--- a/src/Jitter_RegAlloc.cpp
++++ b/src/Jitter_RegAlloc.cpp
+@@ -14,10 +14,10 @@ using namespace Jitter;
+ 
+ void CJitter::AllocateRegisters(BASIC_BLOCK& basicBlock)
+ {
+-	auto& symbolTable = basicBlock.symbolTable;
+-
+-	std::multimap<unsigned int, STATEMENT> loadStatements;
+-	std::multimap<unsigned int, STATEMENT> spillStatements;
++	//Statements inserted before the statement at a given index (spills first, then loads,
++	//since a register can be handed over from one symbol to another at the same point)
++	InsertionMap spillStatements;
++	InsertionMap loadStatements;
+ #ifdef DUMP_STATEMENTS
+ 	DumpStatementList(basicBlock.statements);
+ 	std::cout << std::endl;
+@@ -28,8 +28,11 @@ void CJitter::AllocateRegisters(BASIC_BLOCK& basicBlock)
+ 	//because changes to relative symbols might need to be visible by functions
+ 	//called by the block.
+ 
+-	//There's a downside to this which is that temporaries also get the same treatment
+-	//and are spilled at the end of a range which might not always be useful.
++	//Within a range, a symbol holds its register from its first to its last access:
++	//it is loaded right before its first use and saved right after its last definition.
++	//Nothing else reads the context during a range (calls end ranges), except the
++	//guest memory handlers, which only see symbols declared safe for them.
++
+ 	//Keep in mind that a temporary can remain live across a OP_CALL.
+ 
+ 	auto allocRanges = ComputeAllocationRanges(basicBlock);
+@@ -42,68 +45,34 @@ void CJitter::AllocateRegisters(BASIC_BLOCK& basicBlock)
+ 
+ 		MarkAliasedSymbols(basicBlock, allocRange, symbolRegAllocs);
+ 
+-		AssociateSymbolsToRegisters(symbolRegAllocs);
++		RegisterOccupancy occupancy;
++		AssociateSymbolsToRegisters(symbolRegAllocs, allocRange, occupancy);
++		CommitRegisterAllocation(basicBlock, allocRange, isLastRange, symbolRegAllocs, spillStatements, loadStatements);
+ 
+-		//Replace all references to symbols by references to allocated registers
+-		for(const auto& statementInfo : IndexedStatementList(basicBlock.statements))
+-		{
+-			auto& statement(statementInfo.statement);
+-			const auto& statementIdx(statementInfo.index);
+-			if(statementIdx < allocRange.first) continue;
+-			if(statementIdx > allocRange.second) break;
++		//Context symbols that can't stay in registers across guest memory ops get
++		//registers between them
++		AllocateGuestMemoryUnsafeSymbols(basicBlock, allocRange, occupancy, spillStatements, loadStatements);
++	}
+ 
+-			statement.VisitOperands(
+-			    [&](SymbolRefPtr& symbolRef, bool) {
+-				    auto symbol = symbolRef->GetSymbol();
+-				    auto symbolRegAllocIterator = symbolRegAllocs.find(symbol);
+-				    if(symbolRegAllocIterator != std::end(symbolRegAllocs))
+-				    {
+-					    const auto& symbolRegAlloc = symbolRegAllocIterator->second;
+-					    if(symbolRegAlloc.registerId != -1)
+-					    {
+-						    symbolRef = MakeSymbolRef(
+-						        symbolTable.MakeSymbol(symbolRegAlloc.registerType, symbolRegAlloc.registerId));
+-					    }
+-				    }
+-			    });
++	//Insert loads and spills
++	{
++		std::vector<StatementList::iterator> positions;
++		positions.reserve(basicBlock.statements.size() + 1);
++		for(auto it = basicBlock.statements.begin(); it != basicBlock.statements.end(); ++it)
++		{
++			positions.push_back(it);
+ 		}
++		positions.push_back(basicBlock.statements.end());
+ 
+-		//Prepare load and spills
+-		for(const auto& symbolRegAllocPair : symbolRegAllocs)
++		for(unsigned int index = 0; index < positions.size(); index++)
+ 		{
+-			const auto& symbol = symbolRegAllocPair.first;
+-			const auto& symbolRegAlloc = symbolRegAllocPair.second;
+-
+-			//Check if it's actually allocated
+-			if(symbolRegAlloc.registerId == -1) continue;
+-
+-			//firstUse == -1 means it is written to but never used afterwards in this block
+-
+-			//Do we need to load register at the beginning?
+-			//If symbol is read and we use this symbol before we define it, so we need to load it first
+-			if((symbolRegAlloc.firstUse != -1) && (symbolRegAlloc.firstUse <= symbolRegAlloc.firstDef))
++			for(auto it = spillStatements.lower_bound(index); it != spillStatements.upper_bound(index); ++it)
+ 			{
+-				STATEMENT statement;
+-				statement.op = OP_MOV;
+-				statement.dst = std::make_shared<CSymbolRef>(
+-				    symbolTable.MakeSymbol(symbolRegAlloc.registerType, symbolRegAlloc.registerId));
+-				statement.src1 = std::make_shared<CSymbolRef>(symbol);
+-
+-				loadStatements.insert(std::make_pair(allocRange.first, statement));
++				basicBlock.statements.insert(positions[index], it->second);
+ 			}
+-
+-			//If symbol is defined, we need to save it at the end
+-			//Exception: Temporaries can be discarded if we're in the last range of the block
+-			bool deadTemporary = symbol->IsTemporary() && isLastRange;
+-			if(!deadTemporary && (symbolRegAlloc.firstDef != -1))
++			for(auto it = loadStatements.lower_bound(index); it != loadStatements.upper_bound(index); ++it)
+ 			{
+-				STATEMENT statement;
+-				statement.op = OP_MOV;
+-				statement.dst = std::make_shared<CSymbolRef>(symbol);
+-				statement.src1 = std::make_shared<CSymbolRef>(
+-				    symbolTable.MakeSymbol(symbolRegAlloc.registerType, symbolRegAlloc.registerId));
+-
+-				spillStatements.insert(std::make_pair(allocRange.second, statement));
++				basicBlock.statements.insert(positions[index], it->second);
+ 			}
+ 		}
+ 	}
+@@ -112,95 +81,179 @@ void CJitter::AllocateRegisters(BASIC_BLOCK& basicBlock)
+ 	DumpStatementList(basicBlock.statements);
+ 	std::cout << std::endl;
+ #endif
++}
+ 
+-	std::map<unsigned int, StatementList::const_iterator> loadPoints;
+-	std::map<unsigned int, StatementList::const_iterator> spillPoints;
++void CJitter::CommitRegisterAllocation(BASIC_BLOCK& basicBlock, const AllocationRange& allocRange, bool isLastRange,
++                                       const SymbolRegAllocInfo& symbolRegAllocs, InsertionMap& spillStatements, InsertionMap& loadStatements)
++{
++	auto& symbolTable = basicBlock.symbolTable;
+ 
+-	//Load
+-	for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
++	//Replace all references to symbols by references to allocated registers
++	for(const auto& statementInfo : IndexedStatementList(basicBlock.statements))
+ 	{
++		auto& statement(statementInfo.statement);
+ 		const auto& statementIdx(statementInfo.index);
+-		if(loadStatements.find(statementIdx) != std::end(loadStatements))
++		if(statementIdx < allocRange.first) continue;
++		if(statementIdx > allocRange.second) break;
++
++		statement.VisitOperands(
++		    [&](SymbolRefPtr& symbolRef, bool) {
++			    auto symbolRegAllocIterator = symbolRegAllocs.find(symbolRef->GetSymbol());
++			    if(symbolRegAllocIterator == std::end(symbolRegAllocs)) return;
++			    const auto& symbolRegAlloc = symbolRegAllocIterator->second;
++			    if(symbolRegAlloc.registerId == -1) return;
++			    symbolRef = MakeSymbolRef(symbolTable.MakeSymbol(symbolRegAlloc.registerType, symbolRegAlloc.registerId));
++		    });
++	}
++
++	for(const auto& symbolRegAllocPair : symbolRegAllocs)
++	{
++		const auto& symbol = symbolRegAllocPair.first;
++		const auto& symbolRegAlloc = symbolRegAllocPair.second;
++
++		//Check if it's actually allocated
++		if(symbolRegAlloc.registerId == -1) continue;
++
++		//firstUse == -1 means it is written to but never used afterwards in this block
++
++		//If symbol is read and we use this symbol before we define it, so we need to load it first
++		if((symbolRegAlloc.firstUse != -1) && (symbolRegAlloc.firstUse <= symbolRegAlloc.firstDef))
+ 		{
+-			loadPoints.insert(std::make_pair(statementIdx, statementInfo.iterator));
++			STATEMENT statement;
++			statement.op = OP_MOV;
++			statement.dst = std::make_shared<CSymbolRef>(
++			    symbolTable.MakeSymbol(symbolRegAlloc.registerType, symbolRegAlloc.registerId));
++			statement.src1 = std::make_shared<CSymbolRef>(symbol);
++			loadStatements.insert(std::make_pair(symbolRegAlloc.firstUse, statement));
++		}
++
++		//If symbol is defined, we need to save it after its last definition
++		//Exception: Temporaries can be discarded if we're in the last range of the block
++		bool deadTemporary = symbol->IsTemporary() && isLastRange;
++		if(!deadTemporary && (symbolRegAlloc.firstDef != -1))
++		{
++			STATEMENT statement;
++			statement.op = OP_MOV;
++			statement.dst = std::make_shared<CSymbolRef>(symbol);
++			statement.src1 = std::make_shared<CSymbolRef>(
++			    symbolTable.MakeSymbol(symbolRegAlloc.registerType, symbolRegAlloc.registerId));
++			spillStatements.insert(std::make_pair(symbolRegAlloc.lastDef + 1, statement));
+ 		}
+ 	}
++}
+ 
+-	//Spill
++void CJitter::AllocateGuestMemoryUnsafeSymbols(BASIC_BLOCK& basicBlock, const AllocationRange& allocRange, RegisterOccupancy& occupancy,
++                                               InsertionMap& spillStatements, InsertionMap& loadStatements)
++{
++	//Sub ranges: statements between guest memory ops (the op ends its sub range)
++	std::vector<unsigned int> guestOpIndices;
+ 	for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
+ 	{
++		const auto& statement(statementInfo.statement);
+ 		const auto& statementIdx(statementInfo.index);
+-		if(spillStatements.find(statementIdx) != std::end(spillStatements))
++		if(statementIdx < allocRange.first) continue;
++		if(statementIdx > allocRange.second) break;
++		if((statement.op == OP_GUESTLOAD) || (statement.op == OP_GUESTSTORE))
+ 		{
+-			const auto& statement = statementInfo.statement;
+-			auto statementIterator = statementInfo.iterator;
+-			if(
+-			    (statement.op != OP_CONDJMP) &&
+-			    (statement.op != OP_JMP) &&
+-			    (statement.op != OP_CALL) &&
+-			    (statement.op != OP_EXTERNJMP) &&
+-			    (statement.op != OP_EXTERNJMP_DYN))
+-			{
+-				statementIterator++;
+-			}
+-			spillPoints.insert(std::make_pair(statementIdx, statementIterator));
++			guestOpIndices.push_back(statementIdx);
+ 		}
+ 	}
++	if(guestOpIndices.empty()) return;
+ 
+-	//Loads
+-	for(const auto& loadPoint : loadPoints)
++	AllocationRangeArray subRanges;
++	unsigned int subStart = allocRange.first;
++	for(auto guestOpIndex : guestOpIndices)
+ 	{
+-		unsigned int statementIndex = loadPoint.first;
+-		for(auto statementIterator = loadStatements.lower_bound(statementIndex);
+-		    statementIterator != loadStatements.upper_bound(statementIndex);
+-		    statementIterator++)
+-		{
+-			const auto& statement(statementIterator->second);
+-			basicBlock.statements.insert(loadPoint.second, statement);
+-		}
++		if(guestOpIndex > subStart) subRanges.push_back(std::make_pair(subStart, guestOpIndex));
++		subStart = guestOpIndex + 1;
+ 	}
++	if(subStart <= allocRange.second) subRanges.push_back(std::make_pair(subStart, allocRange.second));
+ 
+-	//Spills
+-	for(const auto& spillPoint : spillPoints)
++	for(const auto& subRange : subRanges)
+ 	{
+-		unsigned int statementIndex = spillPoint.first;
+-		for(auto statementIterator = spillStatements.lower_bound(statementIndex);
+-		    statementIterator != spillStatements.upper_bound(statementIndex);
+-		    statementIterator++)
++		SymbolRegAllocInfo symbolRegAllocs;
++		ComputeLivenessForRange(basicBlock, subRange, symbolRegAllocs);
++		MarkAliasedSymbols(basicBlock, subRange, symbolRegAllocs, false);
++
++		//Only unsafe symbols, not used by the guest memory op ending the sub range
++		//(they are loaded after the previous op and saved before the next one)
++		for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
+ 		{
+-			const auto& statement(statementIterator->second);
+-			basicBlock.statements.insert(spillPoint.second, statement);
++			const auto& statement(statementInfo.statement);
++			if(statementInfo.index != subRange.second) continue;
++			if((statement.op != OP_GUESTLOAD) && (statement.op != OP_GUESTSTORE)) break;
++			statement.VisitOperands(
++			    [&](const SymbolRefPtr& symbolRef, bool) {
++				    auto symbolIterator = symbolRegAllocs.find(symbolRef->GetSymbol());
++				    if(symbolIterator != std::end(symbolRegAllocs)) symbolIterator->second.aliased = true;
++			    });
++			break;
++		}
++		for(auto& symbolRegAllocPair : symbolRegAllocs)
++		{
++			if(IsGuestMemorySafeSymbol(symbolRegAllocPair.first.get()))
++			{
++				symbolRegAllocPair.second.aliased = true;
++			}
+ 		}
+-	}
+ 
+-#ifdef DUMP_STATEMENTS
+-	DumpStatementList(basicBlock.statements);
+-	std::cout << std::endl;
+-#endif
++		AssociateSymbolsToRegisters(symbolRegAllocs, subRange, occupancy);
++		CommitRegisterAllocation(basicBlock, subRange, false, symbolRegAllocs, spillStatements, loadStatements);
++	}
+ }
+ 
+-void CJitter::AssociateSymbolsToRegisters(SymbolRegAllocInfo& symbolRegAllocs) const
++void CJitter::AssociateSymbolsToRegisters(SymbolRegAllocInfo& symbolRegAllocs, const AllocationRange& allocRange, RegisterOccupancy& occupancy) const
+ {
+ 	//Some notes:
+ 	//- MD and FP registers are lumped together since MD registers are used for both
+ 	//  MD and FP operations on all of our target platforms.
++	//- A register can hold several symbols whose live intervals (first to last access)
++	//  in the range don't overlap.
++
++	unsigned int gprCount = m_codeGen->GetAvailableRegisterCount();
++	unsigned int mdCount = m_codeGen->GetAvailableMdRegisterCount();
++
++	auto getInterval =
++	    [&](const SymbolPtr&, const SYMBOL_REGALLOCINFO& symbolRegAlloc) {
++		    unsigned int start = std::min(symbolRegAlloc.firstUse, symbolRegAlloc.firstDef);
++		    unsigned int end = 0;
++		    if(symbolRegAlloc.lastUse != -1) end = std::max(end, symbolRegAlloc.lastUse);
++		    if(symbolRegAlloc.lastDef != -1) end = std::max(end, symbolRegAlloc.lastDef);
++		    assert((start >= allocRange.first) && (end <= allocRange.second) && (start <= end));
++		    return std::make_pair(start, end);
++	    };
+ 
+-	std::multimap<SYM_TYPE, unsigned int> availableRegisters;
+-	{
+-		unsigned int regCount = m_codeGen->GetAvailableRegisterCount();
+-		for(unsigned int i = 0; i < regCount; i++)
+-		{
+-			availableRegisters.insert(std::make_pair(SYM_REGISTER, i));
+-		}
+-	}
+-
+-	{
+-		unsigned int regCount = m_codeGen->GetAvailableMdRegisterCount();
+-		for(unsigned int i = 0; i < regCount; i++)
+-		{
+-			availableRegisters.insert(std::make_pair(SYM_REGISTER128, i));
+-		}
+-	}
++	//Best fit: prefer a register already holding other (non overlapping) intervals,
++	//keeping free registers for symbols live across the whole range
++	auto tryTakeRegister =
++	    [&](SYM_TYPE poolType, unsigned int poolCount, const std::pair<unsigned int, unsigned int>& interval) -> int {
++		    int bestRegister = -1;
++		    size_t bestOccupancy = 0;
++		    for(unsigned int i = 0; i < poolCount; i++)
++		    {
++			    const auto& intervals = occupancy[std::make_pair(poolType, i)];
++			    bool overlaps = false;
++			    for(const auto& other : intervals)
++			    {
++				    if((interval.first <= other.second) && (other.first <= interval.second))
++				    {
++					    overlaps = true;
++					    break;
++				    }
++			    }
++			    if(overlaps) continue;
++			    if((bestRegister == -1) || (intervals.size() > bestOccupancy))
++			    {
++				    bestRegister = i;
++				    bestOccupancy = intervals.size();
++			    }
++		    }
++		    if(bestRegister != -1)
++		    {
++			    occupancy[std::make_pair(poolType, bestRegister)].push_back(interval);
++		    }
++		    return bestRegister;
++	    };
+ 
+ 	bool fpInMdRegisters = m_codeGen->CanAllocateFpInMdRegisters();
+ 	auto isRegisterAllocatable =
+@@ -246,44 +299,36 @@ void CJitter::AssociateSymbolsToRegisters(SymbolRegAllocInfo& symbolRegAllocs) c
+ 
+ 	for(auto& symbolRegAllocPair : sortedSymbols)
+ 	{
+-		if(availableRegisters.empty()) break;
+-
+ 		const auto& symbol = symbolRegAllocPair->first;
+ 		auto& symbolRegAlloc = symbolRegAllocPair->second;
+ 
+ 		//Find suitable register for this symbol
+-		auto registerIterator = std::end(availableRegisters);
+-		auto registerIteratorEnd = std::end(availableRegisters);
++		auto poolType = SYM_REGISTER;
+ 		auto registerSymbolType = SYM_REGISTER;
+ 		if((symbol->m_type == SYM_RELATIVE) || (symbol->m_type == SYM_TEMPORARY))
+ 		{
+-			registerIterator = availableRegisters.lower_bound(SYM_REGISTER);
+-			registerIteratorEnd = availableRegisters.upper_bound(SYM_REGISTER);
+ 			registerSymbolType = SYM_REGISTER;
+ 		}
+ 		else if((symbol->m_type == SYM_REL_REFERENCE) || (symbol->m_type == SYM_TMP_REFERENCE))
+ 		{
+-			registerIterator = availableRegisters.lower_bound(SYM_REGISTER);
+-			registerIteratorEnd = availableRegisters.upper_bound(SYM_REGISTER);
+ 			registerSymbolType = SYM_REG_REFERENCE;
+ 		}
+ 		else if((symbol->m_type == SYM_FP_RELATIVE32) || (symbol->m_type == SYM_FP_TEMPORARY32))
+ 		{
+-			registerIterator = availableRegisters.lower_bound(SYM_REGISTER128);
+-			registerIteratorEnd = availableRegisters.upper_bound(SYM_REGISTER128);
++			poolType = SYM_REGISTER128;
+ 			registerSymbolType = SYM_FP_REGISTER32;
+ 		}
+ 		else if((symbol->m_type == SYM_RELATIVE128) || (symbol->m_type == SYM_TEMPORARY128))
+ 		{
+-			registerIterator = availableRegisters.lower_bound(SYM_REGISTER128);
+-			registerIteratorEnd = availableRegisters.upper_bound(SYM_REGISTER128);
++			poolType = SYM_REGISTER128;
+ 			registerSymbolType = SYM_REGISTER128;
+ 		}
+-		if(registerIterator != registerIteratorEnd)
++		int registerId = tryTakeRegister(poolType, (poolType == SYM_REGISTER) ? gprCount : mdCount,
++		                                 getInterval(symbol, symbolRegAlloc));
++		if(registerId != -1)
+ 		{
+ 			symbolRegAlloc.registerType = registerSymbolType;
+-			symbolRegAlloc.registerId = registerIterator->second;
+-			availableRegisters.erase(registerIterator);
++			symbolRegAlloc.registerId = registerId;
+ 		}
+ 	}
+ }
+@@ -331,6 +376,10 @@ void CJitter::ComputeLivenessForRange(const BASIC_BLOCK& basicBlock, const Alloc
+ 			    }
+ 		    });
+ 
++		//Parameters are read when the call is emitted: they are used up to the call
++		bool isParam = (statement.op == OP_PARAM) || (statement.op == OP_PARAM_RET);
++		unsigned int useIdx = isParam ? allocRange.second : statementIdx;
++
+ 		statement.VisitSources(
+ 		    [&](const SymbolRefPtr& symbolRef, bool) {
+ 			    auto symbol(symbolRef->GetSymbol());
+@@ -340,15 +389,15 @@ void CJitter::ComputeLivenessForRange(const BASIC_BLOCK& basicBlock, const Alloc
+ 			    {
+ 				    symbolRegAlloc.firstUse = statementIdx;
+ 			    }
+-			    if((symbolRegAlloc.lastUse == -1) || (statementIdx > symbolRegAlloc.lastUse))
++			    if((symbolRegAlloc.lastUse == -1) || (useIdx > symbolRegAlloc.lastUse))
+ 			    {
+-				    symbolRegAlloc.lastUse = statementIdx;
++				    symbolRegAlloc.lastUse = useIdx;
+ 			    }
+ 		    });
+ 	}
+ }
+ 
+-void CJitter::MarkAliasedSymbols(const BASIC_BLOCK& basicBlock, const AllocationRange& allocRange, SymbolRegAllocInfo& symbolRegAllocs) const
++void CJitter::MarkAliasedSymbols(const BASIC_BLOCK& basicBlock, const AllocationRange& allocRange, SymbolRegAllocInfo& symbolRegAllocs, bool checkGuestMemoryOps) const
+ {
+ 	bool hasGuestMemoryOp = false;
+ 	for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
+@@ -357,7 +406,7 @@ void CJitter::MarkAliasedSymbols(const BASIC_BLOCK& basicBlock, const Allocation
+ 		const auto& statementIdx(statementInfo.index);
+ 		if(statementIdx < allocRange.first) continue;
+ 		if(statementIdx > allocRange.second) break;
+-		if((statement.op == OP_GUESTLOAD) || (statement.op == OP_GUESTSTORE))
++		if(checkGuestMemoryOps && ((statement.op == OP_GUESTLOAD) || (statement.op == OP_GUESTSTORE)))
+ 		{
+ 			hasGuestMemoryOp = true;
+ 			break;

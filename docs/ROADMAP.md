@@ -76,7 +76,10 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 - [x] AArch32 JIT: FP32 values in registers s16-s23 (saved in the prologue only by blocks that use them)
 - [x] AArch32 JIT: chained frames between linked blocks (no prologue/epilogue per block jump)
 - [x] AArch32 JIT: fused guest memory ops: every EE/IOP load and store (8 to 128 bits, LWC1/SWC1) is one JIT op with an inline page-table fast path and an out-of-line handler call, so guest registers stay in host registers across memory accesses instead of being spilled and reloaded around each one (~40% faster on a memory-heavy EE loop under qemu; checksum test against the x86 reference)
+- [x] JIT register allocator: live intervals (load before first use, save after last write) so registers are shared between short-lived values; context state (PC, cycle quota, exception flags) allocated between guest memory ops; r9 as a 7th allocatable register
+- [x] MIPS branches without control flow (select) and a block epilogue with a fast path (quota left, no exception: one compare then jump to the linked block)
 - [ ] AArch32 JIT: page table pointer pinned in a host register
+- [ ] EE: track sign-extended 32-bit values in a block to skip upper-half work (64-bit compares, upper registers)
 - [ ] AArch32 JIT: keep guest registers in host registers across linked blocks
 - [ ] Optional accurate VU rounding (round toward zero) for games that need it (tri-Ace): ARMv7 NEON always rounds to nearest
 - [ ] VU1 microprogram recompiler profiling and tuning (often the 3D bottleneck)
