@@ -1,0 +1,205 @@
+diff --git a/Source/PS2VM.h b/Source/PS2VM.h
+--- a/Source/PS2VM.h
++++ b/Source/PS2VM.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <thread>
++#include <atomic>
+ #include <mutex>
+ #include <functional>
+ #include <condition_variable>
+@@ -23,6 +24,15 @@
+ class CPS2VM : public CVirtualMachine
+ {
+ public:
++	//SPU thread synchronization counters (since start)
++	uint32 GetSpuFullSyncCount() const
++	{
++		return m_spuFullSyncs;
++	}
++	uint32 GetSpuReadAccessCount() const
++	{
++		return m_spuReadAccesses;
++	}
+ 	struct CPU_UTILISATION_INFO
+ 	{
+ 		int32 eeTotalTicks = 0;
+@@ -139,6 +149,7 @@ private:
+ 	void RenderSpuBlock();
+ 	void SpuWorkerProc();
+ 	void SyncSpu();
++	void AccessSpuForRead(const std::function<void()>&);
+ 
+ 	void ReloadExecutable(const char*, const CPS2OS::ArgumentList&);
+ 	void OnExecutableChange();
+@@ -233,6 +244,14 @@ private:
+ 	bool QueueSpuWrite(uint32, uint32, bool);
+ 	bool m_spuRendering = false;
+ 	bool m_spuStopWorker = false;
++	bool m_spuWorkerSleeping = false;
++	unsigned int m_spuIdleWaiters = 0;
++	unsigned int m_spuPendingWrites = 0;
++	unsigned int m_spuPendingRenders = 0;
++	std::atomic<uint32> m_spuFullSyncs = 0;
++	std::atomic<uint32> m_spuReadAccesses = 0;
++	//Register reads may happen while this many audio blocks (~1ms each) are still queued
++	static constexpr unsigned int SPU_READ_MAX_LAG = 8;
+ 
+ 	CScreenPositionListener* m_gunListener = nullptr;
+ 	CScreenPositionListener* m_touchListener = nullptr;
+diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
+--- a/Source/PS2VM.cpp
++++ b/Source/PS2VM.cpp
+@@ -794,11 +794,14 @@ void CPS2VM::UpdateSpu()
+ {
+ 	if(m_spuThreaded)
+ 	{
++		bool wake = false;
+ 		{
+ 			std::lock_guard<std::mutex> lock(m_spuMutex);
+ 			m_spuWork.push_back(SPU_WORK{0, 0, SPU_WORK_RENDER});
++			m_spuPendingRenders++;
++			wake = m_spuWorkerSleeping;
+ 		}
+-		m_spuWorkCondition.notify_one();
++		if(wake) m_spuWorkCondition.notify_one();
+ 		return;
+ 	}
+ 	RenderSpuBlock();
+@@ -819,6 +822,7 @@ void CPS2VM::SetSpuThreaded(bool threaded, const std::function<void()>& workerIn
+ 		m_spuThreaded = false;
+ 		m_iop->m_spuSync = nullptr;
+ 		m_iop->m_spuQueueWrite = nullptr;
++		m_iop->m_spuReadAccess = nullptr;
+ 		return;
+ 	}
+ 	m_spuStopWorker = false;
+@@ -827,6 +831,9 @@ void CPS2VM::SetSpuThreaded(bool threaded, const std::function<void()>& workerIn
+ 	m_spuThreaded = true;
+ 	m_iop->m_spuSync = [this]() { SyncSpu(); };
+ 	m_iop->m_spuQueueWrite = [this](uint32 address, uint32 value, bool spu2) { return QueueSpuWrite(address, value, spu2); };
++	m_iop->m_spuReadAccess = [this](const std::function<void()>& access) { AccessSpuForRead(access); };
++	m_spuPendingWrites = 0;
++	m_spuPendingRenders = 0;
+ 	m_spuWorker = std::thread(
+ 	    [this, workerInit]() {
+ 		    if(workerInit) workerInit();
+@@ -839,7 +846,12 @@ void CPS2VM::SpuWorkerProc()
+ 	std::unique_lock<std::mutex> lock(m_spuMutex);
+ 	while(true)
+ 	{
+-		m_spuWorkCondition.wait(lock, [this]() { return !m_spuWork.empty() || m_spuStopWorker; });
++		if(m_spuWork.empty() && !m_spuStopWorker)
++		{
++			m_spuWorkerSleeping = true;
++			m_spuWorkCondition.wait(lock, [this]() { return !m_spuWork.empty() || m_spuStopWorker; });
++			m_spuWorkerSleeping = false;
++		}
+ 		if(m_spuWork.empty()) break; //stop requested and nothing left
+ 		auto work = m_spuWork.front();
+ 		m_spuWork.pop_front();
+@@ -855,7 +867,12 @@ void CPS2VM::SpuWorkerProc()
+ 		}
+ 		lock.lock();
+ 		m_spuRendering = false;
+-		if(m_spuWork.empty()) m_spuIdleCondition.notify_all();
++		if(work.kind == SPU_WORK_RENDER)
++			m_spuPendingRenders--;
++		else
++			m_spuPendingWrites--;
++		//Waiters check their own condition (full sync or read access)
++		if(m_spuIdleWaiters != 0) m_spuIdleCondition.notify_all();
+ 	}
+ }
+ 
+@@ -864,19 +881,45 @@ void CPS2VM::SyncSpu()
+ 	if(!m_spuThreaded) return;
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_SPU);
+ 	std::unique_lock<std::mutex> lock(m_spuMutex);
++	if(m_spuWork.empty() && !m_spuRendering) return;
++	m_spuFullSyncs++;
++	m_spuIdleWaiters++;
+ 	m_spuIdleCondition.wait(lock, [this]() { return m_spuWork.empty() && !m_spuRendering; });
++	m_spuIdleWaiters--;
++}
++
++void CPS2VM::AccessSpuForRead(const std::function<void()>& access)
++{
++	//The read needs every queued register write applied and the mixer paused
++	//between blocks; it may happen while a few audio blocks are still queued
++	//(the read then sees the mixing state a little earlier than inline).
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_SPU);
++	std::unique_lock<std::mutex> lock(m_spuMutex);
++	auto ready = [this]() { return !m_spuRendering && (m_spuPendingWrites == 0) && (m_spuPendingRenders <= SPU_READ_MAX_LAG); };
++	if(!ready())
++	{
++		m_spuReadAccesses++;
++		m_spuIdleWaiters++;
++		m_spuIdleCondition.wait(lock, ready);
++		m_spuIdleWaiters--;
++	}
++	//The worker can't start the next item while the lock is held
++	access();
+ }
+ 
+ bool CPS2VM::QueueSpuWrite(uint32 address, uint32 value, bool spu2)
+ {
+ 	//Register writes are applied by the worker in order with the audio
+-	//blocks, exactly where they would have happened inline; reads still sync.
++	//blocks, exactly where they would have happened inline.
++	bool wake = false;
+ 	{
+ 		std::lock_guard<std::mutex> lock(m_spuMutex);
+ 		if(m_spuWork.size() >= 8192) return false; //backpressure: caller syncs
+ 		m_spuWork.push_back(SPU_WORK{address, value, static_cast<uint8>(spu2 ? SPU_WORK_WRITE_SPU2 : SPU_WORK_WRITE_SPU1)});
++		m_spuPendingWrites++;
++		wake = m_spuWorkerSleeping;
+ 	}
+-	m_spuWorkCondition.notify_one();
++	if(wake) m_spuWorkCondition.notify_one();
+ 	return true;
+ }
+ 
+diff --git a/Source/iop/Iop_SubSystem.h b/Source/iop/Iop_SubSystem.h
+--- a/Source/iop/Iop_SubSystem.h
++++ b/Source/iop/Iop_SubSystem.h
+@@ -50,6 +50,9 @@ namespace Iop
+ 		std::function<bool(uint32, uint32, bool)> m_spuQueueWrite;
+ 		//Applies an SPU (spu2 = false: SPU1 range) register write.
+ 		void ApplySpuWrite(uint32 address, uint32 value, bool spu2);
++		//When set, runs a register read with the mixer paused, after all queued
++		//writes (mixing may lag a few blocks behind instead of a full sync).
++		std::function<void(const std::function<void()>&)> m_spuReadAccess;
+ 
+ 		CMIPS m_cpu;
+ 		CMA_MIPSIV m_cpuArch;
+diff --git a/Source/iop/Iop_SubSystem.cpp b/Source/iop/Iop_SubSystem.cpp
+--- a/Source/iop/Iop_SubSystem.cpp
++++ b/Source/iop/Iop_SubSystem.cpp
+@@ -244,6 +244,12 @@ uint32 CSubSystem::ReadIoRegister(uint32 address)
+ 	}
+ 	else if(address >= CSpu::SPU_BEGIN && address <= CSpu::SPU_END)
+ 	{
++		if(m_spuReadAccess)
++		{
++			uint32 result = 0;
++			m_spuReadAccess([&]() { result = m_spu.ReadRegister(address); });
++			return result;
++		}
+ 		SyncSpu();
+ 		return m_spu.ReadRegister(address);
+ 	}
+@@ -272,6 +278,12 @@ uint32 CSubSystem::ReadIoRegister(uint32 address)
+ #endif
+ 	else if(address >= CSpu2::REGS_BEGIN && address <= CSpu2::REGS_END)
+ 	{
++		if(m_spuReadAccess)
++		{
++			uint32 result = 0;
++			m_spuReadAccess([&]() { result = m_spu2.ReadRegister(address); });
++			return result;
++		}
+ 		SyncSpu();
+ 		return m_spu2.ReadRegister(address);
+ 	}

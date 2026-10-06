@@ -813,8 +813,24 @@ namespace
 				{
 					Gfx::Text(8, 60, COLOR_GREY, 0.7f, "Software renderer");
 				}
-				Gfx::Textf(8, 80, COLOR_GREY, 0.7f, "Audio tempo %.0f%%  underruns %u", CSH_Vita::GetTempo() * 100.0f,
-				           CSH_Vita::GetUnderruns());
+				{
+					//SPU thread waits per second (full syncs / register reads waiting on the mixer)
+					static uint64_t spuRateTime = 0;
+					static uint32_t spuLastFull = 0, spuLastRead = 0, spuFullRate = 0, spuReadRate = 0;
+					uint64_t now = sceKernelGetProcessTimeWide();
+					uint32_t fullSyncs = session->GetVm()->GetSpuFullSyncCount();
+					uint32_t readWaits = session->GetVm()->GetSpuReadAccessCount();
+					if(now - spuRateTime >= 1000000)
+					{
+						spuFullRate = fullSyncs - spuLastFull;
+						spuReadRate = readWaits - spuLastRead;
+						spuLastFull = fullSyncs;
+						spuLastRead = readWaits;
+						spuRateTime = now;
+					}
+					Gfx::Textf(8, 80, COLOR_GREY, 0.7f, "Audio tempo %.0f%%  underruns %u  spu waits/s %u+%u", CSH_Vita::GetTempo() * 100.0f,
+					           CSH_Vita::GetUnderruns(), spuFullRate, spuReadRate);
+				}
 				if(gpu)
 				{
 					const auto& d = displayLastSecond;
