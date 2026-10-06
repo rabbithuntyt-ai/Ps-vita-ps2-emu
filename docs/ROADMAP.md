@@ -79,7 +79,10 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 - [x] JIT register allocator: live intervals (load before first use, save after last write) so registers are shared between short-lived values; context state (PC, cycle quota, exception flags) allocated between guest memory ops; r9 as a 7th allocatable register
 - [x] MIPS branches without control flow (select) and a block epilogue with a fast path (quota left, no exception: one compare then jump to the linked block)
 - [ ] AArch32 JIT: page table pointer pinned in a host register
-- [ ] EE: track sign-extended 32-bit values in a block to skip upper-half work (64-bit compares, upper registers)
+- [x] EE: track sign-extended 32-bit values in a block: branches, SLT/SLTI, MOVZ/MOVN tests, AND/OR/XOR/NOR, ORI and register moves on them use the lower halves only (no 64-bit compares, upper halves not kept in registers)
+- [x] Random EE code fuzzer (tools/make_ee_fuzz_elf.py): checksums of all registers compared between x86, ARM and every JIT mode
+- [ ] EE: carry sign-extension knowledge across blocks (guarded block entry)
+- [ ] Jitter: keep register allocation across if/else diamonds (block epilogue still reloads state)
 - [ ] AArch32 JIT: keep guest registers in host registers across linked blocks
 - [ ] Optional accurate VU rounding (round toward zero) for games that need it (tri-Ace): ARMv7 NEON always rounds to nearest
 - [ ] VU1 microprogram recompiler profiling and tuning (often the 3D bottleneck)

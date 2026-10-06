@@ -14,6 +14,7 @@
 #include "ee/PS2OS.h"
 #include "ee/Vpu.h"
 #include "ee/Ee_SubSystem.h"
+#include "MA_MIPSIV.h"
 #if defined(__arm__)
 #include "Jitter_CodeGen_AArch32.h"
 #endif
@@ -284,6 +285,8 @@ CEmuSession::DEBUG_STATE CEmuSession::GetDebugState()
 
 void CEmuSession::SetSafeJit(bool safe)
 {
+	// EE: 64-bit compares/logic on known sign-extended values use 32-bit operations
+	CMA_MIPSIV::SetSignExtTracking(!safe);
 #if defined(__arm__)
 	Jitter::CCodeGen_AArch32::SetConservativeAllocation(safe);
 	// Shared frames across linked blocks (no prolog/epilog between blocks).

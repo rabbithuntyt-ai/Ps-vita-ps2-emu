@@ -312,6 +312,33 @@ else()
 					-DSUFFIX=_${EE_MEMORY_TEST}
 					-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ee_memory_test.cmake)
 		endforeach()
+		# Random EE integer code checked against reference checksums
+		foreach(EE_FUZZ_CASE "1;19501935" "2;DE6B896F" "3;8006134B")
+			list(GET EE_FUZZ_CASE 0 EE_FUZZ_SEED)
+			list(GET EE_FUZZ_CASE 1 EE_FUZZ_EXPECTED)
+			set(EE_FUZZ_MODES default)
+			if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
+				list(APPEND EE_FUZZ_MODES chained safe)
+			endif()
+			foreach(EE_FUZZ_MODE ${EE_FUZZ_MODES})
+				set(EE_FUZZ_NAME ee_fuzz_test_${EE_FUZZ_SEED}_${EE_FUZZ_MODE})
+				add_test(NAME ${EE_FUZZ_NAME}
+					COMMAND ${CMAKE_COMMAND}
+						-DPYTHON=${Python3_EXECUTABLE}
+						-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+						-DRUNNER=$<TARGET_FILE:vitaps2_host>
+						"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
+						-DSEED=${EE_FUZZ_SEED}
+						-DEXPECTED=${EE_FUZZ_EXPECTED}
+						-DSUFFIX=_${EE_FUZZ_SEED}_${EE_FUZZ_MODE}
+						-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ee_fuzz_test.cmake)
+				if(EE_FUZZ_MODE STREQUAL "chained")
+					set_tests_properties(${EE_FUZZ_NAME} PROPERTIES ENVIRONMENT CODEGEN_AARCH32_CHAINED=1)
+				elseif(EE_FUZZ_MODE STREQUAL "safe")
+					set_tests_properties(${EE_FUZZ_NAME} PROPERTIES ENVIRONMENT "CODEGEN_AARCH32_CONSERVATIVE=1;CODEGEN_AARCH32_NO_GUESTMEMOPS=1;PLAY_NO_SIGNEXT_TRACKING=1")
+				endif()
+			endforeach()
+		endforeach()
 		if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
 			set_tests_properties(ee_memory_test_chained PROPERTIES ENVIRONMENT CODEGEN_AARCH32_CHAINED=1)
 			set_tests_properties(ee_memory_test_safe_jit PROPERTIES ENVIRONMENT "CODEGEN_AARCH32_CONSERVATIVE=1;CODEGEN_AARCH32_NO_GUESTMEMOPS=1")

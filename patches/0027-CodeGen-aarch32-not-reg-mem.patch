@@ -1,0 +1,39 @@
+diff --git a/include/Jitter_CodeGen_AArch32.h b/include/Jitter_CodeGen_AArch32.h
+--- a/include/Jitter_CodeGen_AArch32.h
++++ b/include/Jitter_CodeGen_AArch32.h
+@@ -670,6 +670,7 @@ namespace Jitter
+ 		void Emit_Not_RegReg(const STATEMENT&);
+ 		void Emit_Not_MemReg(const STATEMENT&);
+ 		void Emit_Not_MemMem(const STATEMENT&);
++		void Emit_Not_RegMem(const STATEMENT&);
+ 
+ 		//RELTOREF
+ 		void Emit_RelToRef_VarCst(const STATEMENT&);
+diff --git a/src/Jitter_CodeGen_AArch32.cpp b/src/Jitter_CodeGen_AArch32.cpp
+--- a/src/Jitter_CodeGen_AArch32.cpp
++++ b/src/Jitter_CodeGen_AArch32.cpp
+@@ -285,6 +285,7 @@ CCodeGen_AArch32::CONSTMATCHER CCodeGen_AArch32::g_constMatchers[] =
+ 	{ OP_NOT, MATCH_REGISTER, MATCH_REGISTER, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Not_RegReg },
+ 	{ OP_NOT, MATCH_MEMORY,   MATCH_REGISTER, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Not_MemReg },
+ 	{ OP_NOT, MATCH_MEMORY,   MATCH_MEMORY,   MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Not_MemMem },
++	{ OP_NOT, MATCH_REGISTER, MATCH_MEMORY,   MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Not_RegMem },
+ 	
+ 	{ OP_DIV,  MATCH_TEMPORARY64, MATCH_ANY, MATCH_ANY, MATCH_NIL, &CCodeGen_AArch32::Emit_DivTmp64AnyAny<false> },
+ 	{ OP_DIVS, MATCH_TEMPORARY64, MATCH_ANY, MATCH_ANY, MATCH_NIL, &CCodeGen_AArch32::Emit_DivTmp64AnyAny<true>  },
+@@ -2043,6 +2044,16 @@ void CCodeGen_AArch32::Emit_Not_MemReg(const STATEMENT& statement)
+ 	StoreRegisterInMemory(dst, dstReg);
+ }
+ 
++void CCodeGen_AArch32::Emit_Not_RegMem(const STATEMENT& statement)
++{
++	auto dst = statement.dst->GetSymbol().get();
++	auto src1 = statement.src1->GetSymbol().get();
++
++	auto srcReg = CAArch32Assembler::r0;
++	LoadMemoryInRegister(srcReg, src1);
++	m_assembler.Mvn(g_registers[dst->m_valueLow], srcReg);
++}
++
+ void CCodeGen_AArch32::Emit_Not_MemMem(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();

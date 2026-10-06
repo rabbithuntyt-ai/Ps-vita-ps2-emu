@@ -1,0 +1,359 @@
+diff --git a/Source/MA_MIPSIV.h b/Source/MA_MIPSIV.h
+--- a/Source/MA_MIPSIV.h
++++ b/Source/MA_MIPSIV.h
+@@ -105,6 +105,18 @@ protected:
+ 
+ 	bool Ensure64BitRegs();
+ 
++	//Registers known to hold a sign-extended 32-bit value (upper half equal to the
++	//sign of the lower half) at the current point of the block being compiled.
++	//64-bit compares and logic ops on them only need the lower halves.
++	bool IsSignExt32(unsigned int reg) const;
++	uint32 ComputeSignExtKnowledge() const;
++	uint32 m_signExtKnown = 0;
++
++public:
++	static void SetSignExtTracking(bool);
++
++protected:
++
+ 	void Template_Add32(bool);
+ 	void Template_Add64(bool);
+ 	void Template_Sub32(bool);
+@@ -121,6 +133,7 @@ protected:
+ 	void Template_BranchEq(bool, bool);
+ 	void Template_BranchGez(bool, bool);
+ 	void Template_BranchLez(bool, bool);
++	void Template_Logic32SignExt(const TemplateOperationFunctionType&);
+ 
+ private:
+ 	void SetupInstructionTables();
+diff --git a/Source/MA_MIPSIV.cpp b/Source/MA_MIPSIV.cpp
+--- a/Source/MA_MIPSIV.cpp
++++ b/Source/MA_MIPSIV.cpp
+@@ -251,6 +251,147 @@ bool CMA_MIPSIV::Ensure64BitRegs()
+ 	return true;
+ }
+ 
++static bool g_signExtTracking = (getenv("PLAY_NO_SIGNEXT_TRACKING") == nullptr);
++
++void CMA_MIPSIV::SetSignExtTracking(bool enabled)
++{
++	g_signExtTracking = enabled;
++}
++
++bool CMA_MIPSIV::IsSignExt32(unsigned int reg) const
++{
++	return (reg == 0) || ((m_signExtKnown & (1 << reg)) != 0);
++}
++
++//Knowledge after the current instruction (computed before it is compiled, since
++//destination and sources can be the same register)
++uint32 CMA_MIPSIV::ComputeSignExtKnowledge() const
++{
++	uint32 known = m_signExtKnown;
++	auto set = [&](unsigned int reg, bool isKnown) {
++		if(reg == 0) return;
++		if(isKnown)
++			known |= (1 << reg);
++		else
++			known &= ~(1 << reg);
++	};
++	uint32 op = m_nOpcode >> 26;
++	switch(op)
++	{
++	case 0x00: //SPECIAL
++		switch(m_nOpcode & 0x3F)
++		{
++		case 0x00: //SLL
++		case 0x02: //SRL
++		case 0x03: //SRA
++		case 0x04: //SLLV
++		case 0x06: //SRLV
++		case 0x07: //SRAV
++		case 0x20: //ADD
++		case 0x21: //ADDU
++		case 0x22: //SUB
++		case 0x23: //SUBU
++		case 0x2A: //SLT
++		case 0x2B: //SLTU
++			set(m_nRD, true);
++			break;
++		case 0x0A: //MOVZ
++		case 0x0B: //MOVN
++			set(m_nRD, IsSignExt32(m_nRD) && IsSignExt32(m_nRS));
++			break;
++		case 0x24: //AND
++		case 0x25: //OR
++		case 0x26: //XOR
++		case 0x27: //NOR
++			set(m_nRD, IsSignExt32(m_nRS) && IsSignExt32(m_nRT));
++			break;
++		case 0x2D: //DADDU
++			set(m_nRD, ((m_nRT == 0) && IsSignExt32(m_nRS)) || ((m_nRS == 0) && IsSignExt32(m_nRT)));
++			break;
++		case 0x08: //JR
++		case 0x0F: //SYNC
++		case 0x11: //MTHI
++		case 0x13: //MTLO
++			break;
++		case 0x0C: //SYSCALL
++		case 0x0D: //BREAK
++			known = 0;
++			break;
++		default:
++			set(m_nRD, false);
++			break;
++		}
++		break;
++	case 0x01: //REGIMM
++		if((m_nRT & 0x1C) == 0x10) set(31, false); //Branch and link
++		else if(m_nRT >= 0x18) known = 0;
++		break;
++	case 0x02: //J
++	case 0x04: //BEQ
++	case 0x05: //BNE
++	case 0x06: //BLEZ
++	case 0x07: //BGTZ
++	case 0x14: //BEQL
++	case 0x15: //BNEL
++	case 0x16: //BLEZL
++	case 0x17: //BGTZL
++	case 0x1F: //SQ
++	case 0x28: //SB
++	case 0x29: //SH
++	case 0x2A: //SWL
++	case 0x2B: //SW
++	case 0x2C: //SDL
++	case 0x2D: //SDR
++	case 0x2E: //SWR
++	case 0x2F: //CACHE
++	case 0x31: //LWC1
++	case 0x33: //PREF
++	case 0x36: //LQC2
++	case 0x39: //SWC1
++	case 0x3E: //SQC2
++	case 0x3F: //SD
++		break;
++	case 0x03: //JAL
++		set(31, false);
++		break;
++	case 0x08: //ADDI
++	case 0x09: //ADDIU
++	case 0x0A: //SLTI
++	case 0x0B: //SLTIU
++	case 0x0C: //ANDI
++	case 0x0F: //LUI
++	case 0x20: //LB
++	case 0x21: //LH
++	case 0x22: //LWL
++	case 0x23: //LW
++	case 0x24: //LBU
++	case 0x25: //LHU
++	case 0x26: //LWR
++		set(m_nRT, true);
++		break;
++	case 0x0D: //ORI
++	case 0x0E: //XORI
++		set(m_nRT, IsSignExt32(m_nRS));
++		break;
++	case 0x10: //COP0
++	case 0x11: //COP1
++	case 0x12: //COP2
++	case 0x18: //DADDI
++	case 0x19: //DADDIU
++	case 0x1A: //LDL
++	case 0x1B: //LDR
++	case 0x1E: //LQ
++	case 0x27: //LWU
++	case 0x37: //LD
++		set(m_nRT, false);
++		break;
++	default:
++		known = 0;
++		break;
++	}
++	return known;
++}
++
+ void CMA_MIPSIV::CompileInstruction(uint32 address, CMipsJitter* codeGen, CMIPS* ctx, uint32 instrPosition)
+ {
+ 	SetupQuickVariables(address, codeGen, ctx, instrPosition);
+@@ -261,10 +402,19 @@ void CMA_MIPSIV::CompileInstruction(uint32 address, CMipsJitter* codeGen, CMIPS*
+ 	m_nSA = (uint8)((m_nOpcode >> 6) & 0x1F);
+ 	m_nImmediate = (uint16)(m_nOpcode & 0xFFFF);
+ 
++	//Nothing is known at the start of a block
++	if((instrPosition == 0) || !g_signExtTracking || (m_regSize != MIPS_REGSIZE_64))
++	{
++		m_signExtKnown = 0;
++	}
++	uint32 nextKnown = ComputeSignExtKnowledge();
++
+ 	if(m_nOpcode)
+ 	{
+ 		m_pOpGeneral[(m_nOpcode >> 26)]();
+ 	}
++
++	m_signExtKnown = (g_signExtTracking && (m_regSize == MIPS_REGSIZE_64)) ? nextKnown : 0;
+ }
+ 
+ void CMA_MIPSIV::SPECIAL()
+@@ -439,7 +589,15 @@ void CMA_MIPSIV::ORI()
+ 	//Higher 32-bits (only if registers are different)
+ 	if((m_regSize == MIPS_REGSIZE_64) && (m_nRS != m_nRT))
+ 	{
+-		m_codeGen->PushRel(offsetof(CMIPS, m_State.nGPR[m_nRS].nV[1]));
++		if(IsSignExt32(m_nRS))
++		{
++			m_codeGen->PushRel(offsetof(CMIPS, m_State.nGPR[m_nRT].nV[0]));
++			m_codeGen->SignExt();
++		}
++		else
++		{
++			m_codeGen->PushRel(offsetof(CMIPS, m_State.nGPR[m_nRS].nV[1]));
++		}
+ 		m_codeGen->PullRel(offsetof(CMIPS, m_State.nGPR[m_nRT].nV[1]));
+ 	}
+ }
+@@ -1115,6 +1273,10 @@ void CMA_MIPSIV::AND()
+ 		m_codeGen->And();
+ 		m_codeGen->PullRel(offsetof(CMIPS, m_State.nGPR[m_nRD].nV[0]));
+ 	}
++	else if(IsSignExt32(m_nRS) && IsSignExt32(m_nRT))
++	{
++		Template_Logic32SignExt([this]() { m_codeGen->And(); });
++	}
+ 	else
+ 	{
+ 		m_codeGen->PushRel64(offsetof(CMIPS, m_State.nGPR[m_nRS].nV[0]));
+@@ -1129,6 +1291,12 @@ void CMA_MIPSIV::OR()
+ {
+ 	if(m_nRD == 0) return;
+ 
++	if((m_regSize == MIPS_REGSIZE_64) && IsSignExt32(m_nRS) && IsSignExt32(m_nRT))
++	{
++		Template_Logic32SignExt([this]() { m_codeGen->Or(); });
++		return;
++	}
++
+ 	//TODO: Use a 64-bits op
+ 	unsigned int regCount = (m_regSize == MIPS_REGSIZE_64) ? 2 : 1;
+ 	for(unsigned int i = 0; i < regCount; i++)
+@@ -1147,6 +1315,12 @@ void CMA_MIPSIV::XOR()
+ {
+ 	if(m_nRD == 0) return;
+ 
++	if((m_regSize == MIPS_REGSIZE_64) && IsSignExt32(m_nRS) && IsSignExt32(m_nRT))
++	{
++		Template_Logic32SignExt([this]() { m_codeGen->Xor(); });
++		return;
++	}
++
+ 	unsigned int regCount = (m_regSize == MIPS_REGSIZE_64) ? 2 : 1;
+ 	for(unsigned int i = 0; i < regCount; i++)
+ 	{
+@@ -1164,6 +1338,12 @@ void CMA_MIPSIV::NOR()
+ {
+ 	if(m_nRD == 0) return;
+ 
++	if((m_regSize == MIPS_REGSIZE_64) && IsSignExt32(m_nRS) && IsSignExt32(m_nRT))
++	{
++		Template_Logic32SignExt([this]() { m_codeGen->Or(); m_codeGen->Not(); });
++		return;
++	}
++
+ 	unsigned int regCount = (m_regSize == MIPS_REGSIZE_64) ? 2 : 1;
+ 	for(unsigned int i = 0; i < regCount; i++)
+ 	{
+@@ -1198,6 +1378,17 @@ void CMA_MIPSIV::DADD()
+ //2D
+ void CMA_MIPSIV::DADDU()
+ {
++	//Register move of a sign-extended value
++	if((m_regSize == MIPS_REGSIZE_64) && (m_nRD != 0) &&
++	   (((m_nRT == 0) && IsSignExt32(m_nRS)) || ((m_nRS == 0) && IsSignExt32(m_nRT))))
++	{
++		m_codeGen->PushRel(offsetof(CMIPS, m_State.nGPR[(m_nRT == 0) ? m_nRS : m_nRT].nV[0]));
++		m_codeGen->PushTop();
++		m_codeGen->SignExt();
++		m_codeGen->PullRel(offsetof(CMIPS, m_State.nGPR[m_nRD].nV[1]));
++		m_codeGen->PullRel(offsetof(CMIPS, m_State.nGPR[m_nRD].nV[0]));
++		return;
++	}
+ 	Template_Add64(false);
+ }
+ 
+diff --git a/Source/MA_MIPSIV_Templates.cpp b/Source/MA_MIPSIV_Templates.cpp
+--- a/Source/MA_MIPSIV_Templates.cpp
++++ b/Source/MA_MIPSIV_Templates.cpp
+@@ -405,7 +405,7 @@ void CMA_MIPSIV::Template_MovEqual(bool isEqual)
+ {
+ 	if(m_nRD == 0) return;
+ 
+-	if(m_regSize == MIPS_REGSIZE_32)
++	if((m_regSize == MIPS_REGSIZE_32) || IsSignExt32(m_nRT))
+ 	{
+ 		m_codeGen->PushRel(offsetof(CMIPS, m_State.nGPR[m_nRT].nV[0]));
+ 	}
+@@ -435,7 +435,8 @@ void CMA_MIPSIV::Template_SetLessThanImm(bool isSigned)
+ {
+ 	Jitter::CONDITION condition = isSigned ? Jitter::CONDITION_LT : Jitter::CONDITION_BL;
+ 
+-	if(m_regSize == MIPS_REGSIZE_32)
++	//Sign-extended values compare like their lower halves (signed and unsigned)
++	if((m_regSize == MIPS_REGSIZE_32) || IsSignExt32(m_nRS))
+ 	{
+ 		m_codeGen->PushRel(offsetof(CMIPS, m_State.nGPR[m_nRS].nV[0]));
+ 		m_codeGen->PushCst(static_cast<int16>(m_nImmediate));
+@@ -463,7 +464,7 @@ void CMA_MIPSIV::Template_SetLessThanReg(bool isSigned)
+ {
+ 	Jitter::CONDITION condition = isSigned ? Jitter::CONDITION_LT : Jitter::CONDITION_BL;
+ 
+-	if(m_regSize == MIPS_REGSIZE_32)
++	if((m_regSize == MIPS_REGSIZE_32) || (IsSignExt32(m_nRS) && IsSignExt32(m_nRT)))
+ 	{
+ 		m_codeGen->PushRel(offsetof(CMIPS, m_State.nGPR[m_nRS].nV[0]));
+ 		m_codeGen->PushRel(offsetof(CMIPS, m_State.nGPR[m_nRT].nV[0]));
+@@ -486,9 +487,22 @@ void CMA_MIPSIV::Template_SetLessThanReg(bool isSigned)
+ 	}
+ }
+ 
++//rd = rs op rt on the lower halves; the upper half is the sign of the result
++//(both sources are sign-extended 32-bit values)
++void CMA_MIPSIV::Template_Logic32SignExt(const TemplateOperationFunctionType& function)
++{
++	m_codeGen->PushRel(offsetof(CMIPS, m_State.nGPR[m_nRS].nV[0]));
++	m_codeGen->PushRel(offsetof(CMIPS, m_State.nGPR[m_nRT].nV[0]));
++	function();
++	m_codeGen->PushTop();
++	m_codeGen->SignExt();
++	m_codeGen->PullRel(offsetof(CMIPS, m_State.nGPR[m_nRD].nV[1]));
++	m_codeGen->PullRel(offsetof(CMIPS, m_State.nGPR[m_nRD].nV[0]));
++}
++
+ void CMA_MIPSIV::Template_BranchEq(bool condition, bool likely)
+ {
+-	if(m_regSize == MIPS_REGSIZE_32)
++	if((m_regSize == MIPS_REGSIZE_32) || (IsSignExt32(m_nRS) && IsSignExt32(m_nRT)))
+ 	{
+ 		m_codeGen->PushRel(offsetof(CMIPS, m_State.nGPR[m_nRS].nV[0]));
+ 		m_codeGen->PushRel(offsetof(CMIPS, m_State.nGPR[m_nRT].nV[0]));
+@@ -516,7 +530,7 @@ void CMA_MIPSIV::Template_BranchEq(bool condition, bool likely)
+ 
+ void CMA_MIPSIV::Template_BranchGez(bool condition, bool likely)
+ {
+-	if(m_regSize == MIPS_REGSIZE_32)
++	if((m_regSize == MIPS_REGSIZE_32) || IsSignExt32(m_nRS))
+ 	{
+ 		m_codeGen->PushRel(offsetof(CMIPS, m_State.nGPR[m_nRS].nV[0]));
+ 	}
+@@ -546,7 +560,7 @@ void CMA_MIPSIV::Template_BranchLez(bool condition, bool likely)
+ {
+ 	Jitter::CONDITION branchCondition;
+ 
+-	if(m_regSize == MIPS_REGSIZE_32)
++	if((m_regSize == MIPS_REGSIZE_32) || IsSignExt32(m_nRS))
+ 	{
+ 		m_codeGen->PushRel(offsetof(CMIPS, m_State.nGPR[m_nRS].nV[0]));
+ 		m_codeGen->PushCst(0);
