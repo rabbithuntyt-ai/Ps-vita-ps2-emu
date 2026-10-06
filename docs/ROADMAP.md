@@ -41,6 +41,11 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 - [ ] Adaptive internal resolution / interlaced rendering driven by frame time
 - [ ] Automatic frame skip that never skips two frames in a row
 - [ ] Fast-forward key and turbo mode
+- [ ] Sharpening upscaler for the 960x544 screen (FSR-style / xBR shader on the GPU): image quality
+- [ ] Frame generation ("Lossless Scaling" style) for games whose logic already runs at full
+      speed but render at 30 fps or with frame skip: GPU-blended in-between frames first,
+      then motion-compensated interpolation (block motion search on the GPU). Smoothness
+      only: it can't speed up game logic, and adds about a frame of latency
 
 ## Phase 4: GS renderer speed
 
@@ -81,6 +86,8 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 - [x] MTVU: no deadlock when a program waits for VIF1 data (bounded vblank / register waits)
 - [x] SPU2 mixer: per-voice block loop (bit-identical output, ~1.45x faster; golden test)
 - [x] SPU2 mixing on its own core: the IOP syncs before touching SPU state; IRQ flag polled atomically
+- [x] SPU2: silent voices skip mixing (bit-identical, 22x less SPU work with no sound)
+- [x] Emulation thread profiler (time per subsystem on the overlay)
 - [ ] MTVU: sync EE direct VU1 data memory accesses (currently unsynchronized, like unsafe games on real hardware)
 - [ ] Thread and core layout tuning (affinity for EE, GS, worker, audio)
 - [ ] Explore unlocking part of the 4th core for audio/IOP
