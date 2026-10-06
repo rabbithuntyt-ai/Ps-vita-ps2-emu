@@ -1,0 +1,309 @@
+diff --git a/Source/MIPS.h b/Source/MIPS.h
+--- a/Source/MIPS.h
++++ b/Source/MIPS.h
+@@ -171,6 +171,10 @@ public:
+ 	void* m_vuMem = nullptr;
+ 	void** m_pageLookup = nullptr;
+ 
++	//Scratch for the VU compiler: sticky flags accumulated within a block
++	//(only live while a block runs, not part of the saved state)
++	uint32 m_vuStickyAccumulator = 0;
++
+ 	std::function<void(CMIPS*)> m_emptyBlockHandler;
+ 
+ 	CMIPSArchitecture* m_pArch = nullptr;
+diff --git a/Source/ee/VUShared.h b/Source/ee/VUShared.h
+--- a/Source/ee/VUShared.h
++++ b/Source/ee/VUShared.h
+@@ -98,8 +98,14 @@ namespace VUShared
+ 		COMPILEHINT_SKIP_FMAC_UPDATE = (1 << 0),
+ 		COMPILEHINT_USE_ACCURATE_ADDI = (1 << 1), //For decompression in Tri-Ace games
+ 		COMPILEHINT_NO_CLAMPING = (1 << 2),
++		//Sticky flags are OR'ed into CMIPS::m_vuStickyAccumulator; the block
++		//queues them in the sticky pipeline later
++		COMPILEHINT_DEFER_STICKY = (1 << 3),
+ 	};
+ 
++	//Queues the accumulated sticky flags as one sticky pipeline entry
++	void FlushDeferredSticky(CMipsJitter*, uint32 relativePipeTime);
++
+ 	static bool UseClamping(uint32 compileHints)
+ 	{
+ 		return (compileHints & COMPILEHINT_NO_CLAMPING) == 0;
+diff --git a/Source/ee/VUShared.cpp b/Source/ee/VUShared.cpp
+--- a/Source/ee/VUShared.cpp
++++ b/Source/ee/VUShared.cpp
+@@ -265,6 +265,14 @@ void VUShared::TestSZFlags(CMipsJitter* codeGen, uint8 dest, size_t regOffset, u
+ 	}
+ 
+ 	//Update sticky flags
++	if(compileHints & COMPILEHINT_DEFER_STICKY)
++	{
++		codeGen->PushTop();
++		codeGen->PushRel(offsetof(CMIPS, m_vuStickyAccumulator));
++		codeGen->Or();
++		codeGen->PullRel(offsetof(CMIPS, m_vuStickyAccumulator));
++	}
++	else
+ 	{
+ 		codeGen->PushTop();
+ 
+@@ -295,6 +303,27 @@ void VUShared::TestSZFlags(CMipsJitter* codeGen, uint8 dest, size_t regOffset, u
+ 	}
+ }
+ 
++void VUShared::FlushDeferredSticky(CMipsJitter* codeGen, uint32 relativePipeTime)
++{
++	codeGen->PushRel(offsetof(CMIPS, m_vuStickyAccumulator));
++
++	//Load previous value
++	{
++		codeGen->PushRelAddrRef(offsetof(CMIPS, m_State.pipeSticky.values));
++
++		codeGen->PushRel(offsetof(CMIPS, m_State.pipeSticky.index));
++		codeGen->PushCst(1);
++		codeGen->Sub();
++		codeGen->PushCst(FLAG_PIPELINE_SLOTS - 1);
++		codeGen->And();
++
++		codeGen->LoadFromRefIdx();
++	}
++
++	codeGen->Or();
++	QueueInFlagPipeline(g_pipeInfoSticky, codeGen, LATENCY_MAC, relativePipeTime);
++}
++
+ void VUShared::GetStatus(CMipsJitter* codeGen, size_t dstOffset, uint32 relativePipeTime)
+ {
+ 	//Get STATUS flag using information from other values (MACflags and sticky flags)
+diff --git a/Source/ee/VuBasicBlock.h b/Source/ee/VuBasicBlock.h
+--- a/Source/ee/VuBasicBlock.h
++++ b/Source/ee/VuBasicBlock.h
+@@ -41,6 +41,7 @@ private:
+ 	INTEGER_BRANCH_DELAY_INFO ComputeTrailingIntegerBranchDelayInfo(const std::vector<uint32>&) const;
+ 	bool CheckIsSpecialIntegerLoop(unsigned int) const;
+ 	void ComputeSkipFlagsHints(const std::vector<uint32>&, std::vector<uint32>&) const;
++	uint32 ComputeDeferStickyHints(const std::vector<uint32>&, std::vector<uint32>&) const;
+ 	BlockFmacPipelineInfo ComputeFmacStallDelays(uint32, uint32) const;
+ 	static void EmitXgKick(CMipsJitter*);
+ 
+diff --git a/Source/ee/VuBasicBlock.cpp b/Source/ee/VuBasicBlock.cpp
+--- a/Source/ee/VuBasicBlock.cpp
++++ b/Source/ee/VuBasicBlock.cpp
+@@ -42,6 +42,12 @@ void CVuBasicBlock::CompileRange(CMipsJitter* jitter)
+ 	hints.resize(maxInstructions);
+ 
+ 	ComputeSkipFlagsHints(fmacPipelineInfo.stallDelays, hints);
++	uint32 stickyFlushIndex = ComputeDeferStickyHints(fmacPipelineInfo.stallDelays, hints);
++	if(stickyFlushIndex != -1)
++	{
++		jitter->PushCst(0);
++		jitter->PullRel(offsetof(CMIPS, m_vuStickyAccumulator));
++	}
+ 
+ 	uint32 relativePipeTime = 0;
+ 	uint32 instructionIndex = 0;
+@@ -314,6 +320,12 @@ void CVuBasicBlock::CompileRange(CMipsJitter* jitter)
+ 			assert(!hasPendingXgKick);
+ 			hasPendingXgKick = true;
+ 		}
++
++		if(instructionIndex == stickyFlushIndex)
++		{
++			VUShared::FlushDeferredSticky(jitter, relativePipeTime);
++		}
++
+ 		//Adjust pipeTime
+ 		relativePipeTime++;
+ 		instructionIndex++;
+@@ -571,6 +583,50 @@ void CVuBasicBlock::EmitXgKick(CMipsJitter* jitter)
+ 	jitter->Call(reinterpret_cast<void*>(&MemoryUtils_SetWordProxy), 3, Jitter::CJitter::RETURN_VALUE_NONE);
+ }
+ 
++//Sticky flags are cumulative: when nothing in the block reads or sets the status,
++//the entries of FMAC instructions that become visible before the block ends can be
++//merged into one (queued after the last of them). Returns that instruction's index.
++uint32 CVuBasicBlock::ComputeDeferStickyHints(const std::vector<uint32>& fmacStallDelays, std::vector<uint32>& hints) const
++{
++	static const bool disabled = (getenv("PLAY_NO_VU_STICKY_DEFER") != nullptr);
++	if(disabled) return -1;
++
++	auto arch = static_cast<CMA_VU*>(m_context.m_pArch);
++	uint32 maxInstructions = static_cast<uint32>(hints.size());
++
++	uint32 maxPipeTime = maxInstructions;
++	for(const auto& fmacStallDelay : fmacStallDelays)
++		maxPipeTime += fmacStallDelay;
++
++	std::vector<uint32> deferred;
++	uint32 relativePipeTime = 0;
++	for(uint32 address = m_begin; address <= m_end; address += 8)
++	{
++		uint32 instructionIndex = (address - m_begin) / 8;
++		uint32 opcodeLo = m_context.m_pMemoryMap->GetInstruction(address + 0);
++		uint32 opcodeHi = m_context.m_pMemoryMap->GetInstruction(address + 4);
++
++		//FSEQ/FSSET/FSAND/FSOR (lower opcodes 0x14-0x17) read or set the status
++		uint32 loOp = (opcodeLo >> 25) & 0x7F;
++		if((loOp >= 0x14) && (loOp <= 0x17)) return -1;
++
++		auto hiOps = arch->GetAffectedOperands(&m_context, address + 4, opcodeHi);
++		relativePipeTime += fmacStallDelays[instructionIndex];
++		if(hiOps.writeMACflags && ((relativePipeTime + VUShared::LATENCY_MAC) < maxPipeTime))
++		{
++			deferred.push_back(instructionIndex);
++		}
++		relativePipeTime++;
++	}
++
++	if(deferred.size() < 2) return -1;
++	for(auto instructionIndex : deferred)
++	{
++		hints[instructionIndex] |= VUShared::COMPILEHINT_DEFER_STICKY;
++	}
++	return deferred.back();
++}
++
+ void CVuBasicBlock::ComputeSkipFlagsHints(const std::vector<uint32>& fmacStallDelays, std::vector<uint32>& hints) const
+ {
+ 	static const uint32 g_undefinedMACflagsResult = -1;
+diff --git a/tools/VuTest/Main.cpp b/tools/VuTest/Main.cpp
+--- a/tools/VuTest/Main.cpp
++++ b/tools/VuTest/Main.cpp
+@@ -12,6 +12,7 @@
+ #include "FlagsTest2.h"
+ #include "FlagsTest3.h"
+ #include "FlagsTest4.h"
++#include "StickyFlagsTest.h"
+ #include "IntBranchDelayTest.h"
+ #include "IntBranchDelayTest2.h"
+ #include "IntBranchDelayTest3.h"
+@@ -39,6 +40,7 @@ static const TestFactoryFunction s_factories[] =
+ 	[]() { return new CFlagsTest2(); },
+ 	[]() { return new CFlagsTest3(); },
+ 	[]() { return new CFlagsTest4(); },
++	[]() { return new CStickyFlagsTest(); },
+ 	[]() { return new CIntBranchDelayTest(); },
+ 	[]() { return new CIntBranchDelayTest2(); },
+ 	[]() { return new CIntBranchDelayTest3(); },
+diff --git a/tools/VuTest/CMakeLists.txt b/tools/VuTest/CMakeLists.txt
+--- a/tools/VuTest/CMakeLists.txt
++++ b/tools/VuTest/CMakeLists.txt
+@@ -25,6 +25,7 @@ add_executable(VuTest
+ 	FlagsTest2.cpp
+ 	FlagsTest3.cpp
+ 	FlagsTest4.cpp
++	StickyFlagsTest.cpp
+ 	IntBranchDelayTest.cpp
+ 	IntBranchDelayTest2.cpp
+ 	IntBranchDelayTest3.cpp
+@@ -50,6 +51,7 @@ add_executable(VuTest
+ 	FlagsTest2.h
+ 	FlagsTest3.h
+ 	FlagsTest4.h
++	StickyFlagsTest.h
+ 	IntBranchDelayTest.h
+ 	IntBranchDelayTest2.h
+ 	IntBranchDelayTest3.h
+diff --git a/tools/VuTest/StickyFlagsTest.h b/tools/VuTest/StickyFlagsTest.h
+new file mode 100644
+--- /dev/null
++++ b/tools/VuTest/StickyFlagsTest.h
+@@ -0,0 +1,9 @@
++#pragma once
++
++#include "Test.h"
++
++class CStickyFlagsTest : public CTest
++{
++public:
++	void Execute(CTestVm&) override;
++};
+diff --git a/tools/VuTest/StickyFlagsTest.cpp b/tools/VuTest/StickyFlagsTest.cpp
+new file mode 100644
+--- /dev/null
++++ b/tools/VuTest/StickyFlagsTest.cpp
+@@ -0,0 +1,83 @@
++#include "StickyFlagsTest.h"
++#include "VuAssembler.h"
++#include <cstdio>
++#include <cstdlib>
++
++void CStickyFlagsTest::Execute(CTestVm& virtualMachine)
++{
++	virtualMachine.Reset();
++
++	auto microMem = reinterpret_cast<uint32*>(virtualMachine.m_microMem);
++
++	//Sticky flags set by FMAC instructions of a block that doesn't read the status
++	//(their sticky pipeline entries can be merged), read by the next block
++
++	CVuAssembler assembler(microMem);
++
++	auto nextBlockLabel = assembler.CreateLabel();
++
++	//Zero result (Z sticky)
++	assembler.Write(
++	    CVuAssembler::Upper::SUB(CVuAssembler::DEST_XYZW, CVuAssembler::VF1, CVuAssembler::VF0, CVuAssembler::VF0),
++	    CVuAssembler::Lower::NOP());
++
++	//Negative result (S sticky)
++	assembler.Write(
++	    CVuAssembler::Upper::SUB(CVuAssembler::DEST_XYZ, CVuAssembler::VF2, CVuAssembler::VF0, CVuAssembler::VF3),
++	    CVuAssembler::Lower::NOP());
++
++	//Positive results (no flags)
++	for(uint32 i = 0; i < 5; i++)
++	{
++		assembler.Write(
++		    CVuAssembler::Upper::ADDbc(CVuAssembler::DEST_XYZW, CVuAssembler::VF4, CVuAssembler::VF3, CVuAssembler::VF3, CVuAssembler::BC_X),
++		    CVuAssembler::Lower::NOP());
++	}
++
++	assembler.Write(
++	    CVuAssembler::Upper::NOP(),
++	    CVuAssembler::Lower::B(nextBlockLabel));
++
++	assembler.Write(
++	    CVuAssembler::Upper::NOP(),
++	    CVuAssembler::Lower::NOP());
++
++	assembler.MarkLabel(nextBlockLabel);
++
++	assembler.Write(
++	    CVuAssembler::Upper::NOP(),
++	    CVuAssembler::Lower::FSAND(CVuAssembler::VI1, 0xFFF));
++
++	for(uint32 i = 0; i < 6; i++)
++	{
++		assembler.Write(
++		    CVuAssembler::Upper::NOP(),
++		    CVuAssembler::Lower::NOP());
++	}
++
++	assembler.Write(
++	    CVuAssembler::Upper::NOP(),
++	    CVuAssembler::Lower::FSAND(CVuAssembler::VI2, 0xFFF));
++
++	assembler.Write(
++	    CVuAssembler::Upper::NOP() | CVuAssembler::Upper::E_BIT,
++	    CVuAssembler::Lower::NOP());
++
++	assembler.Write(
++	    CVuAssembler::Upper::NOP(),
++	    CVuAssembler::Lower::NOP());
++
++	virtualMachine.m_cpu.m_State.nCOP2[3].nV0 = 0x3F800000; //VF3 = (1, 1, 1, 1)
++	virtualMachine.m_cpu.m_State.nCOP2[3].nV1 = 0x3F800000;
++	virtualMachine.m_cpu.m_State.nCOP2[3].nV2 = 0x3F800000;
++	virtualMachine.m_cpu.m_State.nCOP2[3].nV3 = 0x3F800000;
++
++	virtualMachine.ExecuteTest(0);
++
++	if(getenv("STICKY_TEST_PRINT"))
++	{
++		fprintf(stderr, "sticky test: VI1 %04X VI2 %04X\n", virtualMachine.m_cpu.m_State.nCOP2VI[1], virtualMachine.m_cpu.m_State.nCOP2VI[2]);
++	}
++	TEST_VERIFY(virtualMachine.m_cpu.m_State.nCOP2VI[1] == 0x00C0);
++	TEST_VERIFY(virtualMachine.m_cpu.m_State.nCOP2VI[2] == 0x00C0);
++}

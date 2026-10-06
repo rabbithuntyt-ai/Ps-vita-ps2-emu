@@ -86,6 +86,7 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 - [ ] AArch32 JIT: keep guest registers in host registers across linked blocks
 - [ ] Optional accurate VU rounding (round toward zero) for games that need it (tri-Ace): ARMv7 NEON always rounds to nearest
 - [ ] VU1 microprogram recompiler profiling and tuning (often the 3D bottleneck)
+- [x] VU: sticky flags of FMAC instructions merged into one pipeline entry per block when the block doesn't read/set the status (was ~15 memory operations per FMAC instruction); VuTest case added
 - [ ] Idle-loop and busy-wait detection, per game when the generic one misses
 - [ ] Ahead-of-time block cache: prerecord and ship translated code per game
 - [ ] Hot-function native replacements (hand-tuned C++/NEON) for top functions
