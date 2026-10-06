@@ -74,6 +74,10 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 - [x] AArch32 JIT: exact reciprocal / reciprocal square root (was a ~16-bit NEON estimate)
 - [x] ARM cross build running Play!'s CodeGen and VU test suites under qemu in CI
 - [x] AArch32 JIT: FP32 values in registers s16-s23 (saved in the prologue only by blocks that use them)
+- [x] AArch32 JIT: chained frames between linked blocks (no prologue/epilogue per block jump)
+- [x] AArch32 JIT: fused guest memory ops: every EE/IOP load and store (8 to 128 bits, LWC1/SWC1) is one JIT op with an inline page-table fast path and an out-of-line handler call, so guest registers stay in host registers across memory accesses instead of being spilled and reloaded around each one (~40% faster on a memory-heavy EE loop under qemu; checksum test against the x86 reference)
+- [ ] AArch32 JIT: page table pointer pinned in a host register
+- [ ] AArch32 JIT: keep guest registers in host registers across linked blocks
 - [ ] Optional accurate VU rounding (round toward zero) for games that need it (tri-Ace): ARMv7 NEON always rounds to nearest
 - [ ] VU1 microprogram recompiler profiling and tuning (often the 3D bottleneck)
 - [ ] Idle-loop and busy-wait detection, per game when the generic one misses

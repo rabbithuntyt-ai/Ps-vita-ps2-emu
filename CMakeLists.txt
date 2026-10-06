@@ -297,6 +297,25 @@ else()
 				-DSUFFIX=_mtspu
 				-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/elf_boot_test.cmake)
 		set_tests_properties(elf_boot_test_vu1_wait elf_boot_test_vu1_wait_mtvu elf_boot_test_mtspu PROPERTIES TIMEOUT 180)
+		# EE loads/stores of every size, mapped and through the handlers
+		set(EE_MEMORY_TESTS ee_memory_test)
+		if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
+			list(APPEND EE_MEMORY_TESTS ee_memory_test_chained ee_memory_test_safe_jit)
+		endif()
+		foreach(EE_MEMORY_TEST ${EE_MEMORY_TESTS})
+			add_test(NAME ${EE_MEMORY_TEST}
+				COMMAND ${CMAKE_COMMAND}
+					-DPYTHON=${Python3_EXECUTABLE}
+					-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+					-DRUNNER=$<TARGET_FILE:vitaps2_host>
+					"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
+					-DSUFFIX=_${EE_MEMORY_TEST}
+					-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ee_memory_test.cmake)
+		endforeach()
+		if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
+			set_tests_properties(ee_memory_test_chained PROPERTIES ENVIRONMENT CODEGEN_AARCH32_CHAINED=1)
+			set_tests_properties(ee_memory_test_safe_jit PROPERTIES ENVIRONMENT "CODEGEN_AARCH32_CONSERVATIVE=1;CODEGEN_AARCH32_NO_GUESTMEMOPS=1")
+		endif()
 		if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
 			# Everything the app enables by default: threaded VU1 and SPU, chained frames
 			add_test(NAME elf_boot_test_vita_defaults

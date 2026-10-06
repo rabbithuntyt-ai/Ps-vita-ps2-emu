@@ -1,0 +1,225 @@
+diff --git a/Source/MipsJitter.cpp b/Source/MipsJitter.cpp
+--- a/Source/MipsJitter.cpp
++++ b/Source/MipsJitter.cpp
+@@ -14,6 +14,11 @@ CMipsJitter::CMipsJitter(Jitter::CCodeGen* codeGen)
+ 		    offsetof(CMIPS, m_State.nGPR[CMIPS::R0].nV[i]),
+ 		    0);
+ 	}
++
++	//Guest memory handlers don't touch the general purpose and FPU registers:
++	//these can stay in host registers across guest memory accesses.
++	AddGuestMemorySafeRange(offsetof(CMIPS, m_State.nGPR), offsetof(CMIPS, m_State.nCOP0));
++	AddGuestMemorySafeRange(offsetof(CMIPS, m_State.nCOP1), offsetof(CMIPS, m_State.nCOP2));
+ }
+ 
+ void CMipsJitter::Begin()
+diff --git a/Source/MA_MIPSIV_Templates.cpp b/Source/MA_MIPSIV_Templates.cpp
+--- a/Source/MA_MIPSIV_Templates.cpp
++++ b/Source/MA_MIPSIV_Templates.cpp
+@@ -70,8 +70,8 @@ void CMA_MIPSIV::Template_Load32Idx(const MemoryAccessIdxTraits& traits)
+ 	if(m_nRT == 0) return;
+ 
+ 	const auto finishLoad =
+-	    [&]() {
+-		    if(traits.signExtFunction)
++	    [&](bool signExtended) {
++		    if(traits.signExtFunction && !signExtended)
+ 		    {
+ 			    //SignExt to 32-bits (if needed)
+ 			    ((m_codeGen)->*(traits.signExtFunction))();
+@@ -96,6 +96,16 @@ void CMA_MIPSIV::Template_Load32Idx(const MemoryAccessIdxTraits& traits)
+ 
+ 	bool usePageLookup = (m_pCtx->m_pageLookup != nullptr);
+ 
++	if(usePageLookup && m_codeGen->SupportsGuestMemoryOps())
++	{
++		//Page lookup, access and handler call fused in one op
++		ComputeMemAccessAddrNoXlat();
++		m_codeGen->GuestLoad(offsetof(CMIPS, m_pageLookup), traits.elementSize,
++		                     traits.signExtFunction != nullptr, traits.getProxyFunction);
++		finishLoad(true);
++		return;
++	}
++
+ 	if(usePageLookup)
+ 	{
+ 		ComputeMemAccessPageRef();
+@@ -105,7 +115,7 @@ void CMA_MIPSIV::Template_Load32Idx(const MemoryAccessIdxTraits& traits)
+ 		{
+ 			ComputeMemAccessRefIdx(traits.elementSize);
+ 			((m_codeGen)->*(traits.loadFunction))(1);
+-			finishLoad();
++			finishLoad(false);
+ 		}
+ 		m_codeGen->Else();
+ 	}
+@@ -118,7 +128,7 @@ void CMA_MIPSIV::Template_Load32Idx(const MemoryAccessIdxTraits& traits)
+ 		m_codeGen->PushIdx(1);
+ 		m_codeGen->Call(traits.getProxyFunction, 2, Jitter::CJitter::RETURN_VALUE_32);
+ 
+-		finishLoad();
++		finishLoad(false);
+ 
+ 		m_codeGen->PullTop();
+ 	}
+@@ -135,6 +145,14 @@ void CMA_MIPSIV::Template_Store32Idx(const MemoryAccessIdxTraits& traits)
+ 
+ 	bool usePageLookup = (m_pCtx->m_pageLookup != nullptr);
+ 
++	if(usePageLookup && m_codeGen->SupportsGuestMemoryOps())
++	{
++		ComputeMemAccessAddrNoXlat();
++		m_codeGen->PushRel(offsetof(CMIPS, m_State.nGPR[m_nRT].nV[0]));
++		m_codeGen->GuestStore(offsetof(CMIPS, m_pageLookup), traits.elementSize, traits.setProxyFunction);
++		return;
++	}
++
+ 	if(usePageLookup)
+ 	{
+ 		ComputeMemAccessPageRef();
+diff --git a/Source/COP_FPU.cpp b/Source/COP_FPU.cpp
+--- a/Source/COP_FPU.cpp
++++ b/Source/COP_FPU.cpp
+@@ -579,6 +579,14 @@ void CCOP_FPU::LWC1()
+ {
+ 	bool usePageLookup = (m_pCtx->m_pageLookup != nullptr);
+ 
++	if(usePageLookup && m_codeGen->SupportsGuestMemoryOps())
++	{
++		ComputeMemAccessAddrNoXlat();
++		m_codeGen->GuestLoad(offsetof(CMIPS, m_pageLookup), 4, false, reinterpret_cast<void*>(&MemoryUtils_GetWordProxy));
++		m_codeGen->PullRel(offsetof(CMIPS, m_State.nCOP1[m_ft]));
++		return;
++	}
++
+ 	if(usePageLookup)
+ 	{
+ 		ComputeMemAccessPageRef();
+@@ -618,6 +626,14 @@ void CCOP_FPU::SWC1()
+ {
+ 	bool usePageLookup = (m_pCtx->m_pageLookup != nullptr);
+ 
++	if(usePageLookup && m_codeGen->SupportsGuestMemoryOps())
++	{
++		ComputeMemAccessAddrNoXlat();
++		m_codeGen->PushRel(offsetof(CMIPS, m_State.nCOP1[m_ft]));
++		m_codeGen->GuestStore(offsetof(CMIPS, m_pageLookup), 4, reinterpret_cast<void*>(&MemoryUtils_SetWordProxy));
++		return;
++	}
++
+ 	if(usePageLookup)
+ 	{
+ 		ComputeMemAccessPageRef();
+diff --git a/Source/MemoryUtils.cpp b/Source/MemoryUtils.cpp
+--- a/Source/MemoryUtils.cpp
++++ b/Source/MemoryUtils.cpp
+@@ -158,3 +158,29 @@ void MemoryUtils_SetQuadProxy(CMIPS* context, const uint128& value, uint32 vAddr
+ 		break;
+ 	}
+ }
++
++void MemoryUtils_GetDoubleProxyPtr(CMIPS* context, uint32 vAddress, void* value)
++{
++	uint64 result = MemoryUtils_GetDoubleProxy(context, vAddress);
++	memcpy(value, &result, sizeof(result));
++}
++
++void MemoryUtils_GetQuadProxyPtr(CMIPS* context, uint32 vAddress, void* value)
++{
++	uint128 result = MemoryUtils_GetQuadProxy(context, vAddress);
++	memcpy(value, &result, sizeof(result));
++}
++
++void MemoryUtils_SetDoubleProxyPtr(CMIPS* context, uint32 vAddress, const void* value)
++{
++	uint64 data = 0;
++	memcpy(&data, value, sizeof(data));
++	MemoryUtils_SetDoubleProxy(context, data, vAddress);
++}
++
++void MemoryUtils_SetQuadProxyPtr(CMIPS* context, uint32 vAddress, const void* value)
++{
++	uint128 data;
++	memcpy(&data, value, sizeof(data));
++	MemoryUtils_SetQuadProxy(context, data, vAddress);
++}
+diff --git a/Source/MemoryUtils.h b/Source/MemoryUtils.h
+--- a/Source/MemoryUtils.h
++++ b/Source/MemoryUtils.h
+@@ -15,4 +15,10 @@ extern "C"
+ 	void MemoryUtils_SetWordProxy(CMIPS*, uint32, uint32);
+ 	void MemoryUtils_SetDoubleProxy(CMIPS*, uint64, uint32);
+ 	void MemoryUtils_SetQuadProxy(CMIPS*, const uint128&, uint32);
++
++	//Pointer based variants (context, address, value) used by the fused JIT memory ops
++	void MemoryUtils_GetDoubleProxyPtr(CMIPS*, uint32, void*);
++	void MemoryUtils_GetQuadProxyPtr(CMIPS*, uint32, void*);
++	void MemoryUtils_SetDoubleProxyPtr(CMIPS*, uint32, const void*);
++	void MemoryUtils_SetQuadProxyPtr(CMIPS*, uint32, const void*);
+ }
+diff --git a/Source/MA_MIPSIV.cpp b/Source/MA_MIPSIV.cpp
+--- a/Source/MA_MIPSIV.cpp
++++ b/Source/MA_MIPSIV.cpp
+@@ -770,6 +770,14 @@ void CMA_MIPSIV::LD()
+ 	if(!Ensure64BitRegs()) return;
+ 	if(m_nRT == 0) return;
+ 
++	if(m_codeGen->SupportsGuestMemoryOps())
++	{
++		ComputeMemAccessAddrNoXlat();
++		m_codeGen->GuestLoad(offsetof(CMIPS, m_pageLookup), 8, false, reinterpret_cast<void*>(&MemoryUtils_GetDoubleProxyPtr));
++		m_codeGen->PullRel64(offsetof(CMIPS, m_State.nGPR[m_nRT]));
++		return;
++	}
++
+ 	ComputeMemAccessPageRef();
+ 
+ 	m_codeGen->PushCst(0);
+@@ -825,6 +833,14 @@ void CMA_MIPSIV::SD()
+ {
+ 	if(!Ensure64BitRegs()) return;
+ 
++	if(m_codeGen->SupportsGuestMemoryOps())
++	{
++		ComputeMemAccessAddrNoXlat();
++		m_codeGen->PushRel64(offsetof(CMIPS, m_State.nGPR[m_nRT]));
++		m_codeGen->GuestStore(offsetof(CMIPS, m_pageLookup), 8, reinterpret_cast<void*>(&MemoryUtils_SetDoubleProxyPtr));
++		return;
++	}
++
+ 	ComputeMemAccessPageRef();
+ 
+ 	m_codeGen->PushCst(0);
+diff --git a/Source/ee/MA_EE.cpp b/Source/ee/MA_EE.cpp
+--- a/Source/ee/MA_EE.cpp
++++ b/Source/ee/MA_EE.cpp
+@@ -107,6 +107,14 @@ void CMA_EE::LQ()
+ {
+ 	if(m_nRT == 0) return;
+ 
++	if(m_codeGen->SupportsGuestMemoryOps())
++	{
++		ComputeMemAccessAddrNoXlat();
++		m_codeGen->GuestLoad(offsetof(CMIPS, m_pageLookup), 0x10, false, reinterpret_cast<void*>(&MemoryUtils_GetQuadProxyPtr));
++		m_codeGen->MD_PullRel(offsetof(CMIPS, m_State.nGPR[m_nRT]));
++		return;
++	}
++
+ 	ComputeMemAccessPageRef();
+ 
+ 	m_codeGen->PushCst(0);
+@@ -153,6 +161,14 @@ void CMA_EE::LQ()
+ //1F
+ void CMA_EE::SQ()
+ {
++	if(m_codeGen->SupportsGuestMemoryOps())
++	{
++		ComputeMemAccessAddrNoXlat();
++		m_codeGen->MD_PushRel(offsetof(CMIPS, m_State.nGPR[m_nRT]));
++		m_codeGen->GuestStore(offsetof(CMIPS, m_pageLookup), 0x10, reinterpret_cast<void*>(&MemoryUtils_SetQuadProxyPtr));
++		return;
++	}
++
+ 	ComputeMemAccessPageRef();
+ 
+ 	m_codeGen->PushCst(0);

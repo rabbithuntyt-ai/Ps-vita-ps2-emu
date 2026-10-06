@@ -170,6 +170,7 @@ int main(int argc, char** argv)
 		std::printf("EE pc %08X ra %08X  IOP pc %08X ra %08X thread %d  INTC %X/%X  DMAC %08X  VU1 %04X pc %04X %ums\n", debug.eePc,
 		            debug.eeRa, debug.iopPc, debug.iopRa, debug.iopThread, debug.intcStat, debug.intcMask, debug.dmacStat,
 		            debug.vu1Start, debug.vu1Pc, debug.vu1RunMs);
+		std::printf("EE s6 %08X s7 %08X\n", debug.eeGpr[22], debug.eeGpr[23]);
 		session.GetFrames().Fetch(serial, pixels, width, height);
 		for(const auto& usage : threadUsage)
 		{

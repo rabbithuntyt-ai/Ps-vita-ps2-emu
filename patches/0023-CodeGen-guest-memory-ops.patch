@@ -1,0 +1,851 @@
+diff --git a/include/Jitter.h b/include/Jitter.h
+--- a/include/Jitter.h
++++ b/include/Jitter.h
+@@ -108,6 +108,23 @@ namespace Jitter
+ 
+ 		void AddRef();
+ 		void IsRefNull();
++
++		//Guest memory access: page table lookup (pointer at context + pageTableOffset,
++		//one entry per 4KB page) with an inline fast path and a call to the handler
++		//for unmapped pages. The access is done on one op so register allocation
++		//isn't split around it. Only available if the code generator supports it.
++		bool SupportsGuestMemoryOps() const;
++		//Pops address, pushes value (32, 64 or 128-bit depending on size).
++		//Handler: uint32 (*)(void* ctx, uint32 address) up to 4 bytes,
++		//         void (*)(void* ctx, uint32 address, void* value) for 8 and 16 bytes
++		void GuestLoad(uint32 pageTableOffset, uint32 size, bool signExtend, void* handler);
++		//Pops value, pops address.
++		//Handler: void (*)(void* ctx, uint32 value, uint32 address) up to 4 bytes,
++		//         void (*)(void* ctx, uint32 address, const void* value) for 8 and 16 bytes
++		void GuestStore(uint32 pageTableOffset, uint32 size, void* handler);
++		//Relative symbols in [begin, end) are not touched by guest memory handlers
++		//and may stay in host registers across guest memory ops.
++		void AddGuestMemorySafeRange(uint32 begin, uint32 end);
+ 		void LoadFromRef();
+ 		void LoadFromRefIdx(size_t = sizeof(uint32));
+ 		void Load8FromRef();
+@@ -345,6 +362,7 @@ namespace Jitter
+ 		void StartBlock(uint32);
+ 
+ 		void InsertStatement(const STATEMENT&);
++		bool IsGuestMemorySafeSymbol(const CSymbol*) const;
+ 
+ 		SymbolPtr MakeSymbol(SYM_TYPE, uint32);
+ 		SymbolPtr MakeSymbol(BASIC_BLOCK*, SYM_TYPE, uint32, uint32);
+@@ -370,6 +388,7 @@ namespace Jitter
+ 		unsigned int AllocateStack(BASIC_BLOCK&);
+ 
+ 		bool m_blockStarted = false;
++		std::vector<std::pair<uint32, uint32>> m_guestMemorySafeRanges;
+ 
+ 		CArrayStack<SymbolPtr> m_shadow;
+ 		IntStack m_ifStack;
+diff --git a/include/Jitter_Statement.h b/include/Jitter_Statement.h
+--- a/include/Jitter_Statement.h
++++ b/include/Jitter_Statement.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <cassert>
+ #include <list>
+ #include <functional>
+ #include "Jitter_SymbolRef.h"
+@@ -45,6 +46,15 @@ namespace Jitter
+ 		OP_STORE8ATREF,
+ 		OP_STORE16ATREF,
+ 
++		//Guest memory access through a page table, with a call to a handler
++		//when the page isn't mapped. memInfo holds a GUEST_MEMOP_INFO.
++		//Load: dst = value, src1 = address, src3 = handler
++		//Store: src1 = address, src2 = value, src3 = handler
++		//Handlers for 8, 16 and 32-bit accesses: uint32 (ctx, address), void (ctx, value, address)
++		//Handlers for 64 and 128-bit accesses: void (ctx, address, void* value), void (ctx, address, const void* value)
++		OP_GUESTLOAD,
++		OP_GUESTSTORE,
++
+ 		OP_ADD64,
+ 		OP_SUB64,
+ 		OP_AND64,
+@@ -197,6 +207,29 @@ namespace Jitter
+ 		CONDITION_GE,
+ 	};
+ 
++	//Packed in STATEMENT::memInfo
++	struct GUEST_MEMOP_INFO
++	{
++		static uint32 Make(uint32 pageTableOffset, uint32 size, bool signExtend)
++		{
++			assert((size == 1) || (size == 2) || (size == 4) || (size == 8) || (size == 16));
++			assert(pageTableOffset < (1 << 24));
++			return (pageTableOffset << 8) | (signExtend ? 0x20 : 0) | size;
++		}
++		static uint32 GetSize(uint32 info)
++		{
++			return info & 0x1F;
++		}
++		static bool IsSignExtend(uint32 info)
++		{
++			return (info & 0x20) != 0;
++		}
++		static uint32 GetPageTableOffset(uint32 info)
++		{
++			return info >> 8;
++		}
++	};
++
+ 	struct STATEMENT
+ 	{
+ 	public:
+@@ -214,6 +247,7 @@ namespace Jitter
+ 		SymbolRefPtr dst;
+ 		uint32 jmpBlock;
+ 		CONDITION jmpCondition;
++		uint32 memInfo = 0; //GUEST_MEMOP_INFO for OP_GUESTLOAD/OP_GUESTSTORE
+ 
+ 		template <typename F>
+ 		void VisitOperands(const F& visitor)
+diff --git a/include/Jitter_CodeGen.h b/include/Jitter_CodeGen.h
+--- a/include/Jitter_CodeGen.h
++++ b/include/Jitter_CodeGen.h
+@@ -49,6 +49,13 @@ namespace Jitter
+ 			return 0;
+ 		}
+ 
++		//Whether OP_GUESTLOAD/OP_GUESTSTORE are implemented. Their handler call
++		//must preserve the registers used for allocation.
++		virtual bool SupportsGuestMemoryOps() const
++		{
++			return false;
++		}
++
+ 	protected:
+ 		enum MATCHTYPE
+ 		{
+diff --git a/include/Jitter_CodeGen_AArch32.h b/include/Jitter_CodeGen_AArch32.h
+--- a/include/Jitter_CodeGen_AArch32.h
++++ b/include/Jitter_CodeGen_AArch32.h
+@@ -37,6 +37,9 @@ namespace Jitter
+ 		//not change while code generated in one mode can link to the other.
+ 		//Default: off, or on when CODEGEN_AARCH32_CHAINED is set (tests).
+ 		static void SetChainedFrames(bool);
++		//Fused guest memory ops (OP_GUESTLOAD/OP_GUESTSTORE), on by default
++		static void SetGuestMemoryOps(bool);
++		static bool GetGuestMemoryOps();
+ 		static bool GetChainedFrames();
+ 
+ 		uint32 GetLinkEntryOffset() const override;
+@@ -51,6 +54,7 @@ namespace Jitter
+ 		bool Has128BitsCallOperands() const override;
+ 		bool SupportsExternalJumps() const override;
+ 		bool SupportsCmpSelect() const override;
++		bool SupportsGuestMemoryOps() const override;
+ 		uint32 GetPointerSize() const override;
+ 
+ 	private:
+@@ -583,6 +587,17 @@ namespace Jitter
+ 
+ 		//CALL
+ 		void Emit_Call(const STATEMENT&);
++		void Emit_GuestLoad(const STATEMENT&);
++		void Emit_GuestStore(const STATEMENT&);
++		void Emit_GuestMemoryPageLookup(uint32, CAArch32Assembler::REGISTER, CAArch32Assembler::REGISTER, CAArch32Assembler::REGISTER);
++		void Emit_GuestMemoryHandlerCall(uintptr_t);
++		void Emit_GuestLoad64(const STATEMENT&);
++		void Emit_GuestStore64(const STATEMENT&);
++		void Emit_GuestLoad128(const STATEMENT&);
++		void Emit_GuestStore128(const STATEMENT&);
++		void Emit_GuestMemoryWideAddress(uint32, uint32, CAArch32Assembler::REGISTER, CAArch32Assembler::LABEL);
++		void LoadStackOrContextAddress(CAArch32Assembler::REGISTER, CAArch32Assembler::REGISTER, uint32);
++		void LoadMemorySymbolAddress(CAArch32Assembler::REGISTER, CSymbol*);
+ 
+ 		//RETVAL
+ 		void Emit_RetVal_Reg(const STATEMENT&);
+@@ -837,6 +852,9 @@ namespace Jitter
+ 		};
+ 		uint32 m_param128SpillBase = 0;
+ 		bool m_saveFpRegisters = false; //d8-d11 (callee saved) hold allocated FP32 values
++		//Range of MD registers (caller saved) used by the function, saved around guest memory handler calls
++		int m_mdRegisterFirst = -1;
++		int m_mdRegisterLast = -1;
+ 		uint32 m_param128SpillCount = 0;
+ 		bool m_hasIntegerDiv = false;
+ 	};
+diff --git a/include/AArch32Assembler.h b/include/AArch32Assembler.h
+--- a/include/AArch32Assembler.h
++++ b/include/AArch32Assembler.h
+@@ -205,6 +205,7 @@ public:
+ 	void Adc(REGISTER, REGISTER, REGISTER);
+ 	void Add(REGISTER, REGISTER, REGISTER);
+ 	void Add(REGISTER, REGISTER, const ImmediateAluOperand&);
++	void Add(REGISTER, REGISTER, const RegisterAluOperand&);
+ 	void Adds(REGISTER, REGISTER, REGISTER);
+ 	void Adrl(REGISTER, const LITERAL128&);
+ 	void And(REGISTER, REGISTER, REGISTER);
+@@ -223,6 +224,11 @@ public:
+ 	void Ldr(REGISTER, REGISTER, const LdrAddress&);
+ 	void Ldrb(REGISTER, REGISTER, const LdrAddress&);
+ 	void Ldrh(REGISTER, REGISTER, const LdrAddress&);
++	void Ldrsb(REGISTER, REGISTER, REGISTER);
++	void Ldrsh(REGISTER, REGISTER, REGISTER);
++	void Ubfx(REGISTER, REGISTER, uint8, uint8);
++	void Sxtb(REGISTER, REGISTER);
++	void Sxth(REGISTER, REGISTER);
+ 	void Ldr_Pc(REGISTER, int32);
+ 	void Ldrd(REGISTER, REGISTER, const LdrAddress&);
+ 	void Mov(REGISTER, REGISTER);
+diff --git a/src/AArch32Assembler.cpp b/src/AArch32Assembler.cpp
+--- a/src/AArch32Assembler.cpp
++++ b/src/AArch32Assembler.cpp
+@@ -184,6 +184,20 @@ void CAArch32Assembler::Add(REGISTER rd, REGISTER rn, REGISTER rm)
+ 	GenericAlu(ALU_OPCODE_ADD, false, rd, rn, rm);
+ }
+ 
++void CAArch32Assembler::Add(REGISTER rd, REGISTER rn, const RegisterAluOperand& operand)
++{
++	InstructionAlu instruction;
++	instruction.operand = *reinterpret_cast<const unsigned int*>(&operand);
++	instruction.rn = rn;
++	instruction.rd = rd;
++	instruction.setFlags = 0;
++	instruction.opcode = ALU_OPCODE_ADD;
++	instruction.immediate = 0;
++	instruction.condition = CONDITION_AL;
++	uint32 opcode = *reinterpret_cast<uint32*>(&instruction);
++	WriteWord(opcode);
++}
++
+ void CAArch32Assembler::Add(REGISTER rd, REGISTER rn, const ImmediateAluOperand& operand)
+ {
+ 	GenericAlu(ALU_OPCODE_ADD, false, rd, rn, operand);
+@@ -351,6 +365,53 @@ void CAArch32Assembler::Ldrh(REGISTER rd, REGISTER rbase, const LdrAddress& addr
+ 	WriteWord(opcode);
+ }
+ 
++void CAArch32Assembler::Ldrsb(REGISTER rd, REGISTER rbase, REGISTER rm)
++{
++	//LDRSB rd, [rbase, rm]
++	uint32 opcode = (CONDITION_AL << 28) | 0x019000D0;
++	opcode |= static_cast<uint32>(rbase) << 16;
++	opcode |= static_cast<uint32>(rd) << 12;
++	opcode |= static_cast<uint32>(rm);
++	WriteWord(opcode);
++}
++
++void CAArch32Assembler::Ldrsh(REGISTER rd, REGISTER rbase, REGISTER rm)
++{
++	//LDRSH rd, [rbase, rm]
++	uint32 opcode = (CONDITION_AL << 28) | 0x019000F0;
++	opcode |= static_cast<uint32>(rbase) << 16;
++	opcode |= static_cast<uint32>(rd) << 12;
++	opcode |= static_cast<uint32>(rm);
++	WriteWord(opcode);
++}
++
++void CAArch32Assembler::Ubfx(REGISTER rd, REGISTER rn, uint8 lsb, uint8 width)
++{
++	assert((lsb < 32) && (width >= 1) && ((lsb + width) <= 32));
++	uint32 opcode = (CONDITION_AL << 28) | 0x07E00050;
++	opcode |= static_cast<uint32>(width - 1) << 16;
++	opcode |= static_cast<uint32>(rd) << 12;
++	opcode |= static_cast<uint32>(lsb) << 7;
++	opcode |= static_cast<uint32>(rn);
++	WriteWord(opcode);
++}
++
++void CAArch32Assembler::Sxtb(REGISTER rd, REGISTER rm)
++{
++	uint32 opcode = (CONDITION_AL << 28) | 0x06AF0070;
++	opcode |= static_cast<uint32>(rd) << 12;
++	opcode |= static_cast<uint32>(rm);
++	WriteWord(opcode);
++}
++
++void CAArch32Assembler::Sxth(REGISTER rd, REGISTER rm)
++{
++	uint32 opcode = (CONDITION_AL << 28) | 0x06BF0070;
++	opcode |= static_cast<uint32>(rd) << 12;
++	opcode |= static_cast<uint32>(rm);
++	WriteWord(opcode);
++}
++
+ void CAArch32Assembler::Ldr_Pc(REGISTER rt, int32 offset)
+ {
+ 	bool add = true;
+diff --git a/src/Jitter.cpp b/src/Jitter.cpp
+--- a/src/Jitter.cpp
++++ b/src/Jitter.cpp
+@@ -488,6 +488,69 @@ void CJitter::IsRefNull()
+ 	InsertUnaryStatement(OP_ISREFNULL);
+ }
+ 
++bool CJitter::SupportsGuestMemoryOps() const
++{
++	return m_codeGen->SupportsGuestMemoryOps();
++}
++
++void CJitter::GuestLoad(uint32 pageTableOffset, uint32 size, bool signExtend, void* handler)
++{
++	assert(SupportsGuestMemoryOps());
++
++	auto tempType = (size == 16) ? SYM_TEMPORARY128 : ((size == 8) ? SYM_TEMPORARY64 : SYM_TEMPORARY);
++	auto tempSym = MakeSymbol(tempType, m_nextTemporary++);
++
++	STATEMENT statement;
++	statement.op = OP_GUESTLOAD;
++	statement.memInfo = GUEST_MEMOP_INFO::Make(pageTableOffset, size, signExtend);
++	statement.src3 = MakeSymbolRef(MakeConstantPtr(reinterpret_cast<uintptr_t>(handler)));
++	statement.src1 = MakeSymbolRef(m_shadow.Pull());
++	statement.dst = MakeSymbolRef(tempSym);
++	InsertStatement(statement);
++
++	m_shadow.Push(tempSym);
++}
++
++void CJitter::GuestStore(uint32 pageTableOffset, uint32 size, void* handler)
++{
++	assert(SupportsGuestMemoryOps());
++
++	STATEMENT statement;
++	statement.op = OP_GUESTSTORE;
++	statement.memInfo = GUEST_MEMOP_INFO::Make(pageTableOffset, size, false);
++	statement.src3 = MakeSymbolRef(MakeConstantPtr(reinterpret_cast<uintptr_t>(handler)));
++	statement.src2 = MakeSymbolRef(m_shadow.Pull());
++	statement.src1 = MakeSymbolRef(m_shadow.Pull());
++	InsertStatement(statement);
++}
++
++void CJitter::AddGuestMemorySafeRange(uint32 begin, uint32 end)
++{
++	m_guestMemorySafeRanges.emplace_back(begin, end);
++}
++
++bool CJitter::IsGuestMemorySafeSymbol(const CSymbol* symbol) const
++{
++	if(symbol->IsTemporary()) return true;
++	switch(symbol->m_type)
++	{
++	case SYM_RELATIVE:
++	case SYM_FP_RELATIVE32:
++	case SYM_RELATIVE64:
++	case SYM_RELATIVE128:
++		break;
++	default:
++		return false;
++	}
++	uint32 begin = symbol->m_valueLow;
++	uint32 end = begin + symbol->GetSize();
++	for(const auto& range : m_guestMemorySafeRanges)
++	{
++		if((begin >= range.first) && (end <= range.second)) return true;
++	}
++	return false;
++}
++
+ void CJitter::LoadFromRef()
+ {
+ 	InsertUnaryStatement(OP_LOADFROMREF);
+diff --git a/src/Jitter_Optimize.cpp b/src/Jitter_Optimize.cpp
+--- a/src/Jitter_Optimize.cpp
++++ b/src/Jitter_Optimize.cpp
+@@ -1277,11 +1277,27 @@ bool CJitter::CopyPropagation(StatementList& statements)
+ 		//After substitution, t0 will not be used anymore making outerStatement eligible for removal
+ 		if(innerStatement.op == OP_MOV)
+ 		{
++			if(outerStatement.op == OP_GUESTLOAD)
++			{
++				//Don't move a guest load across other memory accesses or calls
++				bool canMove = true;
++				for(auto it = std::next(outerStatementIterator); it != usageInfo.lastUse; ++it)
++				{
++					if((it->op == OP_GUESTLOAD) || (it->op == OP_GUESTSTORE) || (it->op == OP_CALL) ||
++					   (it->op == OP_PARAM) || (it->op == OP_PARAM_RET))
++					{
++						canMove = false;
++						break;
++					}
++				}
++				if(!canMove) continue;
++			}
+ 			innerStatement.op = outerStatement.op;
+ 			innerStatement.src1 = outerStatement.src1;
+ 			innerStatement.src2 = outerStatement.src2;
+ 			innerStatement.src3 = outerStatement.src3;
+ 			innerStatement.jmpCondition = outerStatement.jmpCondition;
++			innerStatement.memInfo = outerStatement.memInfo;
+ 			changed = true;
+ 		}
+ 		//Substitute src operand of a statement if our defining statement (outerStatement) is a OP_MOV
+@@ -1349,8 +1365,10 @@ bool CJitter::CommonExpressionElimination(VERSIONED_STATEMENT_LIST& versionedSta
+ 		auto& statement(*statementIterator);
+ 
+ 		//If this is a statement defining a temporary
++		//(guest loads can't be merged: memory might have changed in between)
+ 		if(
+ 		    (statement.op != OP_RETVAL) &&
++		    (statement.op != OP_GUESTLOAD) &&
+ 		    (statement.dst) &&
+ 		    (statement.dst->GetSymbol()->IsTemporary()))
+ 		{
+@@ -1512,6 +1530,10 @@ bool CJitter::DeadcodeElimination(VERSIONED_STATEMENT_LIST& versionedStatementLi
+ 		auto& outerStatement(*outerStatementIterator);
+ 		const auto& symbolRef(outerStatement.dst);
+ 
++		//Guest loads might have side effects (I/O registers): keep the ones writing to
++		//relatives. One writing to an unused temporary was moved by copy propagation.
++		if((outerStatement.op == OP_GUESTLOAD) && !outerStatement.dst->GetSymbol()->IsTemporary()) continue;
++
+ 		CSymbol* candidate = nullptr;
+ 		if(symbolRef && symbolRef->GetSymbol()->IsTemporary())
+ 		{
+diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
+--- a/src/Jitter_RegAlloc.cpp
++++ b/src/Jitter_RegAlloc.cpp
+@@ -350,6 +350,33 @@ void CJitter::ComputeLivenessForRange(const BASIC_BLOCK& basicBlock, const Alloc
+ 
+ void CJitter::MarkAliasedSymbols(const BASIC_BLOCK& basicBlock, const AllocationRange& allocRange, SymbolRegAllocInfo& symbolRegAllocs) const
+ {
++	bool hasGuestMemoryOp = false;
++	for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
++	{
++		auto& statement(statementInfo.statement);
++		const auto& statementIdx(statementInfo.index);
++		if(statementIdx < allocRange.first) continue;
++		if(statementIdx > allocRange.second) break;
++		if((statement.op == OP_GUESTLOAD) || (statement.op == OP_GUESTSTORE))
++		{
++			hasGuestMemoryOp = true;
++			break;
++		}
++	}
++
++	if(hasGuestMemoryOp)
++	{
++		//Guest memory ops can call a handler that may read or write context
++		//state: only symbols declared safe can stay in registers across them.
++		for(auto& symbolRegAlloc : symbolRegAllocs)
++		{
++			if(!IsGuestMemorySafeSymbol(symbolRegAlloc.first.get()))
++			{
++				symbolRegAlloc.second.aliased = true;
++			}
++		}
++	}
++
+ 	for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
+ 	{
+ 		auto& statement(statementInfo.statement);
+diff --git a/src/Jitter_CodeGen_AArch32.cpp b/src/Jitter_CodeGen_AArch32.cpp
+--- a/src/Jitter_CodeGen_AArch32.cpp
++++ b/src/Jitter_CodeGen_AArch32.cpp
+@@ -249,6 +249,14 @@ CCodeGen_AArch32::CONSTMATCHER CCodeGen_AArch32::g_constMatchers[] =
+ 	{ OP_PARAM_RET, MATCH_NIL, MATCH_TEMPORARY128, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_ParamRet_Tmp128 },
+ 
+ 	{ OP_CALL, MATCH_NIL, MATCH_CONSTANTPTR, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_Call },
++
++	{ OP_GUESTLOAD,  MATCH_VARIABLE,    MATCH_ANY32, MATCH_NIL,         MATCH_CONSTANTPTR, &CCodeGen_AArch32::Emit_GuestLoad     },
++	{ OP_GUESTLOAD,  MATCH_MEMORY64,    MATCH_ANY32, MATCH_NIL,         MATCH_CONSTANTPTR, &CCodeGen_AArch32::Emit_GuestLoad64   },
++	{ OP_GUESTLOAD,  MATCH_VARIABLE128, MATCH_ANY32, MATCH_NIL,         MATCH_CONSTANTPTR, &CCodeGen_AArch32::Emit_GuestLoad128  },
++	{ OP_GUESTSTORE, MATCH_NIL,         MATCH_ANY32, MATCH_ANY32,       MATCH_CONSTANTPTR, &CCodeGen_AArch32::Emit_GuestStore    },
++	{ OP_GUESTSTORE, MATCH_NIL,         MATCH_ANY32, MATCH_MEMORY64,    MATCH_CONSTANTPTR, &CCodeGen_AArch32::Emit_GuestStore64  },
++	{ OP_GUESTSTORE, MATCH_NIL,         MATCH_ANY32, MATCH_CONSTANT64,  MATCH_CONSTANTPTR, &CCodeGen_AArch32::Emit_GuestStore64  },
++	{ OP_GUESTSTORE, MATCH_NIL,         MATCH_ANY32, MATCH_VARIABLE128, MATCH_CONSTANTPTR, &CCodeGen_AArch32::Emit_GuestStore128 },
+ 	
+ 	{ OP_RETVAL, MATCH_REGISTER,  MATCH_NIL, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_RetVal_Reg   },
+ 	{ OP_RETVAL, MATCH_TEMPORARY, MATCH_NIL, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_RetVal_Tmp   },
+@@ -487,6 +495,20 @@ void CCodeGen_AArch32::GenerateCode(const StatementList& statements, unsigned in
+ 	}
+ 	if(m_chained) m_saveFpRegisters = true;
+ 
++	m_mdRegisterFirst = -1;
++	m_mdRegisterLast = -1;
++	for(const auto& statement : statements)
++	{
++		statement.VisitOperands(
++		    [&](const SymbolRefPtr& symbolRef, bool) {
++			    auto symbol = symbolRef->GetSymbol();
++			    if(symbol->m_type != SYM_REGISTER128) return;
++			    int index = symbol->m_valueLow;
++			    if((m_mdRegisterFirst == -1) || (index < m_mdRegisterFirst)) m_mdRegisterFirst = index;
++			    if((m_mdRegisterLast == -1) || (index > m_mdRegisterLast)) m_mdRegisterLast = index;
++		    });
++	}
++
+ 	Emit_Prolog();
+ 
+ 	for(const auto& statement : statements)
+@@ -1252,6 +1274,374 @@ void CCodeGen_AArch32::Emit_Call(const STATEMENT& statement)
+ 	}
+ }
+ 
++static bool g_guestMemoryOps = (getenv("CODEGEN_AARCH32_NO_GUESTMEMOPS") == nullptr);
++
++void CCodeGen_AArch32::SetGuestMemoryOps(bool enabled)
++{
++	g_guestMemoryOps = enabled;
++}
++
++bool CCodeGen_AArch32::GetGuestMemoryOps()
++{
++	return g_guestMemoryOps;
++}
++
++bool CCodeGen_AArch32::SupportsGuestMemoryOps() const
++{
++	return g_guestMemoryOps;
++}
++
++//Loads the page pointer for the address in addressReg into pageReg (sets flags, Z if unmapped).
++void CCodeGen_AArch32::Emit_GuestMemoryPageLookup(uint32 pageTableOffset, CAArch32Assembler::REGISTER addressReg,
++                                                  CAArch32Assembler::REGISTER pageReg, CAArch32Assembler::REGISTER tmpReg)
++{
++	if(pageTableOffset < 0x1000)
++	{
++		m_assembler.Ldr(pageReg, g_baseRegister, CAArch32Assembler::MakeImmediateLdrAddress(pageTableOffset));
++	}
++	else
++	{
++		LoadConstantInRegister(pageReg, pageTableOffset);
++		m_assembler.Ldr(pageReg, g_baseRegister, CAArch32Assembler::MakeRegisterLdrAddress(pageReg));
++	}
++	m_assembler.Mov(tmpReg, CAArch32Assembler::MakeRegisterAluOperand(addressReg, CAArch32Assembler::MakeConstantShift(CAArch32Assembler::SHIFT_LSR, 12)));
++	m_assembler.Ldr(pageReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(tmpReg, CAArch32Assembler::SHIFT_LSL, 2));
++	m_assembler.Cmp(pageReg, CAArch32Assembler::MakeImmediateAluOperand(0, 0));
++}
++
++//Calls a handler with parameters already in r0-r2. Allocated GPRs and FP32 registers
++//are callee saved, allocated MD registers are not.
++void CCodeGen_AArch32::Emit_GuestMemoryHandlerCall(uintptr_t handler)
++{
++	bool saveMd = (m_mdRegisterFirst != -1);
++	auto firstMd = static_cast<CAArch32Assembler::DOUBLE_REGISTER>(CAArch32Assembler::d16 + (m_mdRegisterFirst * 2));
++	uint8 mdCount = saveMd ? static_cast<uint8>((m_mdRegisterLast - m_mdRegisterFirst + 1) * 2) : 0;
++	if(saveMd)
++	{
++		m_assembler.Vpush(firstMd, mdCount);
++	}
++	LoadConstantPtrInRegister(CAArch32Assembler::r12, handler);
++	m_assembler.Blx(CAArch32Assembler::r12);
++	if(saveMd)
++	{
++		m_assembler.Vpop(firstMd, mdCount);
++	}
++}
++
++void CCodeGen_AArch32::Emit_GuestLoad(const STATEMENT& statement)
++{
++	auto dst = statement.dst->GetSymbol().get();
++	auto src1 = statement.src1->GetSymbol().get();
++	auto src3 = statement.src3->GetSymbol().get();
++	uint32 info = statement.memInfo;
++	uint32 size = GUEST_MEMOP_INFO::GetSize(info);
++	bool signExtend = GUEST_MEMOP_INFO::IsSignExtend(info);
++
++	auto slowLabel = m_assembler.CreateLabel();
++	auto doneLabel = m_assembler.CreateLabel();
++
++	auto addressReg = PrepareSymbolRegisterUse(src1, CAArch32Assembler::r1);
++	auto dstReg = PrepareSymbolRegisterDef(dst, CAArch32Assembler::r0);
++	auto pageReg = CAArch32Assembler::r2;
++	auto offsetReg = CAArch32Assembler::r3;
++
++	Emit_GuestMemoryPageLookup(GUEST_MEMOP_INFO::GetPageTableOffset(info), addressReg, pageReg, offsetReg);
++	m_assembler.BCc(CAArch32Assembler::CONDITION_EQ, slowLabel);
++
++	switch(size)
++	{
++	case 4:
++		m_assembler.Ubfx(offsetReg, addressReg, 2, 10);
++		m_assembler.Ldr(dstReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg, CAArch32Assembler::SHIFT_LSL, 2));
++		break;
++	case 2:
++		m_assembler.Ubfx(offsetReg, addressReg, 0, 12);
++		m_assembler.Bic(offsetReg, offsetReg, CAArch32Assembler::MakeImmediateAluOperand(1, 0));
++		if(signExtend)
++			m_assembler.Ldrsh(dstReg, pageReg, offsetReg);
++		else
++			m_assembler.Ldrh(dstReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
++		break;
++	case 1:
++		m_assembler.Ubfx(offsetReg, addressReg, 0, 12);
++		if(signExtend)
++			m_assembler.Ldrsb(dstReg, pageReg, offsetReg);
++		else
++			m_assembler.Ldrb(dstReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
++		break;
++	default:
++		assert(false);
++		break;
++	}
++	m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
++
++	m_assembler.MarkLabel(slowLabel);
++	if(addressReg != CAArch32Assembler::r1)
++	{
++		m_assembler.Mov(CAArch32Assembler::r1, addressReg);
++	}
++	m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
++	Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
++	if(signExtend && (size == 1))
++	{
++		m_assembler.Sxtb(dstReg, CAArch32Assembler::r0);
++	}
++	else if(signExtend && (size == 2))
++	{
++		m_assembler.Sxth(dstReg, CAArch32Assembler::r0);
++	}
++	else if(dstReg != CAArch32Assembler::r0)
++	{
++		m_assembler.Mov(dstReg, CAArch32Assembler::r0);
++	}
++
++	m_assembler.MarkLabel(doneLabel);
++	CommitSymbolRegister(dst, dstReg);
++}
++
++void CCodeGen_AArch32::Emit_GuestStore(const STATEMENT& statement)
++{
++	auto src1 = statement.src1->GetSymbol().get();
++	auto src2 = statement.src2->GetSymbol().get();
++	auto src3 = statement.src3->GetSymbol().get();
++	uint32 info = statement.memInfo;
++	uint32 size = GUEST_MEMOP_INFO::GetSize(info);
++
++	auto slowLabel = m_assembler.CreateLabel();
++	auto doneLabel = m_assembler.CreateLabel();
++
++	auto addressReg = PrepareSymbolRegisterUse(src1, CAArch32Assembler::r1);
++	auto valueReg = PrepareSymbolRegisterUse(src2, CAArch32Assembler::r2);
++	auto pageReg = CAArch32Assembler::r0;
++	auto offsetReg = CAArch32Assembler::r3;
++
++	Emit_GuestMemoryPageLookup(GUEST_MEMOP_INFO::GetPageTableOffset(info), addressReg, pageReg, offsetReg);
++	m_assembler.BCc(CAArch32Assembler::CONDITION_EQ, slowLabel);
++
++	switch(size)
++	{
++	case 4:
++		m_assembler.Ubfx(offsetReg, addressReg, 2, 10);
++		m_assembler.Str(valueReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg, CAArch32Assembler::SHIFT_LSL, 2));
++		break;
++	case 2:
++		m_assembler.Ubfx(offsetReg, addressReg, 0, 12);
++		m_assembler.Bic(offsetReg, offsetReg, CAArch32Assembler::MakeImmediateAluOperand(1, 0));
++		m_assembler.Strh(valueReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
++		break;
++	case 1:
++		m_assembler.Ubfx(offsetReg, addressReg, 0, 12);
++		m_assembler.Strb(valueReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
++		break;
++	default:
++		assert(false);
++		break;
++	}
++	m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
++
++	//Handler parameters: context, value, address
++	//(address is in r1 or an allocated register, value in r2 or an allocated register)
++	m_assembler.MarkLabel(slowLabel);
++	m_assembler.Mov(CAArch32Assembler::r3, addressReg);
++	m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
++	m_assembler.Mov(CAArch32Assembler::r1, valueReg);
++	m_assembler.Mov(CAArch32Assembler::r2, CAArch32Assembler::r3);
++	Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
++
++	m_assembler.MarkLabel(doneLabel);
++}
++
++void CCodeGen_AArch32::LoadStackOrContextAddress(CAArch32Assembler::REGISTER dstReg, CAArch32Assembler::REGISTER baseReg, uint32 offset)
++{
++	uint8 immediate = 0, shiftAmount = 0;
++	if(TryGetAluImmediateParams(offset, immediate, shiftAmount))
++	{
++		m_assembler.Add(dstReg, baseReg, CAArch32Assembler::MakeImmediateAluOperand(immediate, shiftAmount));
++	}
++	else
++	{
++		LoadConstantInRegister(dstReg, offset);
++		m_assembler.Add(dstReg, baseReg, dstReg);
++	}
++}
++
++void CCodeGen_AArch32::LoadMemorySymbolAddress(CAArch32Assembler::REGISTER dstReg, CSymbol* symbol)
++{
++	switch(symbol->m_type)
++	{
++	case SYM_RELATIVE64:
++	case SYM_RELATIVE128:
++		LoadStackOrContextAddress(dstReg, g_baseRegister, symbol->m_valueLow);
++		break;
++	case SYM_TEMPORARY64:
++	case SYM_TEMPORARY128:
++		LoadStackOrContextAddress(dstReg, CAArch32Assembler::rSP, symbol->m_stackLocation + m_stackLevel);
++		break;
++	default:
++		assert(false);
++		break;
++	}
++}
++
++//Host address of an 8 or 16 bytes access (address aligned down) in r3. Branches to slowLabel
++//if the page isn't mapped. Uses r2 and r3.
++void CCodeGen_AArch32::Emit_GuestMemoryWideAddress(uint32 info, uint32 size, CAArch32Assembler::REGISTER addressReg, CAArch32Assembler::LABEL slowLabel)
++{
++	auto pageReg = CAArch32Assembler::r2;
++	auto hostAddressReg = CAArch32Assembler::r3;
++	uint8 sizeShift = (size == 16) ? 4 : 3;
++	Emit_GuestMemoryPageLookup(GUEST_MEMOP_INFO::GetPageTableOffset(info), addressReg, pageReg, hostAddressReg);
++	m_assembler.BCc(CAArch32Assembler::CONDITION_EQ, slowLabel);
++	m_assembler.Ubfx(hostAddressReg, addressReg, sizeShift, 12 - sizeShift);
++	m_assembler.Add(hostAddressReg, pageReg, CAArch32Assembler::MakeRegisterAluOperand(hostAddressReg, CAArch32Assembler::MakeConstantShift(CAArch32Assembler::SHIFT_LSL, sizeShift)));
++}
++
++void CCodeGen_AArch32::Emit_GuestLoad64(const STATEMENT& statement)
++{
++	auto dst = statement.dst->GetSymbol().get();
++	auto src1 = statement.src1->GetSymbol().get();
++	auto src3 = statement.src3->GetSymbol().get();
++
++	auto slowLabel = m_assembler.CreateLabel();
++	auto doneLabel = m_assembler.CreateLabel();
++
++	auto addressReg = PrepareSymbolRegisterUse(src1, CAArch32Assembler::r1);
++	Emit_GuestMemoryWideAddress(statement.memInfo, 8, addressReg, slowLabel);
++	m_assembler.Ldrd(CAArch32Assembler::r0, CAArch32Assembler::r3, CAArch32Assembler::MakeImmediateLdrAddress(0));
++	StoreRegistersInMemory64(dst, CAArch32Assembler::r0, CAArch32Assembler::r1);
++	m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
++
++	//Handler parameters: context, address, value pointer
++	m_assembler.MarkLabel(slowLabel);
++	if(addressReg != CAArch32Assembler::r1)
++	{
++		m_assembler.Mov(CAArch32Assembler::r1, addressReg);
++	}
++	m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
++	LoadMemorySymbolAddress(CAArch32Assembler::r2, dst);
++	Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
++
++	m_assembler.MarkLabel(doneLabel);
++}
++
++void CCodeGen_AArch32::Emit_GuestStore64(const STATEMENT& statement)
++{
++	auto src1 = statement.src1->GetSymbol().get();
++	auto src2 = statement.src2->GetSymbol().get();
++	auto src3 = statement.src3->GetSymbol().get();
++
++	auto slowLabel = m_assembler.CreateLabel();
++	auto doneLabel = m_assembler.CreateLabel();
++
++	auto addressReg = PrepareSymbolRegisterUse(src1, CAArch32Assembler::r1);
++	Emit_GuestMemoryWideAddress(statement.memInfo, 8, addressReg, slowLabel);
++	LoadSymbol64InRegisters(CAArch32Assembler::r0, CAArch32Assembler::r1, src2);
++	m_assembler.Strd(CAArch32Assembler::r0, CAArch32Assembler::r3, CAArch32Assembler::MakeImmediateLdrAddress(0));
++	m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
++
++	//Handler parameters: context, address, value pointer
++	m_assembler.MarkLabel(slowLabel);
++	if(src2->m_type == SYM_CONSTANT64)
++	{
++		LoadStackOrContextAddress(CAArch32Assembler::r2, CAArch32Assembler::rSP, m_param128SpillBase + m_stackLevel);
++		LoadConstantInRegister(CAArch32Assembler::r0, src2->m_valueLow);
++		m_assembler.Str(CAArch32Assembler::r0, CAArch32Assembler::r2, CAArch32Assembler::MakeImmediateLdrAddress(0));
++		LoadConstantInRegister(CAArch32Assembler::r0, src2->m_valueHigh);
++		m_assembler.Str(CAArch32Assembler::r0, CAArch32Assembler::r2, CAArch32Assembler::MakeImmediateLdrAddress(4));
++	}
++	else
++	{
++		LoadMemorySymbolAddress(CAArch32Assembler::r2, src2);
++	}
++	if(addressReg != CAArch32Assembler::r1)
++	{
++		m_assembler.Mov(CAArch32Assembler::r1, addressReg);
++	}
++	m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
++	Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
++
++	m_assembler.MarkLabel(doneLabel);
++}
++
++void CCodeGen_AArch32::Emit_GuestLoad128(const STATEMENT& statement)
++{
++	auto dst = statement.dst->GetSymbol().get();
++	auto src1 = statement.src1->GetSymbol().get();
++	auto src3 = statement.src3->GetSymbol().get();
++
++	auto slowLabel = m_assembler.CreateLabel();
++	auto doneLabel = m_assembler.CreateLabel();
++
++	auto addressReg = PrepareSymbolRegisterUse(src1, CAArch32Assembler::r1);
++	Emit_GuestMemoryWideAddress(statement.memInfo, 16, addressReg, slowLabel);
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
++	m_assembler.Vld1_32x4(dstReg, CAArch32Assembler::r3);
++	CommitSymbolRegisterMd(dst, dstReg);
++	m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
++
++	//Handler parameters: context, address, value pointer
++	m_assembler.MarkLabel(slowLabel);
++	if(addressReg != CAArch32Assembler::r1)
++	{
++		m_assembler.Mov(CAArch32Assembler::r1, addressReg);
++	}
++	m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
++	bool inRegister = (dst->m_type == SYM_REGISTER128);
++	if(inRegister)
++	{
++		//Result goes through the spill slot (MD registers are restored after the call)
++		LoadStackOrContextAddress(CAArch32Assembler::r2, CAArch32Assembler::rSP, m_param128SpillBase + m_stackLevel);
++	}
++	else
++	{
++		LoadMemorySymbolAddress(CAArch32Assembler::r2, dst);
++	}
++	Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
++	if(inRegister)
++	{
++		LoadStackOrContextAddress(CAArch32Assembler::r3, CAArch32Assembler::rSP, m_param128SpillBase + m_stackLevel);
++		m_assembler.Vld1_32x4(g_registersMd[dst->m_valueLow], CAArch32Assembler::r3);
++	}
++
++	m_assembler.MarkLabel(doneLabel);
++}
++
++void CCodeGen_AArch32::Emit_GuestStore128(const STATEMENT& statement)
++{
++	auto src1 = statement.src1->GetSymbol().get();
++	auto src2 = statement.src2->GetSymbol().get();
++	auto src3 = statement.src3->GetSymbol().get();
++
++	auto slowLabel = m_assembler.CreateLabel();
++	auto doneLabel = m_assembler.CreateLabel();
++
++	auto addressReg = PrepareSymbolRegisterUse(src1, CAArch32Assembler::r1);
++	Emit_GuestMemoryWideAddress(statement.memInfo, 16, addressReg, slowLabel);
++	auto valueReg = PrepareSymbolRegisterUseMd(src2, CAArch32Assembler::q0);
++	m_assembler.Vst1_32x4(valueReg, CAArch32Assembler::r3);
++	m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
++
++	//Handler parameters: context, address, value pointer
++	m_assembler.MarkLabel(slowLabel);
++	if(src2->m_type == SYM_REGISTER128)
++	{
++		LoadStackOrContextAddress(CAArch32Assembler::r2, CAArch32Assembler::rSP, m_param128SpillBase + m_stackLevel);
++		m_assembler.Vst1_32x4(g_registersMd[src2->m_valueLow], CAArch32Assembler::r2);
++	}
++	else
++	{
++		LoadMemorySymbolAddress(CAArch32Assembler::r2, src2);
++	}
++	if(addressReg != CAArch32Assembler::r1)
++	{
++		m_assembler.Mov(CAArch32Assembler::r1, addressReg);
++	}
++	m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
++	Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
++
++	m_assembler.MarkLabel(doneLabel);
++}
++
+ void CCodeGen_AArch32::Emit_RetVal_Reg(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();

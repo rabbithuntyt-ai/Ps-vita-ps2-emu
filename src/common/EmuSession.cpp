@@ -288,6 +288,8 @@ void CEmuSession::SetSafeJit(bool safe)
 	Jitter::CCodeGen_AArch32::SetConservativeAllocation(safe);
 	// Shared frames across linked blocks (no prolog/epilog between blocks).
 	Jitter::CCodeGen_AArch32::SetChainedFrames(!safe);
+	// EE/IOP loads and stores as single ops: registers stay allocated across them.
+	Jitter::CCodeGen_AArch32::SetGuestMemoryOps(!safe);
 #else
 	(void)safe;
 #endif
