@@ -39,6 +39,7 @@
 #endif
 #include "CpuScreen.h"
 #include "EmuSession.h"
+#include "EmuProfile.h"
 #include "GameProfiles.h"
 #include "GSH_Hardware.h"
 #include "Gfx.h"
@@ -516,6 +517,7 @@ namespace
 		config.emuThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x10000 /* SCE_KERNEL_CPU_MASK_USER_0 */); };
 		config.vu1ThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */); };
 		config.spuThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x20000 /* SCE_KERNEL_CPU_MASK_USER_1 */); };
+		config.profilerThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */); };
 		config.soundFactory = &CSH_Vita::HandlerFactory;
 		config.interlacedRendering = settings.interlaced;
 		config.frameSkip = settings.frameSkip;
@@ -576,6 +578,7 @@ namespace
 		std::string stallDetail; // code around the hot loop and EE registers
 		// Display sources per second (GPU renderer): explains black/flashing frames.
 		CGSH_Hardware::DISPLAY_STATS displayTotals, displayLastSecond;
+		std::string profileLine; // emulation thread time per subsystem
 
 		while(true)
 		{
@@ -670,6 +673,24 @@ namespace
 				statsPresented = presented;
 				statsTime = now;
 				threadUsage = ThreadProfiler::Sample();
+				{
+					auto profile = session->TakeProfile();
+					// Largest first.
+					unsigned int order[EmuProfile::SECTION_COUNT];
+					for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) order[i] = i;
+					std::sort(order, order + EmuProfile::SECTION_COUNT,
+					          [&](unsigned int a, unsigned int b) { return profile.share[a] > profile.share[b]; });
+					char text[160];
+					int length = std::snprintf(text, sizeof(text), "PS2 thread:");
+					for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT && length < 140; i++)
+					{
+						float share = profile.share[order[i]];
+						if(share < 0.01f) break;
+						length += std::snprintf(text + length, sizeof(text) - length, " %s %.0f%%", EmuProfile::GetSectionName(order[i]), share * 100.0f);
+					}
+					profileLine = text;
+					std::printf("%s\n", text);
+				}
 				if(gpu)
 				{
 					auto totals = GetHardwareGs(session.get())->GetDisplayStats();
@@ -763,7 +784,7 @@ namespace
 			DrawScreen(screen, settings.stretch);
 			if(settings.showStats)
 			{
-				int lines = 6 + static_cast<int>(threadUsage.size());
+				int lines = 7 + static_cast<int>(threadUsage.size());
 				Gfx::Rect(0, 0, 640, 10 + lines * 20, Gfx::Rgba(0, 0, 0, 160));
 				Gfx::Textf(8, 20, COLOR_WHITE, 0.7f, "VM %.1f fps  out %.1f fps  %ux%u  " VITAPS2_BUILD, vmFps, presentFps, screen.width, screen.height);
 				uint32_t eeRate = (settings.eeCycleRate == 0) ? autoRate.GetRate() : settings.eeCycleRate;
@@ -795,15 +816,16 @@ namespace
 					// Long line: wrap it under the overlay.
 					std::string wrapped = stallSummary;
 					for(size_t at = 90; at < wrapped.size(); at += 91) wrapped.insert(at, "\n");
-					Gfx::Text(8, 240, COLOR_WARN, 0.6f, wrapped.c_str());
-					Gfx::Text(8, 300, COLOR_WARN, 0.6f, stallDetail.c_str());
+					Gfx::Text(8, 290, COLOR_WARN, 0.6f, wrapped.c_str());
+					Gfx::Text(8, 345, COLOR_WARN, 0.6f, stallDetail.c_str());
 				}
-				Gfx::Text(8, 120, COLOR_ACCENT, 0.7f, "CPU per thread (100% = one core):");
+				Gfx::Text(8, 120, COLOR_ACCENT, 0.7f, profileLine.c_str());
+				Gfx::Text(8, 140, COLOR_ACCENT, 0.7f, "CPU per thread (100% = one core):");
 				int line = 0;
 				for(const auto& usage : threadUsage)
 				{
 					uint32_t color = (usage.cpuPercent > 90.0f) ? COLOR_WARN : COLOR_GREY;
-					Gfx::Textf(16, 140 + line * 20, color, 0.7f, "%-18s %5.1f%%", usage.name.c_str(), usage.cpuPercent);
+					Gfx::Textf(16, 160 + line * 20, color, 0.7f, "%-18s %5.1f%%", usage.name.c_str(), usage.cpuPercent);
 					line++;
 				}
 			}

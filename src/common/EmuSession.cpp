@@ -21,6 +21,7 @@
 #include "iop/Iop_SubSystem.h"
 #include "GSH_Software.h"
 #include "ThreadProfiler.h"
+#include "EmuProfile.h"
 
 namespace
 {
@@ -122,6 +123,13 @@ CEmuSession::CEmuSession(const CONFIG& config)
 	if(config.padFactory) m_vm->CreatePadHandler(config.padFactory);
 	if(config.soundFactory) m_vm->CreateSoundHandler(config.soundFactory);
 
+	for(auto& count : m_profileCounts) count = 0;
+	m_profiler = std::thread([this, init = config.profilerThreadInit]() {
+		ThreadProfiler::RegisterCurrentThread("Profiler");
+		if(init) init();
+		ProfilerProc();
+	});
+
 	m_newFrameConnection = m_vm->OnNewFrame.Connect([this]() {
 		// Runs on the emulation thread (EE, IOP, VU, SPU).
 		if(m_vmFrames++ == 0)
@@ -146,6 +154,8 @@ CEmuSession::CEmuSession(const CONFIG& config)
 
 CEmuSession::~CEmuSession()
 {
+	m_stopProfiler = true;
+	if(m_profiler.joinable()) m_profiler.join();
 	if(m_vm)
 	{
 		RunPumped([this]() { m_vm->Pause(); });
@@ -272,6 +282,32 @@ void CEmuSession::SetSafeJit(bool safe)
 #else
 	(void)safe;
 #endif
+}
+
+void CEmuSession::ProfilerProc()
+{
+	while(!m_stopProfiler)
+	{
+		std::this_thread::sleep_for(std::chrono::microseconds(500));
+		unsigned int section = EmuProfile::g_section.load(std::memory_order_relaxed);
+		if(section < 16) m_profileCounts[section]++;
+	}
+}
+
+CEmuSession::PROFILE CEmuSession::TakeProfile()
+{
+	PROFILE profile;
+	uint32_t counts[16];
+	for(int i = 0; i < 16; i++)
+	{
+		counts[i] = m_profileCounts[i].exchange(0);
+		profile.samples += counts[i];
+	}
+	if(profile.samples != 0)
+	{
+		for(int i = 0; i < 16; i++) profile.share[i] = static_cast<float>(counts[i]) / static_cast<float>(profile.samples);
+	}
+	return profile;
 }
 
 uint32_t CEmuSession::ReadEeWord(uint32_t address)

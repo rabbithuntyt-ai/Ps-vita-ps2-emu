@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <thread>
 #include <functional>
 #include <memory>
 #include <string>
@@ -42,6 +43,8 @@ public:
 		std::function<void()> spuThreadInit;
 		// Runs once on the emulation (EE/IOP) thread when it starts.
 		std::function<void()> emuThreadInit;
+		// Runs first on the profiler sampling thread.
+		std::function<void()> profilerThreadInit;
 		CPadHandler::FactoryFunction padFactory;
 		CSoundHandler::FactoryFunction soundFactory;
 	};
@@ -110,6 +113,15 @@ public:
 		uint32_t eeGpr[32] = {}; // low 32 bits of the EE registers
 	};
 	DEBUG_STATE GetDebugState();
+
+	// Where the emulation thread spends its time: share of samples per
+	// section (EmuProfile::SECTION_*) since the previous call.
+	struct PROFILE
+	{
+		float share[16] = {};
+		uint32_t samples = 0;
+	};
+	PROFILE TakeProfile();
 	// A word of EE main memory (0 outside RAM), for dumping code.
 	uint32_t ReadEeWord(uint32_t address);
 
@@ -137,6 +149,11 @@ private:
 	std::function<void()> m_vu1ThreadInit;
 	std::function<void()> m_spuThreadInit;
 	std::function<void()> m_emuThreadInit;
+	// Statistical profiler: samples EmuProfile::g_section.
+	void ProfilerProc();
+	std::thread m_profiler;
+	std::atomic<bool> m_stopProfiler{false};
+	std::atomic<uint32_t> m_profileCounts[16];
 	CFrameMailbox m_frames;
 	std::atomic<uint64_t> m_vmFrames{0};
 	// EE idle accounting (emulation thread), published every 30 frames.

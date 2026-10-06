@@ -19,6 +19,7 @@
 #include <thread>
 #include <vector>
 #include "EmuSession.h"
+#include "EmuProfile.h"
 #include "ThreadProfiler.h"
 #include "PS2VM.h"
 #ifdef VITAPS2_HAS_GL
@@ -159,7 +160,12 @@ int main(int argc, char** argv)
 			pump(5);
 		}
 		auto threadUsage = ThreadProfiler::Sample();
+		auto profile = session.TakeProfile();
 		session.Pause();
+		std::printf("emulation thread (%u samples):", profile.samples);
+		for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++)
+			if(profile.share[i] >= 0.005f) std::printf(" %s %.0f%%", EmuProfile::GetSectionName(i), profile.share[i] * 100.0f);
+		std::printf("\n");
 		auto debug = session.GetDebugState();
 		std::printf("EE pc %08X ra %08X  IOP pc %08X ra %08X thread %d  INTC %X/%X  DMAC %08X  VU1 %04X pc %04X %ums\n", debug.eePc,
 		            debug.eeRa, debug.iopPc, debug.iopRa, debug.iopThread, debug.intcStat, debug.intcMask, debug.dmacStat,

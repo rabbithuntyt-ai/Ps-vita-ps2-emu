@@ -1,0 +1,302 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+new file mode 100644
+--- /dev/null
++++ b/Source/EmuProfile.h
+@@ -0,0 +1,54 @@
++#pragma once
++
++#include <atomic>
++#include "Types.h"
++
++//Cheap statistical profiling of the emulation thread: code marks which
++//subsystem it is running (one relaxed store), a sampler thread reads it.
++namespace EmuProfile
++{
++	enum SECTION : uint8
++	{
++		SECTION_OTHER,
++		SECTION_EE,
++		SECTION_VU0,
++		SECTION_VU1,
++		SECTION_IOP,
++		SECTION_SPU,
++		SECTION_VIF,
++		SECTION_GIF,
++		SECTION_IPU,
++		SECTION_SIF,
++		SECTION_JIT,
++		SECTION_GS_WAIT,
++		SECTION_LIMITER,
++		SECTION_COUNT
++	};
++
++	inline const char* GetSectionName(unsigned int section)
++	{
++		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle"};
++		return (section < SECTION_COUNT) ? names[section] : "?";
++	}
++
++	inline std::atomic<uint8> g_section{SECTION_OTHER};
++
++	class CScope
++	{
++	public:
++		explicit CScope(SECTION section)
++		    : m_previous(g_section.load(std::memory_order_relaxed))
++		{
++			g_section.store(section, std::memory_order_relaxed);
++		}
++		~CScope()
++		{
++			g_section.store(m_previous, std::memory_order_relaxed);
++		}
++		CScope(const CScope&) = delete;
++		CScope& operator=(const CScope&) = delete;
++
++	private:
++		uint8 m_previous;
++	};
++}
+diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
+--- a/Source/PS2VM.cpp
++++ b/Source/PS2VM.cpp
+@@ -7,6 +7,7 @@
+ #include "make_unique.h"
+ #include "string_format.h"
+ #include "PS2VM.h"
++#include "EmuProfile.h"
+ #include "PS2VM_Preferences.h"
+ #include "ee/PS2OS.h"
+ #include "ee/EeExecutor.h"
+@@ -725,7 +726,11 @@ void CPS2VM::UpdateEe()
+ 
+ 	while(m_eeExecutionTicks > 0)
+ 	{
+-		int executed = m_ee->ExecuteCpu(m_singleStepEe ? 1 : m_eeExecutionTicks);
++		int executed = 0;
++		{
++			EmuProfile::CScope profileScope(EmuProfile::SECTION_EE);
++			executed = m_ee->ExecuteCpu(m_singleStepEe ? 1 : m_eeExecutionTicks);
++		}
+ 		if(m_ee->IsCpuIdle())
+ 		{
+ 			m_cpuUtilisation.eeIdleTicks += (m_eeExecutionTicks - executed);
+@@ -733,8 +738,14 @@ void CPS2VM::UpdateEe()
+ 		}
+ 		m_cpuUtilisation.eeTotalTicks += executed;
+ 
+-		m_ee->m_vpu0->Execute(m_singleStepVu0 ? 1 : executed);
+-		m_ee->m_vpu1->Execute(m_singleStepVu1 ? 1 : executed);
++		{
++			EmuProfile::CScope profileScope(EmuProfile::SECTION_VU0);
++			m_ee->m_vpu0->Execute(m_singleStepVu0 ? 1 : executed);
++		}
++		{
++			EmuProfile::CScope profileScope(EmuProfile::SECTION_VU1);
++			m_ee->m_vpu1->Execute(m_singleStepVu1 ? 1 : executed);
++		}
+ 
+ 		m_eeExecutionTicks -= executed;
+ 		m_spuUpdateTicks -= (static_cast<int64>(executed) << SPU_UPDATE_TICKS_PRECISION);
+@@ -757,7 +768,11 @@ void CPS2VM::UpdateIop()
+ 
+ 	while(m_iopExecutionTicks > 0)
+ 	{
+-		int executed = m_iop->ExecuteCpu(m_singleStepIop ? 1 : m_iopExecutionTicks);
++		int executed = 0;
++		{
++			EmuProfile::CScope profileScope(EmuProfile::SECTION_IOP);
++			executed = m_iop->ExecuteCpu(m_singleStepIop ? 1 : m_iopExecutionTicks);
++		}
+ 		if(m_iop->IsCpuIdle())
+ 		{
+ 			m_cpuUtilisation.iopIdleTicks += (m_iopExecutionTicks - executed);
+@@ -837,6 +852,7 @@ void CPS2VM::SpuWorkerProc()
+ void CPS2VM::SyncSpu()
+ {
+ 	if(!m_spuThreaded) return;
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_SPU);
+ 	std::unique_lock<std::mutex> lock(m_spuMutex);
+ 	m_spuIdleCondition.wait(lock, [this]() { return (m_spuPendingBlocks == 0) && !m_spuRendering; });
+ }
+@@ -994,6 +1010,7 @@ void CPS2VM::EmuThread()
+ 		{
+ 			if(m_spuUpdateTicks <= 0)
+ 			{
++				EmuProfile::CScope profileScope(EmuProfile::SECTION_SPU);
+ 				UpdateSpu();
+ 				m_spuUpdateTicks += m_spuUpdateTicksTotal;
+ 			}
+@@ -1049,7 +1066,10 @@ void CPS2VM::EmuThread()
+ 						{
+ 							m_ee->m_gs->ResetVBlank();
+ 						}
+-						m_frameLimiter.EndFrame();
++						{
++							EmuProfile::CScope profileScope(EmuProfile::SECTION_LIMITER);
++							m_frameLimiter.EndFrame();
++						}
+ 						m_frameLimiter.BeginFrame();
+ 					}
+ 				}
+diff --git a/Source/ee/Vif.cpp b/Source/ee/Vif.cpp
+--- a/Source/ee/Vif.cpp
++++ b/Source/ee/Vif.cpp
+@@ -1,4 +1,5 @@
+ #include <cassert>
++#include "../EmuProfile.h"
+ #include <cstring>
+ #include <stdexcept>
+ #include "static_loop.h"
+@@ -353,6 +354,7 @@ uint32 CVif::GetITOP() const
+ 
+ uint32 CVif::ReceiveDMA(uint32 address, uint32 qwc, uint32 unused, bool tagIncluded)
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_VIF);
+ 	if(m_STAT.nVEW && !m_vpu.IsVuReady())
+ 	{
+ 		//Is waiting for program end, don't bother
+diff --git a/Source/ee/Vif1.cpp b/Source/ee/Vif1.cpp
+--- a/Source/ee/Vif1.cpp
++++ b/Source/ee/Vif1.cpp
+@@ -1,4 +1,5 @@
+ #include <cassert>
++#include "../EmuProfile.h"
+ #include <algorithm>
+ #include "string_format.h"
+ #include "../states/RegisterStateFile.h"
+@@ -69,6 +70,7 @@ uint32 CVif1::GetTOP() const
+ 
+ uint32 CVif1::ReceiveDMA(uint32 address, uint32 qwc, uint32 direction, bool tagIncluded)
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_VIF);
+ 	if(direction == Dmac::CChannel::CHCR_DIR_TO)
+ 	{
+ 		uint8* source = nullptr;
+diff --git a/Source/ee/GIF.cpp b/Source/ee/GIF.cpp
+--- a/Source/ee/GIF.cpp
++++ b/Source/ee/GIF.cpp
+@@ -1,4 +1,5 @@
+ #include <stdio.h>
++#include "../EmuProfile.h"
+ #include <algorithm>
+ #include <cstring>
+ #include "../uint128.h"
+@@ -470,6 +471,7 @@ void CGIF::DrainFifo()
+ 
+ uint32 CGIF::ReceiveDMA(uint32 address, uint32 qwc, uint32 unused, bool tagIncluded)
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_GIF);
+ 	uint32 size = qwc * 0x10;
+ 
+ 	uint8* memory = nullptr;
+diff --git a/Source/ee/IPU.cpp b/Source/ee/IPU.cpp
+--- a/Source/ee/IPU.cpp
++++ b/Source/ee/IPU.cpp
+@@ -1,4 +1,5 @@
+ #include "IPU.h"
++#include "../EmuProfile.h"
+ #include <cassert>
+ #include <cstring>
+ #include <stdio.h>
+@@ -368,6 +369,7 @@ bool CIPU::IsCommandDelayed() const
+ 
+ void CIPU::ExecuteCommand()
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_IPU);
+ 	assert(WillExecuteCommand());
+ 	try
+ 	{
+@@ -466,6 +468,7 @@ void CIPU::SetDMA3ReceiveHandler(const Dma3ReceiveHandler& receiveHandler)
+ 
+ uint32 CIPU::ReceiveDMA4(uint32 address, uint32 nQWC, bool nTagIncluded, uint8* ram, uint8* spr)
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_IPU);
+ 	assert(nTagIncluded == false);
+ 
+ 	uint32 availableFifoSize = CINFIFO::BUFFERSIZE - m_IN_FIFO.GetSize();
+diff --git a/Source/ee/SIF.cpp b/Source/ee/SIF.cpp
+--- a/Source/ee/SIF.cpp
++++ b/Source/ee/SIF.cpp
+@@ -1,4 +1,5 @@
+ #include <cstring>
++#include "../EmuProfile.h"
+ #include <stdio.h>
+ #include "Log.h"
+ #include "../Ps2Const.h"
+@@ -158,6 +159,7 @@ uint32 CSIF::ReceiveDMA5(uint32 srcAddress, uint32 size, uint32 unused, bool isT
+ 
+ uint32 CSIF::ReceiveDMA6(uint32 nSrcAddr, uint32 nSize, uint32 nDstAddr, bool isTagIncluded)
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_SIF);
+ 	assert(!isTagIncluded);
+ 
+ 	//Humm, this is kinda odd, but it ors the address with 0x20000000
+diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
+--- a/Source/ee/EeExecutor.cpp
++++ b/Source/ee/EeExecutor.cpp
+@@ -1,4 +1,5 @@
+ #include "EeExecutor.h"
++#include "../EmuProfile.h"
+ #include "../Ps2Const.h"
+ #include "AlignedAlloc.h"
+ #include "EeBasicBlock.h"
+@@ -145,6 +146,7 @@ void CEeExecutor::ClearActiveBlocksInRange(uint32 start, uint32 end, bool execut
+ 
+ BasicBlockPtr CEeExecutor::BlockFactory(CMIPS& context, uint32 start, uint32 end)
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_JIT);
+ 	uint32 blockSize = (end - start) + 4;
+ 
+ 	//Kernel area is below 0x100000 and isn't protected. Some games will write code in there
+diff --git a/Source/gs/GSHandler.cpp b/Source/gs/GSHandler.cpp
+--- a/Source/gs/GSHandler.cpp
++++ b/Source/gs/GSHandler.cpp
+@@ -8,6 +8,7 @@
+ #include "../FrameDump.h"
+ #include "../ee/INTC.h"
+ #include "GSHandler.h"
++#include "../EmuProfile.h"
+ #include "GsPixelFormats.h"
+ #include "string_format.h"
+ #include "ThreadUtils.h"
+@@ -2190,7 +2191,13 @@ void CGSHandler::SendGSCall(const CMailBox::FunctionType& function, bool waitFor
+ 		waitForCompletion = false;
+ 	}
+ 	waitForCompletion |= forceWaitForCompletion;
+-	m_mailBox.SendCall(function, waitForCompletion);
++	if(waitForCompletion)
++	{
++		EmuProfile::CScope profileScope(EmuProfile::SECTION_GS_WAIT);
++		m_mailBox.SendCall(function, true);
++		return;
++	}
++	m_mailBox.SendCall(function, false);
+ }
+ 
+ void CGSHandler::SendGSCall(CMailBox::FunctionType&& function)
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -1,4 +1,5 @@
+ #include "Vpu.h"
++#include "../EmuProfile.h"
+ #include <algorithm>
+ #include <chrono>
+ #include <cstring>
+@@ -164,6 +165,7 @@ void CVpu::WorkerProc()
+ void CVpu::Sync()
+ {
+ 	if(!m_threaded) return;
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_VU1);
+ 	{
+ 		std::unique_lock<std::mutex> lock(m_workerMutex);
+ 		m_idleCondition.wait(lock, [this]() { return !m_workPending && (m_vuState != VU_STATE_RUNNING); });
+@@ -175,6 +177,7 @@ void CVpu::Sync()
+ bool CVpu::SyncFor(uint32 timeoutMs)
+ {
+ 	if(!m_threaded) return true;
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_VU1);
+ 	bool idle = false;
+ 	{
+ 		std::unique_lock<std::mutex> lock(m_workerMutex);
