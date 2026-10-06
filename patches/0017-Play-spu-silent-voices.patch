@@ -1,0 +1,76 @@
+diff --git a/Source/iop/Iop_SpuBase.cpp b/Source/iop/Iop_SpuBase.cpp
+--- a/Source/iop/Iop_SpuBase.cpp
++++ b/Source/iop/Iop_SpuBase.cpp
+@@ -729,6 +729,34 @@ void CSpuBase::RenderVoice(unsigned int i, int16* samples, int16* reverbSamples,
+ 	if(fixedLeft) channel.volumeLeftAbs = ComputeChannelVolume(channel.volumeLeft, channel.volumeLeftAbs);
+ 	if(fixedRight) channel.volumeRightAbs = ComputeChannelVolume(channel.volumeRight, channel.volumeRightAbs);
+ 
++	if((channel.status == STOPPED) && (channel.adsrVolume == 0) && fixedLeft && fixedRight)
++	{
++		//Silent voice (most voices, most of the time): its samples are scaled
++		//by an envelope of 0 and the envelope doesn't move while stopped, so
++		//only the sample reader (address, loop flags, IRQ checks) advances.
++		for(unsigned int j = 0; j < ticks; j++)
++		{
++			if(reader.IsDone())
++			{
++				reader.ClearIsDone();
++			}
++			if(reader.DidChangeRepeat() && !channel.repeatSet)
++			{
++				channel.repeat = reader.GetRepeat();
++				reader.ClearDidChangeRepeat();
++			}
++			reader.SetRepeat(channel.repeat);
++			if(reader.IsFrozen())
++			{
++				//Nothing moves anymore: the remaining samples are identical.
++				break;
++			}
++			reader.SkipSample();
++		}
++		channel.current = reader.GetCurrent();
++		return;
++	}
++
+ 	const auto mix =
+ 	    [](int32 inputSample, int32 volumeLevel, int16* output) {
+ 		    inputSample = (inputSample * volumeLevel) / 0x7FFF;
+@@ -1383,6 +1411,22 @@ void CSpuBase::CSampleReader::SetPitch(uint32 baseSamplingRate, uint16 pitch)
+ 	UpdateSampleStep();
+ }
+ 
++bool CSpuBase::CSampleReader::IsFrozen() const
++{
++	return (m_sampleStep == 0) && ((m_srcSampleIdx / PITCH_BASE) < BUFFER_SAMPLES);
++}
++
++void CSpuBase::CSampleReader::SkipSample()
++{
++	uint32 srcSampleIdx = m_srcSampleIdx / PITCH_BASE;
++	m_srcSampleIdx += m_sampleStep;
++	if(srcSampleIdx >= BUFFER_SAMPLES)
++	{
++		m_srcSampleIdx -= BUFFER_SAMPLES * PITCH_BASE;
++		AdvanceBuffer();
++	}
++}
++
+ int32 CSpuBase::CSampleReader::GetSample()
+ {
+ 	uint32 srcSampleIdx = m_srcSampleIdx / PITCH_BASE;
+diff --git a/Source/iop/Iop_SpuBase.h b/Source/iop/Iop_SpuBase.h
+--- a/Source/iop/Iop_SpuBase.h
++++ b/Source/iop/Iop_SpuBase.h
+@@ -328,6 +328,11 @@ namespace Iop
+ 
+ 			bool DidChangeRepeat() const;
+ 			void ClearDidChangeRepeat();
++			//GetSample() would return the same value without changing any state
++			//(pitch 0 and inside the current buffer).
++			bool IsFrozen() const;
++			//Same state change as GetSample() without computing the sample.
++			void SkipSample();
+ 
+ 		private:
+ 			static constexpr int BUFFER_SAMPLES = 28;

@@ -2,7 +2,7 @@
 // voices each and reverb, like a busy game scene. Reports host time per
 // second of audio (multiply by the host/Vita speed ratio for the Vita cost).
 //
-//   spu_benchmark [seconds-of-audio]
+//   spu_benchmark [seconds-of-audio] [--silent]   (--silent: no voice keyed on)
 
 #include <chrono>
 #include <cstdio>
@@ -17,6 +17,7 @@ using namespace Iop;
 int main(int argc, char** argv)
 {
 	double seconds = (argc > 1) ? std::atof(argv[1]) : 2.0;
+	bool silent = (argc > 2) && !std::strcmp(argv[2], "--silent");
 	const uint32 ramSize = 2 * 1024 * 1024;
 	std::vector<uint8> ram(ramSize);
 
@@ -71,7 +72,7 @@ int main(int argc, char** argv)
 			channel.adsrRate <<= static_cast<uint16>(0x1FC0);
 			spu.OnChannelPitchChanged(v);
 		}
-		spu.SendKeyOn(0xFFFFFF);
+		if(!silent) spu.SendKeyOn(0xFFFFFF);
 	}
 
 	const unsigned int blockSize = 128; // stereo samples * 2 (as the VM renders: 64 frames)
@@ -88,7 +89,7 @@ int main(int argc, char** argv)
 		}
 	}
 	double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-	std::printf("SPU2 mix (2 cores x 24 voices + reverb): %.1f ms per second of audio (checksum %lld)\n", elapsed * 1000.0 / seconds,
+	std::printf("SPU2 mix (2 cores x 24 %s voices + reverb): %.1f ms per second of audio (checksum %lld)\n", silent ? "silent" : "playing", elapsed * 1000.0 / seconds,
 	            static_cast<long long>(checksum));
 	return 0;
 }
