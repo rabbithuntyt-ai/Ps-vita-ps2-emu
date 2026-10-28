@@ -26,6 +26,7 @@
 #include <vector>
 
 #include <psp2/ctrl.h>
+#include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
@@ -71,6 +72,23 @@ namespace
 	constexpr const char* SETTINGS_PATH = "ux0:data/VitaPS2/settings";
 	constexpr const char* LOG_PATH = "ux0:data/VitaPS2/log.txt";
 	constexpr const char* BENCHMARK_PATH = "ux0:data/VitaPS2/benchmark.txt";
+	// Scripted runs (e.g. from Vita Lab): see ReadAutostart.
+	constexpr const char* AUTOSTART_PATH = "ux0:data/VitaPS2/autostart.txt";
+	constexpr const char* AUTOSTART_DONE_PATH = "ux0:data/VitaPS2/autostart.done";
+	constexpr const char* PERF_PATH = "ux0:data/VitaPS2/perf.csv";
+
+	// autostart.txt boots a game directly, for scripted tests:
+	//   game=ux0:data/VitaPS2/games/game.iso
+	//   seconds=60              (optional: quit the app after this long)
+	//   ee_cycle_rate=100 ...   (optional: any per-game setting, not saved)
+	// The file is renamed to autostart.done when read, so a crash doesn't
+	// loop. While it runs, perf.csv gets one line of measurements per second.
+	struct AUTOSTART
+	{
+		std::string game;
+		uint32_t seconds = 0;
+		std::vector<std::pair<std::string, std::string>> settings;
+	};
 	constexpr const char* BUILTIN_TEST = "app0:gs_test.elf";
 	constexpr const char* BUILTIN_TEST_NAME = "[Built-in] GS self test";
 	constexpr size_t JIT_POOL_MIN = 8 * 1024 * 1024;
@@ -485,7 +503,7 @@ namespace
 		return profiles;
 	}
 
-	void RunGame(const std::string& path)
+	void RunGame(const std::string& path, const AUTOSTART* autostart = nullptr)
 	{
 		const std::string discSerial = CEmuSession::GetDiscSerial(path);
 		const auto* profile = discSerial.empty() ? nullptr : GetGameProfiles().Find(discSerial);
@@ -498,6 +516,21 @@ namespace
 		std::printf("booting %s serial '%s' profile %s\n", path.c_str(), discSerial.c_str(),
 		            profile ? (gameName.empty() ? "yes" : gameName.c_str()) : "none");
 		GAME_SETTINGS settings = LoadSettings(path, profile);
+		std::FILE* perfFile = nullptr;
+		if(autostart)
+		{
+			for(const auto& [key, value] : autostart->settings) ApplySetting(settings, key, value);
+			perfFile = std::fopen(PERF_PATH, "w");
+			if(perfFile)
+			{
+				std::fprintf(perfFile, "t,vm_fps,out_fps,ee_idle,ee_rate");
+				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",ps2_%s", EmuProfile::GetSectionName(i));
+				std::fprintf(perfFile, ",spu_full_waits,spu_read_waits,ipu_idec,ipu_bdec,ipu_out_kb,ipu_stalls,audio_underruns,audio_tempo,threads\n");
+			}
+		}
+		const uint64_t runStart = sceKernelGetProcessTimeWide();
+		uint32_t perfSpuFull = 0, perfSpuRead = 0;
+		CIPU::STATS perfIpu;
 		// Before anything is compiled for this game.
 		CEmuSession::SetSafeJit(settings.safeJit);
 		std::printf("safe jit: %s\n", settings.safeJit ? "on" : "off");
@@ -587,6 +620,11 @@ namespace
 			uint32_t buttons = pad ? pad->Poll() : 0;
 			uint32_t pressed = buttons & ~previousButtons;
 			previousButtons = buttons;
+			if(autostart && autostart->seconds && (sceKernelGetProcessTimeWide() - runStart >= autostart->seconds * 1000000ULL))
+			{
+				std::printf("autostart: %u seconds done\n", autostart->seconds);
+				break;
+			}
 			if((buttons & SCE_CTRL_SELECT) && (pressed & SCE_CTRL_START))
 			{
 				uint32_t previousRate = settings.eeCycleRate;
@@ -677,6 +715,25 @@ namespace
 				threadUsage = ThreadProfiler::Sample();
 				{
 					auto profile = session->TakeProfile();
+					if(perfFile)
+					{
+						uint32_t eeRateNow = (settings.eeCycleRate == 0) ? autoRate.GetRate() : settings.eeCycleRate;
+						std::fprintf(perfFile, "%.1f,%.2f,%.2f,%.3f,%u", (now - runStart) / 1000000.0, vmFps, presentFps,
+						             session->GetEeIdleRatio(), eeRateNow);
+						for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",%.3f", profile.share[i]);
+						uint32_t full = session->GetVm()->GetSpuFullSyncCount(), read = session->GetVm()->GetSpuReadAccessCount();
+						const auto& ipu = CIPU::GetStats();
+						std::fprintf(perfFile, ",%u,%u,%u,%u,%u,%u,%u,%.2f,", full - perfSpuFull, read - perfSpuRead,
+						             ipu.commands[1] - perfIpu.commands[1], ipu.commands[2] - perfIpu.commands[2],
+						             static_cast<unsigned int>((ipu.outBytes - perfIpu.outBytes) / 1024), ipu.outStalls - perfIpu.outStalls,
+						             CSH_Vita::GetUnderruns(), CSH_Vita::GetTempo());
+						perfSpuFull = full;
+						perfSpuRead = read;
+						perfIpu = ipu;
+						for(const auto& usage : threadUsage) std::fprintf(perfFile, "%s=%.1f;", usage.name.c_str(), usage.cpuPercent);
+						std::fprintf(perfFile, "\n");
+						std::fflush(perfFile);
+					}
 					// Largest first.
 					unsigned int order[EmuProfile::SECTION_COUNT];
 					for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) order[i] = i;
@@ -889,6 +946,28 @@ namespace
 
 		session.reset();
 		sessionPtr = nullptr;
+		if(perfFile) std::fclose(perfFile);
+	}
+
+	bool ReadAutostart(AUTOSTART& autostart)
+	{
+		std::ifstream file(AUTOSTART_PATH);
+		if(!file) return false;
+		std::string line;
+		while(std::getline(file, line))
+		{
+			while(!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+			auto eq = line.find('=');
+			if(eq == std::string::npos) continue;
+			std::string key = line.substr(0, eq), value = line.substr(eq + 1);
+			if(key == "game") autostart.game = value;
+			else if(key == "seconds") autostart.seconds = static_cast<uint32_t>(std::strtoul(value.c_str(), nullptr, 10));
+			else autostart.settings.emplace_back(key, value);
+		}
+		file.close();
+		sceIoRemove(AUTOSTART_DONE_PATH);
+		sceIoRename(AUTOSTART_PATH, AUTOSTART_DONE_PATH);
+		return !autostart.game.empty();
 	}
 }
 
@@ -963,6 +1042,21 @@ int main()
 	catch(const std::exception& e)
 	{
 		ShowMessage("Initialization failed", e.what());
+	}
+
+	{
+		AUTOSTART autostart;
+		if(ReadAutostart(autostart))
+		{
+			std::printf("autostart: %s for %u s\n", autostart.game.c_str(), autostart.seconds);
+			RunGame(autostart.game, &autostart);
+			if(autostart.seconds)
+			{
+				Gfx::Shutdown();
+				sceKernelExitProcess(0);
+				return 0;
+			}
+		}
 	}
 
 	while(true)
