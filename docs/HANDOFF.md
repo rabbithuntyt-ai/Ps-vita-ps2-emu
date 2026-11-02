@@ -33,16 +33,30 @@ through **Vita Lab** (`vitalab` CLI + plugins; see the Vita-Lingo repo, `lab/`).
    Audio is ruled out (no change with the SPU thread on/off). The overlay
    line `IPU/s: idec/bdec/vdec/fdec/csc, out KB, stalls` (only while a movie
    decodes) shows whether the IPU starves, waits on DMA3 (stalls) or whether
-   the game issues few commands. `CSubSystem::ExecuteIpu` (Ee_SubSystem.cpp)
-   decodes until the OUT FIFO has data, then flushes once per EE slice.
+   the game issues few commands. IPU pacing itself is ruled out: IDEC and
+   BDEC flush their own output and finish as soon as input is available
+   (tests/ipu_decode_test; with 960 macroblocks and long --frames the probe
+   decodes ~3200 pictures per emulated second, eager or not). Disc streaming
+   (CdStRead) returns immediately. Next suspects: the EE side of the player
+   (sceMpeg does motion compensation in software, so EE rate matters), the
+   game's audio/video sync, or the IOP. Compare perf.csv `ee_idle` and the
+   IPU columns during the movie.
 2. **Brightness flashing** on the title screen: not the renderer (software
    too), not VU1 threading, not the JIT (Safe JIT). Less at EE rate 130%:
    timing related. Auto EE rate changes speed mid-game; test fixed rates.
-3. Timing-dependent IPU/DMA hang seen once at auto rate 75% (IPU idle with a
+3. **Black screen when the movie hands over to the game** (user report: let
+   the movie play out; the screen stayed black afterwards). Unknown whether
+   the game hangs or only the display is wrong: check whether vm_fps and EE
+   activity continue and take a GS dump/screenshot at that point.
+4. Timing-dependent IPU/DMA hang seen once at auto rate 75% (IPU idle with a
    full input FIFO, DMA4 still running).
 
 ## Recent work (newest first)
 
+- SPU voice mixing in two passes with a NEON (SSE2 on x86) saturating mix,
+  exact /0x7FFF via shifts, reader/ADSR inlined: same output (checksum), ~21%
+  fewer instructions in spu_benchmark (patch 0036).
+- IPU end-to-end decode test (tools/make_ipu_elf.py).
 - Scripted runs (autostart/perf.csv), IPU and SPU wait counters on overlay.
 - SPU thread: register reads and DMA no longer wait for the mixer backlog.
 - Disc images read with sceIo (64-bit offsets, 128KB read-ahead): fixed the
