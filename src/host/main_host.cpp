@@ -69,6 +69,7 @@ int main(int argc, char** argv)
 	bool hardware = false;
 	bool threadedVu1 = false;
 	bool threadedSpu = false;
+	bool benchExit = false; //exit from the emulation thread right at the last frame (deterministic for measurements)
 	for(int i = 2; i < argc; i++)
 	{
 		if(!std::strcmp(argv[i], "--frames") && (i + 1 < argc)) targetFrames = std::strtoull(argv[++i], nullptr, 10);
@@ -80,6 +81,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--hw")) hardware = true;
 		else if(!std::strcmp(argv[i], "--mtvu")) threadedVu1 = true;
 		else if(!std::strcmp(argv[i], "--mtspu")) threadedSpu = true;
+		else if(!std::strcmp(argv[i], "--bench-exit")) benchExit = true;
 	}
 
 	const char* home = std::getenv("HOME");
@@ -92,6 +94,15 @@ int main(int argc, char** argv)
 	config.rasterizerThreads = gsThreads;
 	config.interlacedRendering = interlaced;
 	config.frameSkip = frameSkip;
+	if(benchExit)
+	{
+		config.frameHook = [targetFrames](uint64_t frame, uint64_t eeExecuted) {
+			if(frame < targetFrames) return;
+			std::printf("EE executed %llu idle 0\n", (unsigned long long)eeExecuted);
+			std::fflush(stdout);
+			std::_Exit(0);
+		};
+	}
 
 	// The GPU renderer runs on this thread.
 	CEmuSession* sessionPtr = nullptr;

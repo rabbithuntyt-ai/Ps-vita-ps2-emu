@@ -25,6 +25,8 @@ jobs:
   arm:
     name: ARM Linux build + tests under qemu (AArch32 JIT)
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write # commits the performance-gap chart (docs/perf) on the default branch
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,6 +44,33 @@ jobs:
         run: cmake --build build-arm -j$(nproc)
       - name: Test
         run: ctest --test-dir build-arm --output-on-failure
+      # ARM instructions executed per PS2 instruction (exact counts under qemu),
+      # appended to docs/perf/history.csv and drawn as docs/perf/gap.svg.
+      - name: Measure performance gap
+        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+        run: |
+          python3 tools/perf_gap.py --runner build-arm/vitaps2_host \
+            --history docs/perf/history.csv --svg docs/perf/gap.svg \
+            --label "$(git rev-parse --short HEAD)"
+      - name: Publish performance gap chart
+        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp docs/perf/history.csv docs/perf/gap.svg "$RUNNER_TEMP/"
+          for attempt in 1 2 3; do
+            git fetch origin "$GITHUB_REF_NAME"
+            git checkout -B perf-update "origin/$GITHUB_REF_NAME"
+            # Keep rows measured by other runs: append ours to the latest history
+            tail -n 1 "$RUNNER_TEMP/history.csv" >> docs/perf/history.csv
+            python3 tools/perf_gap.py --runner none --render-only \
+              --history docs/perf/history.csv --svg docs/perf/gap.svg
+            git add docs/perf
+            git commit -m "Performance gap: $(git rev-parse --short "$GITHUB_SHA") [skip ci]"
+            if git push origin "HEAD:$GITHUB_REF_NAME"; then exit 0; fi
+            sleep $((attempt * 5))
+          done
+          exit 1
 
   vita:
     name: PS Vita build (VitaSDK)

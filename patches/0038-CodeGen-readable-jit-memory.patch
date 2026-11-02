@@ -1,0 +1,12 @@
+diff --git a/src/MemoryFunction.cpp b/src/MemoryFunction.cpp
+--- a/src/MemoryFunction.cpp
++++ b/src/MemoryFunction.cpp
+@@ -128,7 +128,7 @@ CMemoryFunction::CMemoryFunction(const void* code, size_t size)
+ 		additionalMapFlags = MEMFUNC_MMAP_ADDITIONAL_FLAGS;
+ 	#endif
+ 	m_size = size;
+-	m_code = mmap(nullptr, size, PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | additionalMapFlags, -1, 0);
++	m_code = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | additionalMapFlags, -1, 0);
+ 	assert(m_code != MAP_FAILED);
+ #ifdef MEMFUNC_MMAP_REQUIRES_JIT_WRITE_PROTECT
+ 	pthread_jit_write_protect_np(false);

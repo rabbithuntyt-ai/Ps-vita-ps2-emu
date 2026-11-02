@@ -98,6 +98,7 @@ CEmuSession::CEmuSession(const CONFIG& config)
 	m_vu1ThreadInit = config.vu1ThreadInit;
 	m_spuThreadInit = config.spuThreadInit;
 	m_emuThreadInit = config.emuThreadInit;
+	m_frameHook = config.frameHook;
 	m_gsShutdown = config.gsShutdown;
 	auto frames = &m_frames;
 	if(config.gsFactory)
@@ -152,6 +153,7 @@ CEmuSession::CEmuSession(const CONFIG& config)
 			m_eeIdleTicks = m_eeBusyTicks = 0;
 			m_eeIdleFrames = 0;
 		}
+		if(m_frameHook) m_frameHook(m_vmFrames.load(), m_eeExecutedTicks.load());
 	});
 }
 
@@ -283,6 +285,12 @@ CEmuSession::DEBUG_STATE CEmuSession::GetDebugState()
 	state.vu1Pc = vpu1.GetCurrentPc();
 	state.vu1RunMs = vpu1.GetProgramRunMs();
 	return state;
+}
+
+uint64_t CEmuSession::GetEeExecutedTicks() const
+{
+	auto info = m_vm->GetCpuUtilisationInfo();
+	return m_eeExecutedTicks + std::max(info.eeTotalTicks - info.eeIdleTicks, 0);
 }
 
 void CEmuSession::SetSafeJit(bool safe)

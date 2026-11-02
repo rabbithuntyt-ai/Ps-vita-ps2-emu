@@ -12,6 +12,23 @@ Graphics Synthesizer renderers and a native vitaGL frontend.
 > below full speed. See [docs/RESEARCH.md](docs/RESEARCH.md) for the analysis and [docs/ROADMAP.md](docs/ROADMAP.md) for the full checklist,
 > the options considered and the optimization roadmap.
 
+## Performance gap
+
+![PS2 to Vita performance gap: ARM instructions per PS2 instruction over time](docs/perf/gap.svg)
+
+How many ARM instructions the emulator executes for each PS2 (EE)
+instruction, on four endless game-like workloads: integer code (a CRC loop),
+FPU math, 128-bit MMI pixel work, and loads/stores of every size. **1.0 would
+be one-to-one; lower is better.** CI measures it on every push to the default
+branch by running the ARM build (the Vita's recompiler) under qemu and
+counting executed instructions exactly, so the numbers are reproducible
+([tools/perf_gap.py](tools/perf_gap.py)); every run adds a row to
+[docs/perf/history.csv](docs/perf/history.csv) (table view of the chart).
+
+This tracks CPU emulation cost only: it is not a frame rate. The Vita's A9
+also has a lower clock and fewer instructions per cycle than the PS2 needs
+for its EE, VUs and GS together, and games differ in what they stress.
+
 ## Status
 
 | Component | State |

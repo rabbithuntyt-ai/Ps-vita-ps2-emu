@@ -43,6 +43,9 @@ public:
 		std::function<void()> spuThreadInit;
 		// Runs once on the emulation (EE/IOP) thread when it starts.
 		std::function<void()> emuThreadInit;
+		// Runs on the emulation thread after every emulated frame (frame count,
+		// EE instructions executed so far).
+		std::function<void(uint64_t, uint64_t)> frameHook;
 		// Runs first on the profiler sampling thread.
 		std::function<void()> profilerThreadInit;
 		CPadHandler::FactoryFunction padFactory;
@@ -91,10 +94,8 @@ public:
 
 	// EE instructions executed so far (Play counts one tick per instruction;
 	// idle time excluded). Updated once per frame.
-	uint64_t GetEeExecutedTicks() const
-	{
-		return m_eeExecutedTicks;
-	}
+	// Exact when the VM is paused (adds the current, unfinished frame).
+	uint64_t GetEeExecutedTicks() const;
 	uint64_t GetEeIdleTicks() const
 	{
 		return m_eeIdleTotalTicks;
@@ -164,6 +165,7 @@ private:
 	std::function<void()> m_vu1ThreadInit;
 	std::function<void()> m_spuThreadInit;
 	std::function<void()> m_emuThreadInit;
+	std::function<void(uint64_t, uint64_t)> m_frameHook;
 	// Statistical profiler: samples EmuProfile::g_section.
 	void ProfilerProc();
 	std::thread m_profiler;
