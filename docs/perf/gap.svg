@@ -30,13 +30,13 @@ svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0
 <text class="t2" x="618" y="351.8" font-size="11">one-to-one</text>
 <text class="m" x="56" y="380" font-size="11">2026-11-02</text>
 <text class="m" x="610" y="380" font-size="11" text-anchor="end">2026-11-02</text>
-<polyline class="line" style="stroke:var(--s1)" points="56.0,283.8 333.0,283.8 610.0,283.8"/>
+<polyline class="line" style="stroke:var(--s1)" points="56.0,283.8 610.0,283.8"/>
 <circle class="dot" style="fill:var(--s1)" cx="610.0" cy="283.8" r="4.5"/>
-<polyline class="line" style="stroke:var(--s2)" points="56.0,171.3 333.0,171.3 610.0,171.3"/>
+<polyline class="line" style="stroke:var(--s2)" points="56.0,171.3 610.0,171.3"/>
 <circle class="dot" style="fill:var(--s2)" cx="610.0" cy="171.3" r="4.5"/>
-<polyline class="line" style="stroke:var(--s3)" points="56.0,276.0 333.0,276.0 610.0,276.0"/>
+<polyline class="line" style="stroke:var(--s3)" points="56.0,276.0 610.0,276.0"/>
 <circle class="dot" style="fill:var(--s3)" cx="610.0" cy="276.0" r="4.5"/>
-<polyline class="line" style="stroke:var(--s4)" points="56.0,118.1 333.0,118.1 610.0,118.1"/>
+<polyline class="line" style="stroke:var(--s4)" points="56.0,118.1 610.0,118.1"/>
 <circle class="dot" style="fill:var(--s4)" cx="610.0" cy="118.1" r="4.5"/>
 <path d="M615.0 118.1 L621.0 118.1" style="stroke:var(--s4);stroke-width:1;fill:none"/>
 <text class="h" x="624" y="122.1" font-size="12" font-weight="600">19.83</text>

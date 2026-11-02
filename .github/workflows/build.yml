@@ -60,7 +60,7 @@ jobs:
           cp docs/perf/history.csv docs/perf/gap.svg "$RUNNER_TEMP/"
           for attempt in 1 2 3; do
             git fetch origin "$GITHUB_REF_NAME"
-            git checkout -B perf-update "origin/$GITHUB_REF_NAME"
+            git checkout -f -B perf-update "origin/$GITHUB_REF_NAME"
             # Keep rows measured by other runs: append ours to the latest history
             tail -n 1 "$RUNNER_TEMP/history.csv" >> docs/perf/history.csv
             python3 tools/perf_gap.py --runner none --render-only \
