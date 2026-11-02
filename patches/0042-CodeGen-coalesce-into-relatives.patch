@@ -1,0 +1,189 @@
+diff --git a/include/Jitter.h b/include/Jitter.h
+--- a/include/Jitter.h
++++ b/include/Jitter.h
+@@ -382,6 +382,7 @@ namespace Jitter
+ 		VERSIONED_STATEMENT_LIST GenerateVersionedStatementList(const StatementList&);
+ 		StatementList CollapseVersionedStatementList(const VERSIONED_STATEMENT_LIST&);
+ 		void CoalesceTemporaries(BASIC_BLOCK&);
++		void CoalesceIntoRelatives(BASIC_BLOCK&);
+ 		void RemoveSelfAssignments(BASIC_BLOCK&);
+ 		void PruneSymbols(BASIC_BLOCK&) const;
+ 
+diff --git a/src/Jitter_Optimize.cpp b/src/Jitter_Optimize.cpp
+--- a/src/Jitter_Optimize.cpp
++++ b/src/Jitter_Optimize.cpp
+@@ -2,6 +2,7 @@
+ #include <vector>
+ #include <algorithm>
+ #include "Jitter.h"
++#include <cstdlib>
+ #include "BitManip.h"
+ 
+ #ifdef _DEBUG
+@@ -191,6 +192,7 @@ void CJitter::Compile()
+ 	{
+ 		m_currentBlock = &basicBlock;
+ 
++		CoalesceIntoRelatives(basicBlock);
+ 		CoalesceTemporaries(basicBlock);
+ 		RemoveSelfAssignments(basicBlock);
+ 		PruneSymbols(basicBlock);
+@@ -1677,6 +1679,158 @@ bool CJitter::DeadcodeElimination(VERSIONED_STATEMENT_LIST& versionedStatementLi
+ 	return changed;
+ }
+ 
++//"t = op(...); ...; rel = t" -> "rel = op(...); ...": the operation writes the
++//context symbol directly (later uses of t read rel), which saves a copy once
++//registers are allocated. Only when nothing in between touches rel and
++//nothing can observe the context (calls, guest memory ops, jumps).
++void CJitter::CoalesceIntoRelatives(BASIC_BLOCK& basicBlock)
++{
++	static const bool disabled = (getenv("JITTER_NO_COALESCE_REL") != nullptr); //for A/B testing
++	if(disabled) return;
++	auto& statements = basicBlock.statements;
++	auto isSimpleOp = [](OPERATION op) {
++		switch(op)
++		{
++		case OP_ADD:
++		case OP_SUB:
++		case OP_AND:
++		case OP_OR:
++		case OP_XOR:
++		case OP_NOT:
++		case OP_SRA:
++		case OP_SRL:
++		case OP_SLL:
++		case OP_CMP:
++		case OP_SELECT:
++		case OP_CMPSELECT_P2:
++		case OP_LZC:
++			return true;
++		default:
++			return false;
++		}
++	};
++	auto isBarrier = [](const STATEMENT& statement) {
++		switch(statement.op)
++		{
++		case OP_CALL:
++		case OP_PARAM:
++		case OP_PARAM_RET:
++		case OP_RETVAL:
++		case OP_LABEL:
++		case OP_JMP:
++		case OP_CONDJMP:
++		case OP_GOTO:
++		case OP_EXTERNJMP:
++		case OP_EXTERNJMP_DYN:
++		case OP_GUESTLOAD:
++		case OP_GUESTSTORE:
++		case OP_STOREATREF:
++		case OP_STORE8ATREF:
++		case OP_STORE16ATREF:
++		case OP_MD_STOREATREF_MASKED:
++			return true;
++		default:
++			return false;
++		}
++	};
++	auto touches = [](const STATEMENT& statement, CSymbol* symbol) {
++		bool result = false;
++		statement.VisitOperands([&](const SymbolRefPtr& symbolRef, bool) {
++			auto other = symbolRef->GetSymbol().get();
++			if(other->Equals(symbol) || other->Aliases(symbol)) result = true;
++		});
++		return result;
++	};
++
++	for(auto copyIterator = statements.begin(); copyIterator != statements.end();)
++	{
++		auto& copy = *copyIterator;
++		if((copy.op != OP_MOV) || !copy.dst || !copy.src1)
++		{
++			++copyIterator;
++			continue;
++		}
++		auto rel = copy.dst->GetSymbol();
++		auto tmp = copy.src1->GetSymbol();
++		if((rel->m_type != SYM_RELATIVE) || (tmp->m_type != SYM_TEMPORARY))
++		{
++			++copyIterator;
++			continue;
++		}
++
++		//The single definition of tmp, before the copy, with nothing in between that
++		//touches rel or could observe the context
++		auto defIterator = statements.end();
++		bool ok = true;
++		for(auto it = copyIterator; it != statements.begin();)
++		{
++			--it;
++			const auto& statement = *it;
++			if(statement.dst && statement.dst->GetSymbol()->Equals(tmp.get()))
++			{
++				defIterator = it;
++				break;
++			}
++			if(isBarrier(statement) || touches(statement, rel.get()))
++			{
++				ok = false;
++				break;
++			}
++		}
++		if(!ok || (defIterator == statements.end()) || !isSimpleOp(defIterator->op))
++		{
++			++copyIterator;
++			continue;
++		}
++		//No other definition of tmp in the block
++		unsigned int defCount = 0;
++		for(const auto& statement : statements)
++		{
++			if(statement.dst && statement.dst->GetSymbol()->Equals(tmp.get())) defCount++;
++		}
++		if(defCount != 1)
++		{
++			++copyIterator;
++			continue;
++		}
++		//Uses of tmp after the copy must come before rel changes again
++		bool relChanged = false;
++		for(auto it = std::next(copyIterator); it != statements.end(); ++it)
++		{
++			const auto& statement = *it;
++			bool usesTmp = false;
++			statement.VisitSources([&](const SymbolRefPtr& src, bool) {
++				if(src->GetSymbol()->Equals(tmp.get())) usesTmp = true;
++			});
++			if(usesTmp && relChanged)
++			{
++				ok = false;
++				break;
++			}
++			if(statement.dst)
++			{
++				auto dstSymbol = statement.dst->GetSymbol();
++				if(dstSymbol->Equals(rel.get()) || dstSymbol->Aliases(rel.get())) relChanged = true;
++			}
++			if(isBarrier(statement)) relChanged = true;
++		}
++		if(!ok)
++		{
++			++copyIterator;
++			continue;
++		}
++
++		defIterator->dst = MakeSymbolRef(rel);
++		for(auto it = std::next(defIterator); it != statements.end(); ++it)
++		{
++			it->VisitSources([&](SymbolRefPtr& src, bool) {
++				if(src->GetSymbol()->Equals(tmp.get())) src = MakeSymbolRef(rel);
++			});
++		}
++		copyIterator = statements.erase(copyIterator);
++	}
++}
++
+ void CJitter::CoalesceTemporaries(BASIC_BLOCK& basicBlock)
+ {
+ 	typedef std::vector<CSymbol*> EncounteredTempList;
