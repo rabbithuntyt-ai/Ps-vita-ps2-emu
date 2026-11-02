@@ -13,6 +13,6 @@ if(NOT executed OR NOT frames)
 	message(FATAL_ERROR "no counters in output:\n${out}\n${err}")
 endif()
 math(EXPR perFrame "${executed} / ${frames}")
-if(perFrame LESS 4500000 OR perFrame GREATER 5000000)
+if(perFrame LESS 4500000 OR perFrame GREATER 5500000) # the count includes the unfinished frame at pause
 	message(FATAL_ERROR "EE ran ${perFrame} instructions per frame (expected ~4915200)\n${out}")
 endif()

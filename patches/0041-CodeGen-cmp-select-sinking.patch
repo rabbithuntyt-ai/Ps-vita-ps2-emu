@@ -1,0 +1,206 @@
+diff --git a/include/Jitter_CodeGen_AArch32.h b/include/Jitter_CodeGen_AArch32.h
+--- a/include/Jitter_CodeGen_AArch32.h
++++ b/include/Jitter_CodeGen_AArch32.h
+@@ -657,6 +657,7 @@ namespace Jitter
+ 		void Emit_Select_VarVarAnyAny(const STATEMENT&);
+ 
+ 		void Emit_CmpSelectP1_AnyVar(const STATEMENT&);
++		void Emit_CmpSelectP1_AnyCst(const STATEMENT&);
+ 		void Emit_CmpSelectP2_VarAnyAny(const STATEMENT&);
+ 
+ 		//JMP
+diff --git a/include/Jitter_CodeGen_AArch64.h b/include/Jitter_CodeGen_AArch64.h
+--- a/include/Jitter_CodeGen_AArch64.h
++++ b/include/Jitter_CodeGen_AArch64.h
+@@ -700,6 +700,7 @@ namespace Jitter
+ 		void Emit_Select_VarVarAnyAny(const STATEMENT&);
+ 
+ 		void Emit_CmpSelectP1_AnyVar(const STATEMENT&);
++		void Emit_CmpSelectP1_AnyCst(const STATEMENT&);
+ 		void Emit_CmpSelectP2_VarAnyAny(const STATEMENT&);
+ 
+ 		void Emit_Add64_MemMemMem(const STATEMENT&);
+diff --git a/include/Jitter_CodeGen_x86.h b/include/Jitter_CodeGen_x86.h
+--- a/include/Jitter_CodeGen_x86.h
++++ b/include/Jitter_CodeGen_x86.h
+@@ -642,6 +642,7 @@ namespace Jitter
+ 
+ 		//CMPSELECT
+ 		void Emit_CmpSelectP1_AnyVar(const STATEMENT&);
++		void Emit_CmpSelectP1_AnyCst(const STATEMENT&);
+ 		void Emit_CmpSelectP2_VarAnyAny(const STATEMENT&);
+ 
+ 		//MERGETO64
+diff --git a/src/Jitter_CodeGen_AArch32.cpp b/src/Jitter_CodeGen_AArch32.cpp
+--- a/src/Jitter_CodeGen_AArch32.cpp
++++ b/src/Jitter_CodeGen_AArch32.cpp
+@@ -284,6 +284,7 @@ CCodeGen_AArch32::CONSTMATCHER CCodeGen_AArch32::g_constMatchers[] =
+ 	{ OP_SELECT, MATCH_VARIABLE, MATCH_VARIABLE, MATCH_ANY, MATCH_ANY, &CCodeGen_AArch32::Emit_Select_VarVarAnyAny },
+ 	
+ 	{ OP_CMPSELECT_P1, MATCH_NIL,      MATCH_ANY, MATCH_VARIABLE, MATCH_NIL, &CCodeGen_AArch32::Emit_CmpSelectP1_AnyVar    },
++	{ OP_CMPSELECT_P1, MATCH_NIL,      MATCH_ANY, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_AArch32::Emit_CmpSelectP1_AnyCst    },
+ 	{ OP_CMPSELECT_P2, MATCH_VARIABLE, MATCH_ANY, MATCH_ANY,      MATCH_NIL, &CCodeGen_AArch32::Emit_CmpSelectP2_VarAnyAny },
+ 
+ 	{ OP_NOT, MATCH_REGISTER, MATCH_REGISTER, MATCH_NIL, MATCH_NIL, &CCodeGen_AArch32::Emit_Not_RegReg },
+@@ -2031,6 +2032,16 @@ void CCodeGen_AArch32::Emit_CmpSelectP1_AnyVar(const STATEMENT& statement)
+ 	m_assembler.Cmp(src1Reg, src2Reg);
+ }
+ 
++void CCodeGen_AArch32::Emit_CmpSelectP1_AnyCst(const STATEMENT& statement)
++{
++	auto src1 = statement.src1->GetSymbol().get();
++	auto src2 = statement.src2->GetSymbol().get();
++	assert(src2->m_type == SYM_CONSTANT);
++
++	auto src1Reg = PrepareSymbolRegisterUse(src1, CAArch32Assembler::r1);
++	Cmp_GenericRegCst(src1Reg, src2->m_valueLow, CAArch32Assembler::r2);
++}
++
+ void CCodeGen_AArch32::Emit_CmpSelectP2_VarAnyAny(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+diff --git a/src/Jitter_CodeGen_AArch64.cpp b/src/Jitter_CodeGen_AArch64.cpp
+--- a/src/Jitter_CodeGen_AArch64.cpp
++++ b/src/Jitter_CodeGen_AArch64.cpp
+@@ -379,6 +379,7 @@ CCodeGen_AArch64::CONSTMATCHER CCodeGen_AArch64::g_constMatchers[] =
+ 	{ OP_SELECT,         MATCH_VARIABLE,       MATCH_VARIABLE,       MATCH_ANY,           MATCH_ANY,      &CCodeGen_AArch64::Emit_Select_VarVarAnyAny                 },
+ 
+ 	{ OP_CMPSELECT_P1,   MATCH_NIL,            MATCH_ANY,            MATCH_VARIABLE,      MATCH_NIL,      &CCodeGen_AArch64::Emit_CmpSelectP1_AnyVar                  },
++	{ OP_CMPSELECT_P1,   MATCH_NIL,            MATCH_ANY,            MATCH_CONSTANT,      MATCH_NIL,      &CCodeGen_AArch64::Emit_CmpSelectP1_AnyCst                  },
+ 	{ OP_CMPSELECT_P2,   MATCH_VARIABLE,       MATCH_ANY,            MATCH_ANY,           MATCH_NIL,      &CCodeGen_AArch64::Emit_CmpSelectP2_VarAnyAny               },
+ 	
+ 	{ OP_SLL,            MATCH_VARIABLE,       MATCH_ANY,            MATCH_VARIABLE,      MATCH_NIL,      &CCodeGen_AArch64::Emit_Shift_VarAnyVar<SHIFTOP_LSL>        },
+@@ -1856,6 +1857,18 @@ void CCodeGen_AArch64::Emit_CmpSelectP1_AnyVar(const STATEMENT& statement)
+ 	m_assembler.Cmp(src1Reg, src2Reg);
+ }
+ 
++void CCodeGen_AArch64::Emit_CmpSelectP1_AnyCst(const STATEMENT& statement)
++{
++	auto src1 = statement.src1->GetSymbol().get();
++	auto src2 = statement.src2->GetSymbol().get();
++	assert(src2->m_type == SYM_CONSTANT);
++
++	auto src1Reg = PrepareSymbolRegisterUse(src1, GetNextTempRegister());
++	auto cstReg = GetNextTempRegister();
++	LoadConstantInRegister(cstReg, src2->m_valueLow);
++	m_assembler.Cmp(src1Reg, cstReg);
++}
++
+ void CCodeGen_AArch64::Emit_CmpSelectP2_VarAnyAny(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+diff --git a/src/Jitter_CodeGen_x86.cpp b/src/Jitter_CodeGen_x86.cpp
+--- a/src/Jitter_CodeGen_x86.cpp
++++ b/src/Jitter_CodeGen_x86.cpp
+@@ -60,6 +60,7 @@ CCodeGen_x86::CONSTMATCHER CCodeGen_x86::g_constMatchers[] =
+ 	{ OP_CONDJMP, MATCH_NIL, MATCH_MEMORY,   MATCH_CONSTANT, MATCH_NIL, &CCodeGen_x86::Emit_CondJmp_MemCst },
+ 
+ 	{ OP_CMPSELECT_P1, MATCH_NIL,      MATCH_ANY, MATCH_VARIABLE, MATCH_NIL, &CCodeGen_x86::Emit_CmpSelectP1_AnyVar    },
++	{ OP_CMPSELECT_P1, MATCH_NIL,      MATCH_ANY, MATCH_CONSTANT, MATCH_NIL, &CCodeGen_x86::Emit_CmpSelectP1_AnyCst    },
+ 	{ OP_CMPSELECT_P2, MATCH_VARIABLE, MATCH_ANY, MATCH_ANY,      MATCH_NIL, &CCodeGen_x86::Emit_CmpSelectP2_VarAnyAny },
+ 
+ 	{ OP_SELECT, MATCH_VARIABLE, MATCH_VARIABLE, MATCH_ANY, MATCH_ANY, &CCodeGen_x86::Emit_Select_VarVarAnyAny },
+@@ -1145,6 +1146,16 @@ void CCodeGen_x86::Emit_CmpSelectP1_AnyVar(const STATEMENT& statement)
+ 	m_assembler.CmpEd(src1Reg, MakeVariableSymbolAddress(src2));
+ }
+ 
++void CCodeGen_x86::Emit_CmpSelectP1_AnyCst(const STATEMENT& statement)
++{
++	auto src1 = statement.src1->GetSymbol().get();
++	auto src2 = statement.src2->GetSymbol().get();
++	assert(src2->m_type == SYM_CONSTANT);
++
++	auto src1Reg = PrepareSymbolRegisterUse(src1, CX86Assembler::rDX);
++	m_assembler.CmpId(CX86Assembler::MakeRegisterAddress(src1Reg), src2->m_valueLow);
++}
++
+ void CCodeGen_x86::Emit_CmpSelectP2_VarAnyAny(const STATEMENT& statement)
+ {
+ 	auto dst = statement.dst->GetSymbol().get();
+diff --git a/src/Jitter_Optimize.cpp b/src/Jitter_Optimize.cpp
+--- a/src/Jitter_Optimize.cpp
++++ b/src/Jitter_Optimize.cpp
+@@ -1475,10 +1475,83 @@ bool CJitter::ClampingElimination(StatementList& statements)
+ 	return changed;
+ }
+ 
++static bool IsStoreThroughReference(OPERATION op)
++{
++	switch(op)
++	{
++	case OP_MD_STOREATREF_MASKED:
++	case OP_STORE16ATREF:
++	case OP_STORE8ATREF:
++	case OP_STOREATREF:
++		return true;
++	default:
++		return false;
++	}
++}
++
+ bool CJitter::MergeCmpSelectOps(StatementList& statements)
+ {
+ 	bool changed = false;
+ 
++	//Move a CMP down to the SELECT using its result when the statements in
++	//between neither read the predicate nor change the compared values (e.g.
++	//a branch computes its target between the two). Then they can merge.
++	for(auto selectIterator(statements.begin()); selectIterator != statements.end(); ++selectIterator)
++	{
++		const auto& select = *selectIterator;
++		if(select.op != OP_SELECT) continue;
++		if(selectIterator == statements.begin()) continue;
++		auto prevIterator = std::prev(selectIterator);
++		if(prevIterator->op == OP_CMP) continue;
++		auto predicate = select.src1->GetSymbol();
++		if(!predicate->IsTemporary()) continue;
++
++		auto cmpIterator = statements.end();
++		bool blocked = false;
++		for(auto it = prevIterator;; --it)
++		{
++			const auto& candidate = *it;
++			if((candidate.op == OP_CMP) && candidate.dst && candidate.dst->GetSymbol()->Equals(predicate.get()))
++			{
++				cmpIterator = it;
++				break;
++			}
++			if((candidate.op == OP_CALL) || (candidate.op == OP_PARAM) || (candidate.op == OP_PARAM_RET) ||
++			   (candidate.op == OP_LABEL) || (candidate.op == OP_GUESTLOAD) || (candidate.op == OP_GUESTSTORE) ||
++			   IsStoreThroughReference(candidate.op))
++			{
++				blocked = true;
++				break;
++			}
++			if(it == statements.begin()) break;
++		}
++		if(blocked || (cmpIterator == statements.end())) continue;
++
++		const auto& cmp = *cmpIterator;
++		bool safe = true;
++		for(auto it = std::next(cmpIterator); it != selectIterator; ++it)
++		{
++			const auto& between = *it;
++			between.VisitSources([&](const SymbolRefPtr& src, bool) {
++				if(src->GetSymbol()->Equals(predicate.get())) safe = false;
++			});
++			if(between.dst)
++			{
++				auto dstSymbol = between.dst->GetSymbol();
++				if(dstSymbol->Equals(predicate.get())) safe = false;
++				cmp.VisitSources([&](const SymbolRefPtr& src, bool) {
++					auto srcSymbol = src->GetSymbol();
++					if(srcSymbol->Equals(dstSymbol.get()) || srcSymbol->Aliases(dstSymbol.get())) safe = false;
++				});
++			}
++			if(!safe) break;
++		}
++		if(!safe) continue;
++
++		statements.splice(selectIterator, statements, cmpIterator);
++		changed = true;
++	}
++
+ 	for(auto statementIterator(statements.begin());
+ 	    statements.end() != statementIterator; ++statementIterator)
+ 	{
