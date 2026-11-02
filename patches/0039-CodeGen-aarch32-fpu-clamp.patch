@@ -1,0 +1,65 @@
+diff --git a/src/Jitter_CodeGen_AArch32.cpp b/src/Jitter_CodeGen_AArch32.cpp
+--- a/src/Jitter_CodeGen_AArch32.cpp
++++ b/src/Jitter_CodeGen_AArch32.cpp
+@@ -505,7 +505,7 @@ void CCodeGen_AArch32::GenerateCode(const StatementList& statements, unsigned in
+ 	m_usesClampConstants = false;
+ 	for(const auto& statement : statements)
+ 	{
+-		if(statement.op == OP_MD_CLAMP_S)
++		if((statement.op == OP_MD_CLAMP_S) || (statement.op == OP_FP_CLAMP_S))
+ 		{
+ 			m_usesClampConstants = true;
+ 			break;
+diff --git a/src/Jitter_CodeGen_AArch32_Fpu.cpp b/src/Jitter_CodeGen_AArch32_Fpu.cpp
+--- a/src/Jitter_CodeGen_AArch32_Fpu.cpp
++++ b/src/Jitter_CodeGen_AArch32_Fpu.cpp
+@@ -238,21 +238,25 @@ void CCodeGen_AArch32::Emit_Fp_Clamp_VarVar(const STATEMENT& statement)
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 
++	//Masks loaded in the prologue (q6/q7). The clamp works on whole quads:
++	//an allocated source is used in place and its lane of q0 is the result.
+ 	CTempRegisterContext tempRegisterContext;
+-	auto cstAddrReg = tempRegisterContext.Allocate();
+ 	auto tmpReg = CAArch32Assembler::q0;
+-	auto cst0Reg = CAArch32Assembler::q1;
+-	auto cst1Reg = CAArch32Assembler::q2;
+-
+-	m_assembler.Adrl(cstAddrReg, g_fpClampMask1);
+-	m_assembler.Vld1_32x4(cst0Reg, cstAddrReg);
+-	m_assembler.Adrl(cstAddrReg, g_fpClampMask2);
+-	m_assembler.Vld1_32x4(cst1Reg, cstAddrReg);
+-
+-	PrepareSymbolRegisterUseFp32Copy(tempRegisterContext, src1, CAArch32Assembler::s0);
+-	m_assembler.Vmin_I32(tmpReg, tmpReg, cst0Reg);
+-	m_assembler.Vmin_U32(tmpReg, tmpReg, cst1Reg);
+-	CommitSymbolRegisterFp32(tempRegisterContext, dst, CAArch32Assembler::s0);
++	auto srcQuad = tmpReg;
++	auto resultReg = CAArch32Assembler::s0;
++	if(src1->m_type == SYM_FP_REGISTER32)
++	{
++		auto srcReg = g_registersFp32[src1->m_valueLow];
++		srcQuad = static_cast<CAArch32Assembler::QUAD_REGISTER>((srcReg / 4) * 2);
++		resultReg = static_cast<CAArch32Assembler::SINGLE_REGISTER>(srcReg % 4);
++	}
++	else
++	{
++		LoadMemoryFp32InRegister(tempRegisterContext, CAArch32Assembler::s0, src1);
++	}
++	m_assembler.Vmin_I32(tmpReg, srcQuad, g_clampMask1Register);
++	m_assembler.Vmin_U32(tmpReg, tmpReg, g_clampMask2Register);
++	CommitSymbolRegisterFp32(tempRegisterContext, dst, resultReg);
+ }
+ 
+ void CCodeGen_AArch32::Emit_Fp_Cmp_AnyVarVar(const STATEMENT& statement)
+@@ -353,7 +357,9 @@ void CCodeGen_AArch32::Emit_Fp32_Mov_VarVar(const STATEMENT& statement)
+ 
+ 	CTempRegisterContext tempRegisterContext;
+ 
+-	auto src1Reg = PrepareSymbolRegisterUseFp32(tempRegisterContext, src1, CAArch32Assembler::s0);
++	//Loads go straight into an allocated destination
++	auto workReg = PrepareSymbolRegisterDefFp32(dst, CAArch32Assembler::s0);
++	auto src1Reg = PrepareSymbolRegisterUseFp32(tempRegisterContext, src1, workReg);
+ 	CommitSymbolRegisterFp32(tempRegisterContext, dst, src1Reg);
+ }
+ 

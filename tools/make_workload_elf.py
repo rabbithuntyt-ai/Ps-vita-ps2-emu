@@ -2,7 +2,10 @@
 # host (ARM) instructions the emulator needs per PS2 instruction
 # (tools/perf_gap.py). Each kernel loops forever and keeps a running result
 # in s7 so nothing is dead code.
-# Usage: make_workload_elf.py out.elf KERNEL   (KERNEL: int, float, mmi)
+# Usage: make_workload_elf.py out.elf KERNEL [--check]   (KERNEL: int, float, mmi)
+#   --check: run one pass, then s6 = 0xD0E and s7 = checksum (for tests);
+#            float takes its matrix from random bits (NaN/Inf/huge values
+#            exercise the clamping)
 #   int   - table-driven CRC32 over a 4KB buffer (decompression/checksum style:
 #           byte loads, table lookups, shifts, a branch per byte)
 #   float - 4x4 matrix times 64 vectors with the FPU (transform code)
@@ -48,6 +51,7 @@ def bne(rs, rt, n): fix.append((len(code), n)); I(0x05, rs, rt, 0)
 def beq(rs, rt, n): fix.append((len(code), n)); I(0x04, rs, rt, 0)
 
 kernel = sys.argv[2]
+check = '--check' in sys.argv
 DATA, TABLE, OUT = 0x00200000, 0x00300000, 0x00380000
 lui('sp', 0x01F0)
 li('s0', DATA); li('s1', TABLE); li('s2', OUT)
@@ -80,7 +84,7 @@ elif kernel == 'float':
     # Matrix from the data (as small floats), then transform 64 vec4s
     label('outer')
     for r in range(16):
-        lwc1(r, r * 4, 's1')               # matrix in f0..f15 (table area, zero = fine)
+        lwc1(r, r * 4, 's0' if check else 's1')  # matrix in f0..f15 (table area: zero; --check: random bits)
     move('a0', 's0'); move('a1', 's2'); li('t9', 64)
     label('vec')
     lwc1(16, 0, 'a0'); lwc1(17, 4, 'a0'); lwc1(18, 8, 'a0'); lwc1(19, 12, 'a0')
@@ -90,6 +94,13 @@ elif kernel == 'float':
         swc1(24, row * 4, 'a1')
     addiu('a0', 'a0', 16); addiu('a1', 'a1', 16); addiu('t9', 't9', -1); bne('t9', 'zero', 'vec'); nop()
     mfc1('t0', 24); xor('s7', 's7', 't0')
+    if check:
+        move('a1', 's2'); li('t9', 256)
+        label('sum')
+        lw('t0', 0, 'a1'); sll('t1', 's7', 1); srl('t2', 's7', 31); xor('s7', 't1', 't2'); xor('s7', 's7', 't0')
+        addiu('a1', 'a1', 4); addiu('t9', 't9', -1); bne('t9', 'zero', 'sum'); nop()
+        li('s6', 0xD0E)
+        label('done'); beq('zero', 'zero', 'done'); nop()
     beq('zero', 'zero', 'outer'); nop()
 elif kernel == 'mmi':
     label('outer')

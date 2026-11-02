@@ -319,6 +319,30 @@ else()
 				-DRUNNER=$<TARGET_FILE:vitaps2_host>
 				"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
 				-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ee_clock_test.cmake)
+		# EE FPU with operand clamping (expected checksum per architecture)
+		if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
+			set(EE_FLOAT_EXPECTED 7D9211C6)
+			set(EE_FLOAT_MODES default chained safe)
+		else()
+			set(EE_FLOAT_EXPECTED DC5121AE)
+			set(EE_FLOAT_MODES default)
+		endif()
+		foreach(EE_FLOAT_MODE ${EE_FLOAT_MODES})
+			add_test(NAME ee_float_test_${EE_FLOAT_MODE}
+				COMMAND ${CMAKE_COMMAND}
+					-DPYTHON=${Python3_EXECUTABLE}
+					-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+					-DRUNNER=$<TARGET_FILE:vitaps2_host>
+					"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
+					-DEXPECTED=${EE_FLOAT_EXPECTED}
+					-DSUFFIX=_${EE_FLOAT_MODE}
+					-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ee_float_test.cmake)
+			if(EE_FLOAT_MODE STREQUAL "chained")
+				set_tests_properties(ee_float_test_${EE_FLOAT_MODE} PROPERTIES ENVIRONMENT CODEGEN_AARCH32_CHAINED=1)
+			elseif(EE_FLOAT_MODE STREQUAL "safe")
+				set_tests_properties(ee_float_test_${EE_FLOAT_MODE} PROPERTIES ENVIRONMENT "CODEGEN_AARCH32_CONSERVATIVE=1;CODEGEN_AARCH32_NO_GUESTMEMOPS=1;PLAY_NO_SIGNEXT_TRACKING=1")
+			endif()
+		endforeach()
 		add_test(NAME ipu_decode_test
 			COMMAND ${CMAKE_COMMAND}
 				-DPYTHON=${Python3_EXECUTABLE}
