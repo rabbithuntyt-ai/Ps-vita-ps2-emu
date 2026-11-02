@@ -312,6 +312,14 @@ else()
 					-DSUFFIX=_${EE_MEMORY_TEST}
 					-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ee_memory_test.cmake)
 		endforeach()
+		add_test(NAME ipu_decode_test
+			COMMAND ${CMAKE_COMMAND}
+				-DPYTHON=${Python3_EXECUTABLE}
+				-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+				-DRUNNER=$<TARGET_FILE:vitaps2_host>
+				"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
+				-DEXPECTED=268B3623
+				-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ipu_decode_test.cmake)
 		# Random EE integer code checked against reference checksums
 		foreach(EE_FUZZ_CASE "1;19501935" "2;DE6B896F" "3;8006134B")
 			list(GET EE_FUZZ_CASE 0 EE_FUZZ_SEED)
