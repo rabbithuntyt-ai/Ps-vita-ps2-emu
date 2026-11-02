@@ -312,6 +312,13 @@ else()
 					-DSUFFIX=_${EE_MEMORY_TEST}
 					-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ee_memory_test.cmake)
 		endforeach()
+		add_test(NAME ee_clock_test
+			COMMAND ${CMAKE_COMMAND}
+				-DPYTHON=${Python3_EXECUTABLE}
+				-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+				-DRUNNER=$<TARGET_FILE:vitaps2_host>
+				"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
+				-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ee_clock_test.cmake)
 		add_test(NAME ipu_decode_test
 			COMMAND ${CMAKE_COMMAND}
 				-DPYTHON=${Python3_EXECUTABLE}

@@ -143,6 +143,8 @@ CEmuSession::CEmuSession(const CONFIG& config)
 		auto info = m_vm->GetCpuUtilisationInfo();
 		m_eeIdleTicks += std::max(info.eeIdleTicks, 0);
 		m_eeBusyTicks += std::max(info.eeTotalTicks, 0);
+		m_eeExecutedTicks += std::max(info.eeTotalTicks - info.eeIdleTicks, 0);
+		m_eeIdleTotalTicks += std::max(info.eeIdleTicks, 0);
 		if(++m_eeIdleFrames >= 30)
 		{
 			int64_t total = m_eeIdleTicks + m_eeBusyTicks;

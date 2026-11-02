@@ -89,6 +89,17 @@ public:
 		return m_frames;
 	}
 
+	// EE instructions executed so far (Play counts one tick per instruction;
+	// idle time excluded). Updated once per frame.
+	uint64_t GetEeExecutedTicks() const
+	{
+		return m_eeExecutedTicks;
+	}
+	uint64_t GetEeIdleTicks() const
+	{
+		return m_eeIdleTotalTicks;
+	}
+
 	// Number of frames the emulated machine has completed (vblanks with GS activity).
 	uint64_t GetVmFrameCount() const
 	{
@@ -162,6 +173,8 @@ private:
 	std::atomic<uint64_t> m_vmFrames{0};
 	// EE idle accounting (emulation thread), published every 30 frames.
 	int64_t m_eeIdleTicks = 0, m_eeBusyTicks = 0;
+	std::atomic<uint64_t> m_eeExecutedTicks{0};
+	std::atomic<uint64_t> m_eeIdleTotalTicks{0};
 	uint32_t m_eeIdleFrames = 0;
 	std::atomic<float> m_eeIdleRatio{0.0f};
 	Framework::CSignal<void()>::Connection m_newFrameConnection;

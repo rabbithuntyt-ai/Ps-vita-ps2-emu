@@ -171,6 +171,7 @@ int main(int argc, char** argv)
 		            debug.eeRa, debug.iopPc, debug.iopRa, debug.iopThread, debug.intcStat, debug.intcMask, debug.dmacStat,
 		            debug.vu1Start, debug.vu1Pc, debug.vu1RunMs);
 		std::printf("EE s6 %08X s7 %08X\n", debug.eeGpr[22], debug.eeGpr[23]);
+		std::printf("EE executed %llu idle %llu\n", (unsigned long long)session.GetEeExecutedTicks(), (unsigned long long)session.GetEeIdleTicks());
 		session.GetFrames().Fetch(serial, pixels, width, height);
 		for(const auto& usage : threadUsage)
 		{
