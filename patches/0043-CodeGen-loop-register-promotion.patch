@@ -1,0 +1,249 @@
+diff --git a/include/Jitter.h b/include/Jitter.h
+--- a/include/Jitter.h
++++ b/include/Jitter.h
+@@ -322,6 +322,7 @@ namespace Jitter
+ 			CSymbolTable symbolTable;
+ 			bool optimized = false;
+ 			bool hasJumpRef = false;
++			uint32 reservedRegisters = 0; //GPR ids holding promoted loop symbols (not allocatable)
+ 		};
+ 		typedef std::list<BASIC_BLOCK> BasicBlockList;
+ 
+@@ -383,6 +384,7 @@ namespace Jitter
+ 		StatementList CollapseVersionedStatementList(const VERSIONED_STATEMENT_LIST&);
+ 		void CoalesceTemporaries(BASIC_BLOCK&);
+ 		void CoalesceIntoRelatives(BASIC_BLOCK&);
++		void PromoteLoopRegisters();
+ 		void RemoveSelfAssignments(BASIC_BLOCK&);
+ 		void PruneSymbols(BASIC_BLOCK&) const;
+ 
+diff --git a/src/Jitter_Optimize.cpp b/src/Jitter_Optimize.cpp
+--- a/src/Jitter_Optimize.cpp
++++ b/src/Jitter_Optimize.cpp
+@@ -185,6 +185,8 @@ void CJitter::Compile()
+ 		if(!dirty) break;
+ 	}
+ 
++	PromoteLoopRegisters();
++
+ 	unsigned int stackSize = 0;
+ 
+ 	//Allocate registers
+@@ -1679,6 +1681,199 @@ bool CJitter::DeadcodeElimination(VERSIONED_STATEMENT_LIST& versionedStatementLi
+ 	return changed;
+ }
+ 
++//Loop register promotion. A loop is a chain of blocks, entered only at its
++//header (by falling through, or the back jump ending the chain), with side
++//exits (conditional jumps out). Context symbols the chain uses most get a
++//register for the whole loop: loaded once in a preheader block, stored on
++//the way out through each exit (stub blocks), never in the loop itself.
++//Only symbols guest memory handlers can't touch, and only chains without
++//calls or external jumps, so nothing else can read the context meanwhile.
++void CJitter::PromoteLoopRegisters()
++{
++	static const bool disabled = (getenv("JITTER_NO_LOOP_PROMOTION") != nullptr); //for A/B testing
++	if(disabled) return;
++
++	unsigned int gprCount = m_codeGen->GetAvailableRegisterCount();
++	const unsigned int keepForTemporaries = 3;
++	if(gprCount <= keepForTemporaries) return;
++	unsigned int maxPromoted = std::min<unsigned int>(gprCount - keepForTemporaries, 4);
++
++	for(auto tailIterator = m_basicBlocks.begin(); tailIterator != m_basicBlocks.end(); ++tailIterator)
++	{
++		auto& tail = *tailIterator;
++		if(tail.statements.empty()) continue;
++		const auto& backJump = tail.statements.back();
++		if(backJump.op != OP_JMP) continue;
++		uint32 headerId = backJump.jmpBlock;
++
++		auto headerIterator = m_basicBlocks.begin();
++		for(; headerIterator != tailIterator; ++headerIterator)
++		{
++			if(headerIterator->id == headerId) break;
++		}
++		if((headerIterator == tailIterator) && (tail.id != headerId)) continue;
++		if(headerIterator == m_basicBlocks.begin()) continue;
++
++		auto chainEnd = std::next(tailIterator);
++		std::set<uint32> chainIds;
++		for(auto it = headerIterator; it != chainEnd; ++it) chainIds.insert(it->id);
++
++		//Single entry: nothing but the back jump targets the chain
++		bool ok = true;
++		for(const auto& block : m_basicBlocks)
++		{
++			for(const auto& statement : block.statements)
++			{
++				if((statement.op != OP_JMP) && (statement.op != OP_CONDJMP)) continue;
++				if(chainIds.count(statement.jmpBlock) == 0) continue;
++				if(&statement != &backJump) ok = false;
++			}
++		}
++		if(!ok) continue;
++
++		//No calls or external jumps; jumps only as side exits or the back jump
++		std::map<uint32, unsigned int> useCounts;
++		std::vector<CSymbol*> otherRelatives;
++		for(auto it = headerIterator; ok && (it != chainEnd); ++it)
++		{
++			for(const auto& statement : it->statements)
++			{
++				switch(statement.op)
++				{
++				case OP_CALL:
++				case OP_PARAM:
++				case OP_PARAM_RET:
++				case OP_RETVAL:
++				case OP_EXTERNJMP:
++				case OP_EXTERNJMP_DYN:
++				case OP_GOTO:
++				case OP_LABEL:
++					ok = false;
++					break;
++				case OP_JMP:
++					if(&statement != &backJump) ok = false;
++					break;
++				default:
++					break;
++				}
++				statement.VisitOperands([&](const SymbolRefPtr& symbolRef, bool) {
++					auto symbol = symbolRef->GetSymbol().get();
++					if((symbol->m_type == SYM_RELATIVE) && IsGuestMemorySafeSymbol(symbol))
++					{
++						useCounts[symbol->m_valueLow]++;
++					}
++					else if(symbol->IsRelative() || (symbol->m_type == SYM_REL_REFERENCE))
++					{
++						otherRelatives.push_back(symbol);
++					}
++				});
++			}
++		}
++		if(!ok) continue;
++
++		//Candidates not overlapped by other accesses (64/128-bit, references...)
++		std::vector<std::pair<unsigned int, uint32>> candidates;
++		for(const auto& useCount : useCounts)
++		{
++			CSymbol candidate(SYM_RELATIVE, useCount.first, 0);
++			bool aliased = false;
++			for(auto* other : otherRelatives)
++			{
++				if((other->m_type == SYM_REL_REFERENCE) || candidate.Aliases(other)) aliased = true;
++			}
++			if(!aliased) candidates.push_back(std::make_pair(useCount.second, useCount.first));
++		}
++		if(candidates.empty()) continue;
++		std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
++			return (a.first != b.first) ? (a.first > b.first) : (a.second < b.second);
++		});
++		if(candidates.size() > maxPromoted) candidates.resize(maxPromoted);
++
++		//Highest register ids, so the block allocator keeps the low ones
++		std::map<uint32, unsigned int> promoted; //offset -> register id
++		uint32 reservedMask = 0;
++		for(unsigned int i = 0; i < candidates.size(); i++)
++		{
++			unsigned int registerId = gprCount - 1 - i;
++			promoted[candidates[i].second] = registerId;
++			reservedMask |= (1 << registerId);
++		}
++
++		//Rewrite the chain; remember what it writes
++		std::set<uint32> defined;
++		for(auto it = headerIterator; it != chainEnd; ++it)
++		{
++			auto& block = *it;
++			block.reservedRegisters |= reservedMask;
++			for(auto& statement : block.statements)
++			{
++				if(statement.dst)
++				{
++					auto dstSymbol = statement.dst->GetSymbol();
++					if((dstSymbol->m_type == SYM_RELATIVE) && promoted.count(dstSymbol->m_valueLow)) defined.insert(dstSymbol->m_valueLow);
++				}
++				statement.VisitOperands([&](SymbolRefPtr& symbolRef, bool) {
++					auto symbol = symbolRef->GetSymbol();
++					if(symbol->m_type != SYM_RELATIVE) return;
++					auto promotedIterator = promoted.find(symbol->m_valueLow);
++					if(promotedIterator == promoted.end()) return;
++					symbolRef = MakeSymbolRef(MakeSymbol(&block, SYM_REGISTER, promotedIterator->second, 0));
++				});
++			}
++		}
++
++		//Preheader: load everything once
++		{
++			BASIC_BLOCK preheader;
++			preheader.id = m_nextBlockId++;
++			preheader.optimized = true;
++			preheader.reservedRegisters = reservedMask;
++			for(const auto& promotedPair : promoted)
++			{
++				STATEMENT statement;
++				statement.op = OP_MOV;
++				statement.dst = MakeSymbolRef(MakeSymbol(&preheader, SYM_REGISTER, promotedPair.second, 0));
++				statement.src1 = MakeSymbolRef(MakeSymbol(&preheader, SYM_RELATIVE, promotedPair.first, 0));
++				preheader.statements.push_back(statement);
++			}
++			m_basicBlocks.insert(headerIterator, std::move(preheader));
++		}
++
++		//Exits: side exits go through stubs that store what the loop wrote. The
++		//stubs follow the tail, which ends with the back jump (no fall through).
++		auto stubPosition = chainEnd;
++		for(auto it = headerIterator; it != chainEnd; ++it)
++		{
++			for(auto& statement : it->statements)
++			{
++				if(statement.op != OP_CONDJMP) continue;
++				if(chainIds.count(statement.jmpBlock) != 0) continue;
++				BASIC_BLOCK stub;
++				stub.id = m_nextBlockId++;
++				stub.optimized = true;
++				stub.hasJumpRef = true;
++				stub.reservedRegisters = reservedMask;
++				for(auto offset : defined)
++				{
++					STATEMENT store;
++					store.op = OP_MOV;
++					store.dst = MakeSymbolRef(MakeSymbol(&stub, SYM_RELATIVE, offset, 0));
++					store.src1 = MakeSymbolRef(MakeSymbol(&stub, SYM_REGISTER, promoted[offset], 0));
++					stub.statements.push_back(store);
++				}
++				STATEMENT jump;
++				jump.op = OP_JMP;
++				jump.jmpBlock = statement.jmpBlock;
++				stub.statements.push_back(jump);
++				statement.jmpBlock = stub.id;
++				m_basicBlocks.insert(stubPosition, std::move(stub));
++			}
++		}
++		//One loop per function (blocks loop on themselves)
++		return;
++	}
++}
++
+ //"t = op(...); ...; rel = t" -> "rel = op(...); ...": the operation writes the
+ //context symbol directly (later uses of t read rel), which saves a copy once
+ //registers are allocated. Only when nothing in between touches rel and
+diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
+--- a/src/Jitter_RegAlloc.cpp
++++ b/src/Jitter_RegAlloc.cpp
+@@ -46,6 +46,14 @@ void CJitter::AllocateRegisters(BASIC_BLOCK& basicBlock)
+ 		MarkAliasedSymbols(basicBlock, allocRange, symbolRegAllocs);
+ 
+ 		RegisterOccupancy occupancy;
++		//Registers holding promoted loop symbols are taken for the whole block
++		for(unsigned int i = 0; i < 32; i++)
++		{
++			if(basicBlock.reservedRegisters & (1 << i))
++			{
++				occupancy[std::make_pair(SYM_REGISTER, i)].push_back(std::make_pair(0U, ~0U));
++			}
++		}
+ 		AssociateSymbolsToRegisters(symbolRegAllocs, allocRange, occupancy);
+ 		CommitRegisterAllocation(basicBlock, allocRange, isLastRange, symbolRegAllocs, spillStatements, loadStatements);
+ 

@@ -1,7 +1,9 @@
 # Random EE integer code (32 and 64-bit ops, forward branches with delay slots,
 # loads/stores) ending with a checksum of both halves of every register:
 # results must not depend on JIT optimizations. Ends with s6 = 0xD0E, s7 = checksum.
-# Usage: make_ee_fuzz_elf.py out.elf SEED [COUNT]
+# Usage: make_ee_fuzz_elf.py out.elf SEED [COUNT] [--loops]
+#   --loops: also counted loops (t9) around random bodies, some with forward
+#            branches inside (exercises loop register promotion)
 import os, random, struct, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import make_test_elf as m
@@ -9,7 +11,9 @@ import make_test_elf as m
 R = {n: i for i, n in enumerate('zero at v0 v1 a0 a1 a2 a3 t0 t1 t2 t3 t4 t5 t6 t7 s0 s1 s2 s3 s4 s5 s6 s7 t8 t9 k0 k1 gp sp fp ra'.split())}
 POOL = [R[n] for n in 't0 t1 t2 t3 t4 t5 t6 t7 s0 s1 s2 s3 s4 s5 v0 v1'.split()] + [0]
 rng = random.Random(int(sys.argv[2]))
-count = int(sys.argv[3]) if len(sys.argv) > 3 else 3000
+args = [a for a in sys.argv[1:] if not a.startswith('--')]
+loops = '--loops' in sys.argv
+count = int(args[2]) if len(args) > 2 else 3000
 code = []
 
 def I(op, rs, rt, imm): code.append((op << 26) | (rs << 21) | (rt << 16) | (imm & 0xFFFF))
@@ -65,8 +69,22 @@ for r in POOL[:-1]:
     if rng.random() < 0.3:
         Rr(0x3C, 0, r, r, 0)                     # dsll32: upper half not a sign extension
         I(0x0D, r, r, rng.randrange(65536))
+T9 = R['t9']
 for i in range(count):
-    if rng.random() < 0.12:
+    if loops and rng.random() < 0.03:
+        I(0x0D, 0, T9, rng.randrange(2, 20))     # ori t9, zero, N
+        top = len(code)
+        for j in range(rng.randrange(3, 30)):
+            if rng.random() < 0.1:
+                skip = rng.randrange(1, 3)
+                branch(skip); alu()
+                for k in range(skip): alu()
+            else:
+                alu()
+        I(0x09, T9, T9, 0xFFFF)                  # addiu t9, t9, -1
+        I(0x05, T9, 0, top - (len(code) + 1))    # bne t9, zero, top
+        alu()                                    # delay slot
+    elif rng.random() < 0.12:
         skip = rng.randrange(1, 4)
         branch(skip)
         alu()                                    # delay slot

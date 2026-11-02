@@ -1,6 +1,6 @@
 # Random EE integer code (tools/make_ee_fuzz_elf.py): the final checksum of all
 # registers must match the value recorded from the reference (x86, no tracking).
-execute_process(COMMAND ${PYTHON} ${SOURCE_DIR}/tools/make_ee_fuzz_elf.py ee_fuzz${SUFFIX}.elf ${SEED} RESULT_VARIABLE r)
+execute_process(COMMAND ${PYTHON} ${SOURCE_DIR}/tools/make_ee_fuzz_elf.py ee_fuzz${SUFFIX}.elf ${SEED} ${FUZZ_ARGS} RESULT_VARIABLE r)
 if(NOT r EQUAL 0)
 	message(FATAL_ERROR "make_ee_fuzz_elf.py failed")
 endif()

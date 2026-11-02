@@ -352,9 +352,14 @@ else()
 				-DEXPECTED=268B3623
 				-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ipu_decode_test.cmake)
 		# Random EE integer code checked against reference checksums
-		foreach(EE_FUZZ_CASE "1;19501935" "2;DE6B896F" "3;8006134B")
+		# (seed, expected, generator option: --loops adds counted loops)
+		foreach(EE_FUZZ_CASE "1;19501935;-" "2;DE6B896F;-" "3;8006134B;-" "100;D477E7D3;--loops" "101;54F8303C;--loops")
 			list(GET EE_FUZZ_CASE 0 EE_FUZZ_SEED)
 			list(GET EE_FUZZ_CASE 1 EE_FUZZ_EXPECTED)
+			list(GET EE_FUZZ_CASE 2 EE_FUZZ_ARGS)
+			if(EE_FUZZ_ARGS STREQUAL "-")
+				set(EE_FUZZ_ARGS "")
+			endif()
 			set(EE_FUZZ_MODES default)
 			if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
 				list(APPEND EE_FUZZ_MODES chained safe)
@@ -369,6 +374,7 @@ else()
 						"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
 						-DSEED=${EE_FUZZ_SEED}
 						-DEXPECTED=${EE_FUZZ_EXPECTED}
+						-DFUZZ_ARGS=${EE_FUZZ_ARGS}
 						-DSUFFIX=_${EE_FUZZ_SEED}_${EE_FUZZ_MODE}
 						-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ee_fuzz_test.cmake)
 				if(EE_FUZZ_MODE STREQUAL "chained")
