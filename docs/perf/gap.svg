@@ -15,7 +15,7 @@ svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0
 <rect class="bg" width="760" height="400" rx="8"/>
 <text class="t2" x="56" y="30" font-size="13">PS2 → Vita performance gap (lower is better, 1.0 = one-to-one)</text>
 <text class="h" x="56" y="66" font-size="30" font-weight="600">6.81×</text>
-<text class="t2" x="154" y="66" font-size="13">ARM instructions per PS2 instruction, average of 4 workloads · 31ce31e</text>
+<text class="t2" x="154" y="66" font-size="13">ARM instructions per PS2 instruction, average of 4 workloads · 9aa064e</text>
 <line class="axis" x1="56" x2="610" y1="360.0" y2="360.0"/>
 <text class="m" x="48" y="364.0" font-size="11" text-anchor="end">0</text>
 <line class="grid" x1="56" x2="610" y1="299.0" y2="299.0"/>
@@ -30,26 +30,26 @@ svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0
 <text class="t2" x="618" y="351.8" font-size="11">one-to-one</text>
 <text class="m" x="56" y="380" font-size="11">2026-11-02</text>
 <text class="m" x="610" y="380" font-size="11" text-anchor="end">2026-11-03</text>
-<polyline class="line" style="stroke:var(--s1)" points="56.0,283.8 98.6,283.8 141.2,283.8 183.8,283.8 226.5,287.9 269.1,290.9 311.7,294.9 354.3,294.9 396.9,294.9 439.5,294.9 482.2,294.9 524.8,294.9 567.4,294.9 610.0,294.9"/>
+<polyline class="line" style="stroke:var(--s1)" points="56.0,283.8 95.6,283.8 135.1,283.8 174.7,283.8 214.3,287.9 253.9,290.9 293.4,294.9 333.0,294.9 372.6,294.9 412.1,294.9 451.7,294.9 491.3,294.9 530.9,294.9 570.4,294.9 610.0,294.9"/>
 <circle class="dot" style="fill:var(--s1)" cx="610.0" cy="294.9" r="4.5"/>
-<polyline class="line" style="stroke:var(--s2)" points="56.0,171.3 98.6,171.3 141.2,260.8 183.8,260.8 226.5,262.0 269.1,262.8 311.7,263.9 354.3,263.9 396.9,263.8 439.5,263.9 482.2,263.9 524.8,263.9 567.4,263.8 610.0,263.8"/>
-<circle class="dot" style="fill:var(--s2)" cx="610.0" cy="263.8" r="4.5"/>
-<polyline class="line" style="stroke:var(--s3)" points="56.0,276.0 98.6,276.0 141.2,276.0 183.8,276.0 226.5,278.6 269.1,281.3 311.7,283.8 354.3,283.8 396.9,283.8 439.5,283.8 482.2,283.8 524.8,283.8 567.4,283.8 610.0,283.8"/>
+<polyline class="line" style="stroke:var(--s2)" points="56.0,171.3 95.6,171.3 135.1,260.8 174.7,260.8 214.3,262.0 253.9,262.8 293.4,263.9 333.0,263.9 372.6,263.8 412.1,263.9 451.7,263.9 491.3,263.9 530.9,263.8 570.4,263.8 610.0,263.9"/>
+<circle class="dot" style="fill:var(--s2)" cx="610.0" cy="263.9" r="4.5"/>
+<polyline class="line" style="stroke:var(--s3)" points="56.0,276.0 95.6,276.0 135.1,276.0 174.7,276.0 214.3,278.6 253.9,281.3 293.4,283.8 333.0,283.8 372.6,283.8 412.1,283.8 451.7,283.8 491.3,283.8 530.9,283.8 570.4,283.8 610.0,283.8"/>
 <circle class="dot" style="fill:var(--s3)" cx="610.0" cy="283.8" r="4.5"/>
-<polyline class="line" style="stroke:var(--s4)" points="56.0,118.1 98.6,118.1 141.2,118.1 183.8,261.2 226.5,262.6 269.1,264.1 311.7,265.3 354.3,265.3 396.9,265.3 439.5,265.3 482.2,265.3 524.8,265.3 567.4,265.3 610.0,265.2"/>
+<polyline class="line" style="stroke:var(--s4)" points="56.0,118.1 95.6,118.1 135.1,118.1 174.7,261.2 214.3,262.6 253.9,264.1 293.4,265.3 333.0,265.3 372.6,265.3 412.1,265.3 451.7,265.3 491.3,265.3 530.9,265.3 570.4,265.2 610.0,265.2"/>
 <circle class="dot" style="fill:var(--s4)" cx="610.0" cy="265.2" r="4.5"/>
-<path d="M615.0 263.8 L621.0 263.8" style="stroke:var(--s2);stroke-width:1;fill:none"/>
-<text class="h" x="624" y="267.8" font-size="12" font-weight="600">7.88</text>
-<text class="t2" x="658" y="267.8" font-size="12">float</text>
-<path d="M615.0 265.2 L621.0 281.8" style="stroke:var(--s4);stroke-width:1;fill:none"/>
-<text class="h" x="624" y="285.8" font-size="12" font-weight="600">7.77</text>
-<text class="t2" x="658" y="285.8" font-size="12">mem</text>
-<path d="M615.0 283.8 L621.0 299.8" style="stroke:var(--s3);stroke-width:1;fill:none"/>
-<text class="h" x="624" y="303.8" font-size="12" font-weight="600">6.24</text>
-<text class="t2" x="658" y="303.8" font-size="12">mmi</text>
-<path d="M615.0 294.9 L621.0 317.8" style="stroke:var(--s1);stroke-width:1;fill:none"/>
-<text class="h" x="624" y="321.8" font-size="12" font-weight="600">5.33</text>
-<text class="t2" x="658" y="321.8" font-size="12">int</text>
+<path d="M615.0 263.9 L621.0 263.9" style="stroke:var(--s2);stroke-width:1;fill:none"/>
+<text class="h" x="624" y="267.9" font-size="12" font-weight="600">7.88</text>
+<text class="t2" x="658" y="267.9" font-size="12">float</text>
+<path d="M615.0 265.2 L621.0 281.9" style="stroke:var(--s4);stroke-width:1;fill:none"/>
+<text class="h" x="624" y="285.9" font-size="12" font-weight="600">7.77</text>
+<text class="t2" x="658" y="285.9" font-size="12">mem</text>
+<path d="M615.0 283.8 L621.0 299.9" style="stroke:var(--s3);stroke-width:1;fill:none"/>
+<text class="h" x="624" y="303.9" font-size="12" font-weight="600">6.24</text>
+<text class="t2" x="658" y="303.9" font-size="12">mmi</text>
+<path d="M615.0 294.9 L621.0 317.9" style="stroke:var(--s1);stroke-width:1;fill:none"/>
+<text class="h" x="624" y="321.9" font-size="12" font-weight="600">5.33</text>
+<text class="t2" x="658" y="321.9" font-size="12">int</text>
 <line x1="56" x2="70" y1="84" y2="84" style="stroke:var(--s1);stroke-width:3;stroke-linecap:round"/>
 <text class="t2" x="76" y="88" font-size="11">int – Integer (CRC loop)</text>
 <line x1="306" x2="320" y1="84" y2="84" style="stroke:var(--s2);stroke-width:3;stroke-linecap:round"/>
