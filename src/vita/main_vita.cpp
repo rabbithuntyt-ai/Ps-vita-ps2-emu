@@ -549,7 +549,7 @@ namespace
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",ps2_%s", EmuProfile::GetSectionName(i));
 				std::fprintf(perfFile, ",spu_full_waits,spu_read_waits,ipu_idec,ipu_bdec,ipu_out_kb,ipu_stalls,audio_underruns,audio_tempo");
 				std::fprintf(perfFile, ",jit_blocks,jit_writes,jit_write_ms,jit_alloc_ms,jit_free_ranges,jit_translate_ms,jit_finish_ms,jit_install_ms,jit_guest_instr,jit_code_kb,jit_opt_ms,jit_alloc_regs_ms,jit_codegen_ms,jit_statements");
-				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads\n");
+				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads\n");
 			}
 		}
 		const uint64_t runStart = sceKernelGetProcessTimeWide();
@@ -873,7 +873,8 @@ namespace
 							             (g_presentUs - perfPresentUs) / 1000.0, frame.drawCalls, frame.textureUploads, frame.targetUploads, frame.targetDownloads);
 							std::fprintf(perfFile, "%.1f,%u,%.1f,%u,", (times.uploadGlUs - perfGpu.uploadGlUs) / 1000.0, static_cast<unsigned int>((times.uploadPixels - perfGpu.uploadPixels) / 1000),
 							             (times.downloadGlUs - perfGpu.downloadGlUs) / 1000.0, static_cast<unsigned int>((times.downloadPixels - perfGpu.downloadPixels) / 1000));
-							std::fprintf(perfFile, "%u,%u,%u,%u,", frame.targetsCreated, frame.transfersIn, frame.transfersOut, frame.transfersLocal);
+							std::fprintf(perfFile, "%u,%u,%u,%u,%u,%u,", frame.targetsCreated, frame.transfersIn, frame.transfersOut, frame.transfersLocal,
+							             frame.deferredUploads, frame.skippedUploadRows);
 							perfGpu = times;
 							perfPresentUs = g_presentUs;
 						}

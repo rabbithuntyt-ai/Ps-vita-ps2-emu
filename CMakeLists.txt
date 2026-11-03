@@ -208,6 +208,11 @@ else()
 	add_executable(mpeg2_decoder_tests tests/mpeg2_decoder_tests.cpp)
 	target_link_libraries(mpeg2_decoder_tests PRIVATE vitaps2_common)
 
+	# Row-run GS transfer writes (patch 0061) against Play!'s per pixel ones.
+	add_executable(gs_transfer_tests tests/gs_transfer_tests.cpp)
+	target_link_libraries(gs_transfer_tests PRIVATE vitaps2_common)
+	add_test(NAME gs_transfer_tests COMMAND gs_transfer_tests)
+
 	# NEON kernels against the scalar ones (build for ARM to test NEON).
 	add_executable(mpeg2_simd_tests tests/mpeg2_simd_tests.cpp)
 	target_include_directories(mpeg2_simd_tests PRIVATE src/common)

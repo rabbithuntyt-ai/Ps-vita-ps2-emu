@@ -741,10 +741,20 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 			uint32 y1 = std::min<uint32>(trxPos.nDSAY + trxReg.nRRH, rowEnd);
 			if(y0 < y1) UploadTarget(*target, trxPos.nDSAX, y0, trxReg.nRRW, y1 - y0);
 		}
-		else
+		else if((rowEnd >= target->validRows) && !(target->gpuDirty && (target->dirtyY1 > rowBegin)))
 		{
 			// Data in another layout (usually textures) written over the
-			// target: only the page rows it touched change.
+			// target up to the end of its valid rows: those rows are filled
+			// from GS memory again when used. Often they never are: menus
+			// upload textures into frame buffer memory, then clear the frame
+			// with an opaque sprite (see SkipOverwrittenRows).
+			target->validRows = rowBegin;
+			m_stats.deferredUploads++;
+		}
+		else
+		{
+			// Data in another layout written over the middle of the target:
+			// only the page rows it touched change.
 			UploadTarget(*target, 0, rowBegin, target->width, rowEnd - rowBegin);
 		}
 	}
@@ -1316,9 +1326,46 @@ void CGSH_Hardware::AddVertex(const CSoftwareRasterizer::VERTEX& v)
 	m_batch.push_back(out);
 }
 
+void CGSH_Hardware::SkipOverwrittenRows(const CSoftwareRasterizer::VERTEX& a, const CSoftwareRasterizer::VERTEX& b)
+{
+	// Only pixels the sprite surely replaces: no blending, masks or tests
+	// that can keep the old color.
+	const auto& s = m_state;
+	if(s.alphaBlend || (s.fbmsk != 0) || s.date) return;
+	if(s.ate && (s.atst != ALPHA_TEST_ALWAYS)) return;
+	if(s.zte && (s.ztst != DEPTH_TEST_ALWAYS)) return;
+	uint32 needed = static_cast<uint32>(std::max(s.scay1, 0)) + 1;
+	TARGET* target = FindTarget(s.fbp, s.fbw, s.fpsm, false, needed);
+	if(!target) return;
+	needed = std::min(needed, target->height);
+	if(needed <= target->validRows) return;
+	// Whole rows [validRows, needed): the sprite and the scissor span the
+	// target's width (12.4 fixed point coordinates).
+	int32 x0 = std::min(a.x, b.x), x1 = std::max(a.x, b.x);
+	int32 y0 = std::min(a.y, b.y), y1 = std::max(a.y, b.y);
+	int32 width = static_cast<int32>(target->width);
+	if((x0 > 0) || (x1 < width * 16) || (s.scax0 > 0) || (s.scax1 < width - 1)) return;
+	if((y0 > static_cast<int32>(target->validRows) * 16) || (y1 < static_cast<int32>(needed) * 16) ||
+	   (s.scay0 > static_cast<int32>(target->validRows)))
+		return;
+	// The rows' GS memory is not needed on the GPU: no upload. Other targets
+	// holding these rows still go back to memory, as for an upload.
+	uint32 start = 0, end = 0;
+	RowsToBytes(*target, target->validRows, needed, start, end);
+	RemoveTargetsOverlapping(target, start, end - start);
+	m_stats.skippedUploadRows += needed - target->validRows;
+	target->validRows = needed;
+}
+
 void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoftwareRasterizer::VERTEX* vertices)
 {
-	if(!m_stateApplied) ApplyState();
+	if(!m_stateApplied)
+	{
+		// The first primitive after a state change: an opaque sprite over
+		// rows that were never uploaded makes their upload unnecessary.
+		if(kind == CSoftwareRasterizer::PRIMITIVE_SPRITE) SkipOverwrittenRows(vertices[0], vertices[1]);
+		ApplyState();
+	}
 	if(m_drawNothing) return;
 
 	GLenum mode = (kind == CSoftwareRasterizer::PRIMITIVE_POINT) ? GL_POINTS : (kind == CSoftwareRasterizer::PRIMITIVE_LINE) ? GL_LINES : GL_TRIANGLES;

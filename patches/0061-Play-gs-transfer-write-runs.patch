@@ -1,0 +1,147 @@
+diff --git a/Source/gs/GSHandler.cpp b/Source/gs/GSHandler.cpp
+--- a/Source/gs/GSHandler.cpp
++++ b/Source/gs/GSHandler.cpp
+@@ -3,6 +3,7 @@
+ #include <functional>
+ #include "AppConfig.h"
+ #include "Log.h"
++#include "GsTransferWrite.h"
+ #include "../states/MemoryStateFile.h"
+ #include "../states/RegisterStateFile.h"
+ #include "../FrameDump.h"
+@@ -994,6 +995,13 @@ bool CGSHandler::TransferWriteHandlerGeneric(const void* pData, uint32 nLength)
+ 
+ 	nLength /= sizeof(typename Storage::Unit);
+ 
++	if((trxReg.nRRW != 0) && (m_trxCtx.nRRX < trxReg.nRRW))
++	{
++		GsTransferWrite::POSITION position{m_trxCtx.nRRX, m_trxCtx.nRRY, trxPos.nDSAX, trxPos.nDSAY, trxReg.nRRW};
++		return GsTransferWrite::WriteUnits<Storage>(m_pRAM, RAMSIZE, trxBuf.GetDstPtr(), trxBuf.nDstWidth, position,
++		                                            reinterpret_cast<const typename Storage::Unit*>(pData), nLength);
++	}
++
+ 	CGsPixelFormats::CPixelIndexor<Storage> Indexor(m_pRAM, trxBuf.GetDstPtr(), trxBuf.nDstWidth);
+ 
+ 	auto pSrc = reinterpret_cast<const typename Storage::Unit*>(pData);
+@@ -1060,6 +1068,12 @@ bool CGSHandler::TransferWriteHandlerPSMT4(const void* pData, uint32 nLength)
+ 	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
+ 	auto trxBuf = make_convertible<BITBLTBUF>(m_nReg[GS_REG_BITBLTBUF]);
+ 
++	if((trxReg.nRRW != 0) && (m_trxCtx.nRRX < trxReg.nRRW))
++	{
++		GsTransferWrite::POSITION position{m_trxCtx.nRRX, m_trxCtx.nRRY, trxPos.nDSAX, trxPos.nDSAY, trxReg.nRRW};
++		return GsTransferWrite::WritePsmt4(m_pRAM, RAMSIZE, trxBuf.GetDstPtr(), trxBuf.nDstWidth, position, reinterpret_cast<const uint8*>(pData), nLength);
++	}
++
+ 	CGsPixelFormats::CPixelIndexorPSMT4 Indexor(m_pRAM, trxBuf.GetDstPtr(), trxBuf.nDstWidth);
+ 
+ 	auto pSrc = reinterpret_cast<const uint8*>(pData);
+diff --git a/Source/gs/GsTransferWrite.h b/Source/gs/GsTransferWrite.h
+new file mode 100644
+--- /dev/null
++++ b/Source/gs/GsTransferWrite.h
+@@ -0,0 +1,104 @@
++#pragma once
++
++// Host to local transfer writes a row run at a time (the page row and the
++// offset table row are found once per run, not per pixel). Same addressing as
++// CPixelIndexor, including its page number rounding. Menus that stream images
++// into GS memory every frame spent most of the GS thread in the per pixel
++// handlers.
++
++#include <algorithm>
++#include "Types.h"
++#include "GsPixelFormats.h"
++
++namespace GsTransferWrite
++{
++	// The transfer position, as in CGSHandler's TRXCONTEXT/TRXPOS/TRXREG.
++	struct POSITION
++	{
++		uint32& rrx;
++		uint32& rry;
++		uint32 dsax;
++		uint32 dsay;
++		uint32 rrw;
++	};
++
++	// Writes 'count' pixels of a formats with whole-byte units; returns
++	// whether memory changed. rrw must be nonzero and rrx < rrw.
++	template <typename Storage>
++	bool WriteUnits(uint8* ram, uint32 ramSize, uint32 pointer, uint32 bufferWidth, POSITION position, const typename Storage::Unit* source, uint32 count)
++	{
++		typedef typename Storage::Unit Unit;
++		const uint32* pageOffsets = CGsPixelFormats::CPixelIndexor<Storage>::GetPageOffsets();
++		bool dirty = false;
++		uint32 i = 0;
++		while(i < count)
++		{
++			uint32 run = std::min(position.rrw - position.rrx, count - i);
++			uint32 y = (position.rry + position.dsay) % 2048;
++			const uint32* rowOffsets = pageOffsets + (y % Storage::PAGEHEIGHT) * Storage::PAGEWIDTH;
++			uint32 rowPage = ((y / Storage::PAGEHEIGHT) * (bufferWidth * 64)) / Storage::PAGEWIDTH;
++			uint32 x = position.rrx + position.dsax;
++			for(uint32 k = 0; k < run; k++, x++)
++			{
++				uint32 px = x % 2048;
++				uint32 address = (pointer + (rowPage + px / Storage::PAGEWIDTH) * CGsPixelFormats::PAGESIZE + rowOffsets[px % Storage::PAGEWIDTH]) & (ramSize - 1);
++				Unit* pixel = reinterpret_cast<Unit*>(ram + address);
++				Unit value = source[i + k];
++				if(*pixel != value)
++				{
++					*pixel = value;
++					dirty = true;
++				}
++			}
++			i += run;
++			position.rrx += run;
++			if(position.rrx == position.rrw)
++			{
++				position.rrx = 0;
++				position.rry++;
++			}
++		}
++		return dirty;
++	}
++
++	// PSMT4: two pixels per source byte, low nibble first. The PSMT4 page
++	// offsets are nibble addresses (byte * 2 + high nibble).
++	inline bool WritePsmt4(uint8* ram, uint32 ramSize, uint32 pointer, uint32 bufferWidth, POSITION position, const uint8* source, uint32 byteCount)
++	{
++		typedef CGsPixelFormats::STORAGEPSMT4 Storage;
++		const uint32* pageOffsets = CGsPixelFormats::CPixelIndexor<Storage>::GetPageOffsets();
++		bool dirty = false;
++		uint32 count = byteCount * 2;
++		uint32 i = 0;
++		while(i < count)
++		{
++			uint32 run = std::min(position.rrw - position.rrx, count - i);
++			uint32 y = (position.rry + position.dsay) % 2048;
++			const uint32* rowOffsets = pageOffsets + (y % Storage::PAGEHEIGHT) * Storage::PAGEWIDTH;
++			uint32 rowPage = ((y / Storage::PAGEHEIGHT) * (bufferWidth * 64)) / Storage::PAGEWIDTH;
++			uint32 x = position.rrx + position.dsax;
++			for(uint32 k = 0; k < run; k++, x++)
++			{
++				uint32 n = i + k;
++				uint8 value = (source[n / 2] >> ((n & 1) * 4)) & 0x0F;
++				uint32 px = x % 2048;
++				uint32 nibble = (pointer * 2) + (rowPage + px / Storage::PAGEWIDTH) * CGsPixelFormats::PAGESIZE * 2 + rowOffsets[px % Storage::PAGEWIDTH];
++				uint8* byte = ram + ((nibble >> 1) & (ramSize - 1));
++				uint32 shift = (nibble & 1) * 4;
++				if(((*byte >> shift) & 0x0F) != value)
++				{
++					*byte = static_cast<uint8>((*byte & ~(0x0F << shift)) | (value << shift));
++					dirty = true;
++				}
++			}
++			i += run;
++			position.rrx += run;
++			if(position.rrx == position.rrw)
++			{
++				position.rrx = 0;
++				position.rry++;
++			}
++		}
++		return dirty;
++	}
++}

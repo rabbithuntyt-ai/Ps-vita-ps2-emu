@@ -94,6 +94,8 @@ public:
 		uint32 approximateWrapModes = 0; //region repeat masks GL cannot express
 		uint32 targetsCreated = 0;
 		uint32 transfersIn = 0, transfersOut = 0, transfersLocal = 0; //host->local, local->host, local->local
+		uint32 deferredUploads = 0;   //target rows left to fill from GS memory on use (texture data over a target)
+		uint32 skippedUploadRows = 0; //target rows an opaque sprite replaced before they were uploaded
 		uint32 redundantStateChanges = 0; //state rewrites that did not break batching //state changes with a blend GL cannot express
 	};
 
@@ -205,6 +207,9 @@ private:
 	void DeleteTarget(TARGET&);
 	void RemoveTargetsOverlapping(const TARGET* except, uint32 start, uint32 size);
 	void EnsureValidRows(TARGET&, uint32 rows);
+	// Before the first primitive of a state: an opaque sprite over whole rows
+	// not uploaded yet makes them valid without an upload.
+	void SkipOverwrittenRows(const CSoftwareRasterizer::VERTEX&, const CSoftwareRasterizer::VERTEX&);
 	void MarkTargetDirty(TARGET&, int32 x0, int32 y0, int32 x1, int32 y1);
 	// GS memory spanned by a range of rows (whole page rows).
 	void RowsToBytes(const TARGET&, uint32 rowBegin, uint32 rowEnd, uint32& start, uint32& end) const;
