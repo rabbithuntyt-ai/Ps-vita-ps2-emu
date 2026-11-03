@@ -131,6 +131,8 @@ add_library(vitaps2_common STATIC
 	src/common/GameProfiles.h
 	src/common/Mpeg2Decoder.cpp
 	src/common/Mpeg2Decoder.h
+	src/common/MpegShadow.cpp
+	src/common/MpegShadow.h
 )
 target_include_directories(vitaps2_common PUBLIC src/common)
 target_link_libraries(vitaps2_common PUBLIC gsh_software PlayCore)

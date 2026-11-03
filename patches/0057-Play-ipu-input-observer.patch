@@ -1,0 +1,32 @@
+diff --git a/Source/ee/IPU.h b/Source/ee/IPU.h
+--- a/Source/ee/IPU.h
++++ b/Source/ee/IPU.h
+@@ -36,6 +36,17 @@ public:
+ 		return stats;
+ 	}
+ 
++	//Observer of the IPU input stream: every chunk DMA4 delivers to the IN FIFO
++	//(EE thread). Movie HLE uses it to see the stream libmpeg decodes.
++	using InputObserver = void (*)(void* context, const uint8* data, uint32 size);
++	static void SetInputObserver(InputObserver observer, void* context)
++	{
++		g_inputObserver = observer;
++		g_inputObserverContext = context;
++	}
++	static inline InputObserver g_inputObserver = nullptr;
++	static inline void* g_inputObserverContext = nullptr;
++
+ 	// Converts one 16x16 macroblock in RAW8 layout (256 Y, 64 Cb, 64 Cr) to
+ 	// RGBA32 with the CSC alpha thresholds. Integer arithmetic.
+ 	static void ConvertMacroblockToRgba32(const uint8* block, uint32* pixels, uint16 th0, uint16 th1);
+diff --git a/Source/ee/IPU.cpp b/Source/ee/IPU.cpp
+--- a/Source/ee/IPU.cpp
++++ b/Source/ee/IPU.cpp
+@@ -492,6 +492,7 @@ uint32 CIPU::ReceiveDMA4(uint32 address, uint32 nQWC, bool nTagIncluded, uint8*
+ 	if(size != 0)
+ 	{
+ 		m_IN_FIFO.Write(memory + address, size);
++		if(g_inputObserver) g_inputObserver(g_inputObserverContext, memory + address, size);
+ 	}
+ 
+ 	return size / 0x10;

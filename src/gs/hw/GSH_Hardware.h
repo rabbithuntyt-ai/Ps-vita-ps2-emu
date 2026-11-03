@@ -67,6 +67,11 @@ public:
 	// target since the previous flip) to a file, up to maxLines (diagnostics).
 	void SetDiagnosticsFile(const char* path, uint32 maxLines);
 
+	// After a state load: GS memory was replaced, so the GPU copies (render
+	// targets, decoded textures) are dropped without writing them back; they
+	// are rebuilt from GS memory. GS thread (the one owning the GL context).
+	void DiscardGpuCopies();
+
 	DISPLAY_TEXTURE GetDisplayTexture() const
 	{
 		return m_display;

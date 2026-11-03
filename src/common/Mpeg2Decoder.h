@@ -55,6 +55,14 @@ public:
 	// alpha 0x80 (IPU CSC with zero thresholds).
 	static void ConvertToRgb32Macroblocks(const FRAME&, uint32_t* out, uint32_t maxMacroblocks);
 
+	// Inverse quantisation like Play!'s emulated IPU (MPEG-1 oddification, no
+	// MPEG-2 mismatch control) instead of the MPEG-2 rules. For comparisons with
+	// the emulated path (shadow mode).
+	void SetIpuCompatibleQuantisation(bool enabled)
+	{
+		m_ipuCompatibleQuantisation = enabled;
+	}
+
 private:
 	struct BITS;
 
@@ -74,6 +82,7 @@ private:
 	uint8_t m_intraMatrix[64], m_nonIntraMatrix[64]; //raster order
 	bool m_haveSequence = false;
 	bool m_isMpeg2 = false;
+	bool m_ipuCompatibleQuantisation = false;
 
 	// Picture
 	int m_pictureType = 0;

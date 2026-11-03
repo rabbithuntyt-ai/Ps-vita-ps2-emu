@@ -1651,3 +1651,25 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 	m_stateApplied = false;
 	CGSH_Primitives::FlipImpl(dispInfo);
 }
+
+void CGSH_Hardware::DiscardGpuCopies()
+{
+	FlushBatch();
+	for(auto& target : m_targets) DeleteTarget(*target);
+	m_targets.clear();
+	m_currentTarget = nullptr;
+	for(auto it = m_glTextures.begin(); it != m_glTextures.end();)
+	{
+		// Keep the white texture used for untextured draws.
+		if(it->first.first == 0)
+		{
+			++it;
+			continue;
+		}
+		glDeleteTextures(1, &it->second.texture);
+		it = m_glTextures.erase(it);
+	}
+	m_textureCache.MarkAllWritten();
+	m_display = DISPLAY_TEXTURE();
+	m_stateApplied = false;
+}

@@ -21,7 +21,9 @@
 #include <fstream>
 #include <sstream>
 #include <map>
+#include <chrono>
 #include <exception>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
@@ -42,6 +44,7 @@
 #include "CpuScreen.h"
 #include "EmuSession.h"
 #include "EmuProfile.h"
+#include "MpegShadow.h"
 #include "Ps2Const.h"
 #include "ee/Ee_SubSystem.h"
 #include "Jitter.h"
@@ -74,6 +77,7 @@ namespace
 	constexpr const char* DATA_PATH = "ux0:data/VitaPS2";
 	constexpr const char* GAMES_PATH = "ux0:data/VitaPS2/games";
 	constexpr const char* SETTINGS_PATH = "ux0:data/VitaPS2/settings";
+	constexpr const char* STATES_PATH = "ux0:data/VitaPS2/states";
 	constexpr const char* LOG_PATH = "ux0:data/VitaPS2/log.txt";
 	constexpr const char* BENCHMARK_PATH = "ux0:data/VitaPS2/benchmark.txt";
 	// Scripted runs (e.g. from Vita Lab): see ReadAutostart.
@@ -182,6 +186,13 @@ namespace
 	{
 		auto slash = gamePath.find_last_of('/');
 		return std::string(SETTINGS_PATH) + "/" + gamePath.substr(slash + 1) + ".ini";
+	}
+
+	// One save state per game.
+	std::string StatePath(const std::string& gamePath)
+	{
+		auto slash = gamePath.find_last_of('/');
+		return std::string(STATES_PATH) + "/" + gamePath.substr(slash + 1) + ".state";
 	}
 
 	void ApplySetting(GAME_SETTINGS& settings, const std::string& key, const std::string& text)
@@ -551,6 +562,13 @@ namespace
 		uint32_t perfUnpack[16] = {}, perfUnpackFlags[3] = {};
 		bool eeHotMovie = false;
 		uint32_t eeHotSeconds = 0;
+		CMpegShadow mpegShadow; //movie HLE shadow mode (autostart key mpeg_shadow=1)
+		std::future<bool> stateOperation; //save or load state in progress
+		bool stateIsLoad = false;
+		bool pendingStateLoad = false; //autostart load_state=1
+		unsigned int stateRetries = 0;  //saves refused during an IPU command
+		std::string stateMessage;
+		uint64_t stateMessageUntil = 0;
 		uint64_t perfCodeGen[4] = {Jitter::g_compileStats.optimizeUs.load(), Jitter::g_compileStats.allocateUs.load(), Jitter::g_compileStats.generateUs.load(), Jitter::g_compileStats.statements.load()};
 		CGSH_Hardware::GPU_TIMES perfGpu = CGSH_Hardware::GetTimes();
 		uint64_t perfPresentUs = g_presentUs;
@@ -617,6 +635,19 @@ namespace
 			{
 				for(const auto& [key, value] : autostart->settings)
 				{
+					if((key == "load_state") && (value == "1"))
+					{
+						// Loaded once the machine has run a little (a load right at boot,
+						// before the GS and the game are up, crashed).
+						pendingStateLoad = true;
+						continue;
+					}
+					if(key == "mpeg_shadow")
+					{
+						// Silent Hill 2 (SLUS-20228): sceMpeg context at 0x1213080 (docs/HLE_MPEG.md).
+						if(value == "1") mpegShadow.Enable(session->GetVm()->m_ee->m_ram, 0x1213080, "ux0:data/VitaPS2/mpegshadow.txt");
+						continue;
+					}
 					if(key != "gs_diag") continue;
 					if(auto gs = GetHardwareGs(session.get())) gs->SetDiagnosticsFile("ux0:data/VitaPS2/gsdiag.txt", std::atoi(value.c_str()));
 				}
@@ -683,6 +714,37 @@ namespace
 				SaveSettings(path, settings);
 				newContent = true;
 			}
+			// Save states: SELECT + R saves, SELECT + TRIANGLE loads (one per game).
+			if((buttons & SCE_CTRL_SELECT) && (pressed & (SCE_CTRL_R1 | SCE_CTRL_TRIANGLE)) && !stateOperation.valid())
+			{
+				stateIsLoad = (pressed & SCE_CTRL_TRIANGLE) != 0;
+				stateOperation = stateIsLoad ? session->GetVm()->LoadState(StatePath(path)) : session->GetVm()->SaveState(StatePath(path));
+			}
+			if(pendingStateLoad && !stateOperation.valid() && (session->GetVmFrameCount() >= 120))
+			{
+				pendingStateLoad = false;
+				stateIsLoad = true;
+				stateOperation = session->GetVm()->LoadState(StatePath(path));
+			}
+			// The VM saves and loads on its own thread; this thread keeps pumping
+			// the GS meanwhile (state operations need it).
+			if(stateOperation.valid() && (stateOperation.wait_for(std::chrono::seconds(0)) == std::future_status::ready))
+			{
+				bool ok = stateOperation.get();
+				if(!ok && !stateIsLoad && (stateRetries < 120))
+				{
+					// Refused while the IPU runs a command (movies): try again.
+					stateRetries++;
+					stateOperation = session->GetVm()->SaveState(StatePath(path));
+					continue;
+				}
+				stateRetries = 0;
+				if(ok && stateIsLoad && gpu) GetHardwareGs(session.get())->DiscardGpuCopies();
+				stateMessage = std::string(stateIsLoad ? "State loaded" : "State saved") + (ok ? "" : " - FAILED");
+				stateMessageUntil = sceKernelGetProcessTimeWide() + 2000000;
+				std::printf("%s: %s\n", stateMessage.c_str(), StatePath(path).c_str());
+				newContent = true;
+			}
 
 			// Cutscenes and movies run without input: keep the Vita from
 			// dimming and suspending while a game runs.
@@ -699,6 +761,7 @@ namespace
 				{
 					flipped = gs->Pump(4);
 				}
+				mpegShadow.Poll();
 				if(flipped)
 				{
 					presented++;
@@ -988,7 +1051,7 @@ namespace
 			}
 
 			// Redrawing an unchanged screen costs GPU time the GS needs.
-			if(!newContent && (now - lastPresent < 100000))
+			if(!newContent && (now >= stateMessageUntil) && (now - lastPresent < 100000))
 			{
 				if(!gpu) sceKernelDelayThread(2000); //the GPU path waits in Pump()
 				continue;
@@ -999,6 +1062,11 @@ namespace
 			const uint64_t presentStart = sceKernelGetProcessTimeWide();
 			BeginFrame();
 			DrawScreen(screen, settings.stretch);
+			if(now < stateMessageUntil)
+			{
+				Gfx::Rect(0, SCREEN_HEIGHT - 40, 360, 40, Gfx::Rgba(0, 0, 0, 180));
+				Gfx::Text(12, SCREEN_HEIGHT - 14, COLOR_WHITE, 0.8f, stateMessage.c_str());
+			}
 			if(settings.showStats)
 			{
 				int lines = 7 + static_cast<int>(threadUsage.size());
@@ -1094,6 +1162,7 @@ namespace
 			g_presentUs += sceKernelGetProcessTimeWide() - presentStart;
 		}
 
+		mpegShadow.Disable();
 		session.reset();
 		sessionPtr = nullptr;
 		if(perfFile) std::fclose(perfFile);
@@ -1170,6 +1239,7 @@ int main()
 
 	sceIoMkdir(GAMES_PATH, 0777);
 	sceIoMkdir(SETTINGS_PATH, 0777);
+	sceIoMkdir(STATES_PATH, 0777);
 
 	// Before vitaGL, which takes most of the remaining memory for its pools.
 	if(!VitaJit_Init(JIT_POOL_MIN, JIT_POOL_MAX))

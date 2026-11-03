@@ -274,17 +274,17 @@ CMpeg2Decoder::RESULT CMpeg2Decoder::Decode(const uint8_t* data, size_t size, bo
 	}
 	catch(const DECODE_ERROR& error)
 	{
-		if(error.result == RESULT_NEED_DATA)
-		{
-			// Restart the picture with more data. References are untouched:
-			// pictures only rotate them when complete.
-			m_inPicture = false;
-			// consumed already ends at the last completed picture or header.
-		}
+		// The picture is dropped (need data: restarted with more; errors:
+		// skipped). References are untouched: pictures only rotate them when
+		// complete. consumed ends at the last completed picture or header.
+		m_inPicture = false;
+		m_current = nullptr;
 		return error.result;
 	}
 	catch(const CVLCTable::CVLCTableException&)
 	{
+		m_inPicture = false;
+		m_current = nullptr;
 		return RESULT_ERROR;
 	}
 }
@@ -705,11 +705,18 @@ bool CMpeg2Decoder::DecodeBlock(BITS& bits, int component, bool intra, int16_t* 
 			int sign = (qf > 0) - (qf < 0);
 			value = ((2 * qf + sign) * matrix[position] * m_quantiserScale) / 32;
 		}
+		if(m_ipuCompatibleQuantisation && !(intra && (i == 0)) && (value != 0) && ((value & 1) == 0))
+		{
+			// Play!'s IPU: MPEG-1 oddification of every AC coefficient.
+			int sign = (qf > 0) ? 1 : -1;
+			value = (value - sign) | 1;
+		}
 		value = std::clamp(value, -2048, 2047);
 		dequantised[position] = value;
 		sum += value;
 	}
-	if((sum & 1) == 0) dequantised[63] += (dequantised[63] & 1) ? -1 : 1;
+	// MPEG-2 mismatch control (the emulated IPU does not apply it).
+	if(!m_ipuCompatibleQuantisation && ((sum & 1) == 0)) dequantised[63] += (dequantised[63] & 1) ? -1 : 1;
 
 	int16_t input[64];
 	for(unsigned int i = 0; i < 64; i++) input[i] = static_cast<int16_t>(dequantised[i]);

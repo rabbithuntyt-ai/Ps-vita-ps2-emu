@@ -1,0 +1,46 @@
+diff --git a/Source/ee/EeExecutor.h b/Source/ee/EeExecutor.h
+--- a/Source/ee/EeExecutor.h
++++ b/Source/ee/EeExecutor.h
+@@ -36,6 +36,10 @@ public:
+ 	void AttachExceptionHandlerToThread();
+ 
+ 	void Reset() override;
++	//Drops every compiled block (and the cache of blocks by content) but keeps
++	//the per-block settings (FP rounding, idle loops). For state loads: blocks
++	//linked to each other must not survive a memory change.
++	void DiscardCompiledCode();
+ 	void ClearActiveBlocksInRange(uint32, uint32, bool) override;
+ 
+ 	BasicBlockPtr BlockFactory(CMIPS&, uint32, uint32) override;
+diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
+--- a/Source/ee/EeExecutor.cpp
++++ b/Source/ee/EeExecutor.cpp
+@@ -128,6 +128,12 @@ void CEeExecutor::AttachExceptionHandlerToThread()
+ #endif
+ }
+ 
++void CEeExecutor::DiscardCompiledCode()
++{
++	m_cachedBlocks.clear();
++	CGenericMipsExecutor::Reset();
++}
++
+ void CEeExecutor::Reset()
+ {
+ 	SetMemoryProtected(m_ram, PS2::EE_RAM_SIZE, false);
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -402,7 +402,11 @@ void CSubSystem::SaveState(Framework::CZipArchiveWriter& archive)
+ 
+ void CSubSystem::LoadState(Framework::CZipArchiveReader& archive)
+ {
+-	m_EE.m_executor->ClearActiveBlocksInRange(0, PS2::EE_RAM_SIZE, false);
++	//A threaded VU1 may still run blocks that are about to be discarded.
++	m_vpu1->Sync();
++	//Linked and content-cached blocks can outlive a range clear and jump into
++	//freed code after the load: drop all compiled EE code.
++	static_cast<CEeExecutor*>(m_EE.m_executor.get())->DiscardCompiledCode();
+ 	m_vpu0->GetContext().m_executor->ClearActiveBlocksInRange(0, PS2::MICROMEM0SIZE, false);
+ 	m_vpu1->GetContext().m_executor->ClearActiveBlocksInRange(0, PS2::MICROMEM1SIZE, false);
+ 
