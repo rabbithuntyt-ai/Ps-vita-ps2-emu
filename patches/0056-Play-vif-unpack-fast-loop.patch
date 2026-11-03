@@ -1,0 +1,48 @@
+diff --git a/Source/ee/Vif.h b/Source/ee/Vif.h
+--- a/Source/ee/Vif.h
++++ b/Source/ee/Vif.h
+@@ -581,7 +581,43 @@ protected:
+ 			}
+ 		}
+ 
+-		while(currentNum != 0)
++		//Common case: CL == WL (every value written, consecutive addresses), no
++		//offset/difference mode. The cycle bookkeeping of the general loop
++		//reduces to one counter. Same results; ~1M values per second in movies.
++		bool fastDone = false;
++		if constexpr(clGreaterEqualWl && (mode == 0))
++		{
++			if((cl == wl) && (m_readTick == m_writeTick))
++			{
++				uint32 tick = m_writeTick;
++				while(currentNum != 0)
++				{
++					uint128 writeValue;
++					memset(&writeValue, 0, sizeof(writeValue)); //V2/V3 fill only some lanes
++					if(!Unpack_ReadValue<dataType, usn>(stream, writeValue)) break;
++					auto dst = reinterpret_cast<uint128*>(vuMem + nDstAddr);
++					if constexpr(useMask)
++					{
++						uint32 col = (tick > 3) ? 3 : tick;
++						for(unsigned int i = 0; i < 4; i++)
++						{
++							dst->nV[i] = (dst->nV[i] & maskKeep[col][i]) | maskConst[col][i] | (writeValue.nV[i] & maskData[col][i]);
++						}
++					}
++					else
++					{
++						(*dst) = writeValue;
++					}
++					if(++tick == cl) tick = 0;
++					nDstAddr = (nDstAddr + 0x10) & (vuMemSize - 1);
++					currentNum--;
++				}
++				m_readTick = m_writeTick = tick;
++				fastDone = true;
++			}
++		}
++
++		while(!fastDone && (currentNum != 0))
+ 		{
+ 			bool mustWrite = false;
+ 			uint128 writeValue;
