@@ -1,0 +1,49 @@
+diff --git a/Source/gs/GSHandler.h b/Source/gs/GSHandler.h
+--- a/Source/gs/GSHandler.h
++++ b/Source/gs/GSHandler.h
+@@ -1132,6 +1132,10 @@ protected:
+ 	std::unique_ptr<CFrameDump> m_frameDump;
+ 	FrameDumpCallback m_frameDumpCallback;
+ 	bool m_regsDirty = false;
++	//Display configuration of the last Flip (EE thread): a flip that changes it
++	//is never skipped, even when nothing was drawn (movie players swap
++	//DISPFB between buffers filled by image transfers).
++	DISPLAY_INFO m_lastFlipDisplayInfo;
+ 	bool m_drawEnabled = true;
+ 	CINTC* m_intc = nullptr;
+ 	bool m_gsThreaded = true;
+diff --git a/Source/gs/GSHandler.cpp b/Source/gs/GSHandler.cpp
+--- a/Source/gs/GSHandler.cpp
++++ b/Source/gs/GSHandler.cpp
+@@ -566,8 +566,21 @@ void CGSHandler::Flip(uint32 flags)
+ {
+ 	bool waitForCompletion = (flags & FLIP_FLAG_WAIT) != 0;
+ 	bool force = (flags & FLIP_FLAG_FORCE) != 0;
++	auto displayInfo = GetCurrentDisplayInfo();
++	{
++		auto sameLayer = [](const DISPLAY_INFO::LAYER& a, const DISPLAY_INFO::LAYER& b) {
++			return (a.enabled == b.enabled) && (a.offsetX == b.offsetX) && (a.offsetY == b.offsetY) &&
++			       (a.width == b.width) && (a.height == b.height) && (a.bufPtr == b.bufPtr) &&
++			       (a.bufWidth == b.bufWidth) && (a.psm == b.psm);
++		};
++		const auto& last = m_lastFlipDisplayInfo;
++		bool same = (displayInfo.width == last.width) && (displayInfo.height == last.height);
++		for(unsigned int i = 0; i < DISPLAY_INFO::MAX_LAYERS; i++) same = same && sameLayer(displayInfo.layers[i], last.layers[i]);
++		if(!same) force = true;
++		m_lastFlipDisplayInfo = displayInfo;
++	}
+ 	SendGSCall(
+-	    [this, displayInfo = GetCurrentDisplayInfo(), force]() {
++	    [this, displayInfo, force]() {
+ 		    if(force || m_regsDirty)
+ 		    {
+ 			    FlipImpl(displayInfo);
+@@ -824,6 +837,8 @@ void CGSHandler::WriteRegisterImpl(uint8 nRegister, uint64 nData)
+ 
+ void CGSHandler::FeedImageDataImpl(const uint8* imageData, uint32 length)
+ {
++	//Image data can change what is displayed (movies): the next flip must present.
++	m_regsDirty = true;
+ 	if(m_trxCtx.nSize == 0)
+ 	{
+ #if LOGGING_ENABLED

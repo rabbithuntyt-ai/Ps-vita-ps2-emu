@@ -1,0 +1,75 @@
+diff --git a/include/Jitter.h b/include/Jitter.h
+--- a/include/Jitter.h
++++ b/include/Jitter.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <atomic>
++#include <chrono>
+ #include <string>
+ #include <memory>
+ #include <list>
+@@ -22,6 +24,15 @@
+ 
+ namespace Jitter
+ {
++	//Time spent in each phase of Compile() on all threads, microseconds.
++	struct COMPILE_STATS
++	{
++		std::atomic<uint64> optimizeUs{0}; //optimization passes, block pruning/merging
++		std::atomic<uint64> allocateUs{0}; //coalescing, register and stack allocation
++		std::atomic<uint64> generateUs{0}; //concatenation and machine code generation
++		std::atomic<uint64> statements{0}; //statements before optimization
++	};
++	inline COMPILE_STATS g_compileStats;
+ 
+ 	class CJitter
+ 	{
+diff --git a/src/Jitter_Optimize.cpp b/src/Jitter_Optimize.cpp
+--- a/src/Jitter_Optimize.cpp
++++ b/src/Jitter_Optimize.cpp
+@@ -140,6 +140,16 @@ StatementList CJitter::CollapseVersionedStatementList(const VERSIONED_STATEMENT_
+ 
+ void CJitter::Compile()
+ {
++	auto nowUs = []() {
++		return static_cast<uint64>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
++	};
++	uint64 startUs = nowUs();
++	{
++		uint64 statementCount = 0;
++		for(const auto& basicBlock : m_basicBlocks) statementCount += basicBlock.statements.size();
++		g_compileStats.statements.fetch_add(statementCount, std::memory_order_relaxed);
++	}
++
+ 	while(1)
+ 	{
+ 		for(auto& basicBlock : m_basicBlocks)
+@@ -187,6 +197,9 @@ void CJitter::Compile()
+ 
+ 	PromoteLoopRegisters();
+ 
++	uint64 optimizedUs = nowUs();
++	g_compileStats.optimizeUs.fetch_add(optimizedUs - startUs, std::memory_order_relaxed);
++
+ 	unsigned int stackSize = 0;
+ 
+ 	//Allocate registers
+@@ -206,6 +219,9 @@ void CJitter::Compile()
+ 		NormalizeStatements(basicBlock);
+ 	}
+ 
++	uint64 allocatedUs = nowUs();
++	g_compileStats.allocateUs.fetch_add(allocatedUs - optimizedUs, std::memory_order_relaxed);
++
+ 	auto result = ConcatBlocks(m_basicBlocks);
+ 
+ #ifdef DUMP_STATEMENTS
+@@ -214,6 +230,7 @@ void CJitter::Compile()
+ #endif
+ 
+ 	m_codeGen->GenerateCode(result.statements, stackSize);
++	g_compileStats.generateUs.fetch_add(nowUs() - allocatedUs, std::memory_order_relaxed);
+ 
+ 	m_labels.clear();
+ }

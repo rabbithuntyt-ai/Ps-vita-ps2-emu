@@ -1,0 +1,37 @@
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -772,23 +772,31 @@ void CSubSystem::ExecuteIpu()
+ void CSubSystem::ExecuteIpu()
+ {
+ 	m_dmac.ResumeDMA4();
+-	while(m_ipu.WillExecuteCommand())
++	//Keep decoding while DMA3 takes all of the output: stopping after every
++	//macroblock limits movies to one macroblock per EE slice (4800 cycles),
++	//far below the rate games expect. Bounded so one call cannot decode a
++	//whole frame at once.
++	for(unsigned int blocks = 0; m_ipu.WillExecuteCommand() && (blocks < 64); blocks++)
+ 	{
+ 		m_ipu.ExecuteCommand();
+ 		if(m_ipu.IsCommandDelayed())
+ 		{
+ 			break;
+ 		}
+ 		if(m_ipu.HasPendingOUTFIFOData())
+ 		{
+-			break;
++			m_ipu.FlushOUTFIFOData();
++			if(m_ipu.HasPendingOUTFIFOData())
++			{
++				break;
++			}
+ 		}
+ 		if(m_ipu.WillExecuteCommand() && m_dmac.IsDMA4Started())
+ 		{
+ 			m_dmac.ResumeDMA4();
+ 		}
+ 		else
+ 		{
+ 			break;
+ 		}
+ 	}

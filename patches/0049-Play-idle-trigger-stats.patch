@@ -1,0 +1,50 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -45,6 +45,20 @@ namespace EmuProfile
+ 	};
+ 	inline JIT_STATS g_jit;
+ 
++	//EE slices ended by the idle loop detection, by polled register.
++	enum IDLE_SOURCE
++	{
++		IDLE_INTC,
++		IDLE_GS_CSR,
++		IDLE_TIMER,
++		IDLE_IPU,
++		IDLE_DMA_STAT,
++		IDLE_DMA_CHCR,
++		IDLE_VIF_GIF,
++		IDLE_SOURCE_COUNT
++	};
++	inline std::atomic<uint32> g_idleTriggers[IDLE_SOURCE_COUNT];
++
+ 	class CScope
+ 	{
+ 	public:
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -4,6 +4,7 @@
+ #include "AppConfig.h"
+ #include "StdStreamUtils.h"
+ #include "../Ps2Const.h"
++#include "../EmuProfile.h"
+ #include "Log.h"
+ #include "../states/MemoryStateFile.h"
+ #include "../iop/IopBios.h"
+@@ -580,6 +581,14 @@ uint32 CSubSystem::IOPortReadHandler(uint32 nAddress)
+ 				if(checkCount == checkCountMax)
+ 				{
+ 					m_EE.m_State.nHasException = MIPS_EXCEPTION_IDLE;
++					auto source = EmuProfile::IDLE_VIF_GIF;
++					if(nAddress == CINTC::INTC_STAT) source = EmuProfile::IDLE_INTC;
++					else if(nAddress == CGSHandler::GS_CSR) source = EmuProfile::IDLE_GS_CSR;
++					else if(nAddress == CTimer::T1_COUNT) source = EmuProfile::IDLE_TIMER;
++					else if((nAddress >= CIPU::IPU_CMD) && (nAddress <= CIPU::IPU_CTRL + 4)) source = EmuProfile::IDLE_IPU;
++					else if(nAddress == CDMAC::D_STAT) source = EmuProfile::IDLE_DMA_STAT;
++					else if((nAddress >= CDMAC::D0_CHCR) && (nAddress <= CDMAC::D9_CHCR)) source = EmuProfile::IDLE_DMA_CHCR;
++					EmuProfile::g_idleTriggers[source].fetch_add(1, std::memory_order_relaxed);
+ 				}
+ 			}
+ 		}

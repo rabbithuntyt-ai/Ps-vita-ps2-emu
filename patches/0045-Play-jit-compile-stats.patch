@@ -1,0 +1,69 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -33,6 +33,18 @@ namespace EmuProfile
+ 
+ 	inline std::atomic<uint8> g_section{SECTION_OTHER};
+ 
++	//Block compilation cost by phase (all recompiler threads), microseconds.
++	struct JIT_STATS
++	{
++		std::atomic<uint64> translateUs{0}; //MIPS -> jitter statements (Begin + CompileRange)
++		std::atomic<uint64> finishUs{0};    //optimization, register allocation, code generation (End)
++		std::atomic<uint64> installUs{0};   //copy to executable memory
++		std::atomic<uint32> blocks{0};
++		std::atomic<uint64> guestInstructions{0};
++		std::atomic<uint64> codeBytes{0};
++	};
++	inline JIT_STATS g_jit;
++
+ 	class CScope
+ 	{
+ 	public:
+diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
+--- a/Source/BasicBlock.cpp
++++ b/Source/BasicBlock.cpp
+@@ -3,6 +3,8 @@
+ #include "offsetof_def.h"
+ #include "MipsJitter.h"
+ #include "Jitter_CodeGenFactory.h"
++#include "EmuProfile.h"
++#include <chrono>
+ 
+ #if defined(AOT_BUILD_CACHE) || defined(AOT_USE_CACHE)
+ #define AOT_ENABLED
+@@ -79,6 +81,12 @@ void CBasicBlock::Compile()
+ {
+ #ifndef AOT_USE_CACHE
+ 
++	auto nowUs = []() {
++		return static_cast<uint64>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
++	};
++	uint64 startUs = nowUs();
++	uint64 translatedUs = 0, finishedUs = 0;
++
+ 	Framework::CMemStream stream;
+ 	{
+ 		//One jitter per thread: blocks may be compiled concurrently (threaded VU1)
+@@ -93,11 +101,21 @@ void CBasicBlock::Compile()
+ 		jitter->SetStream(&stream);
+ 		jitter->Begin();
+ 		CompileRange(jitter);
++		translatedUs = nowUs();
+ 		jitter->End();
++		finishedUs = nowUs();
+ 		m_linkEntryOffset = jitter->GetCodeGen()->GetLinkEntryOffset();
+ 	}
+ 
+ 	m_function = CMemoryFunction(stream.GetBuffer(), stream.GetSize());
++
++	auto& jitStats = EmuProfile::g_jit;
++	jitStats.translateUs.fetch_add(translatedUs - startUs, std::memory_order_relaxed);
++	jitStats.finishUs.fetch_add(finishedUs - translatedUs, std::memory_order_relaxed);
++	jitStats.installUs.fetch_add(nowUs() - finishedUs, std::memory_order_relaxed);
++	jitStats.blocks.fetch_add(1, std::memory_order_relaxed);
++	jitStats.guestInstructions.fetch_add(IsEmpty() ? 0 : ((m_end - m_begin) / 4) + 1, std::memory_order_relaxed);
++	jitStats.codeBytes.fetch_add(stream.GetSize(), std::memory_order_relaxed);
+ 	for(uint32 i = 0; i < LINK_SLOT_MAX; i++)
+ 	{
+ 		if(m_linkBlockTrampolineOffset[i] == INVALID_LINK_SLOT) continue;

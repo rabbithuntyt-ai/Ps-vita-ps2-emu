@@ -1,5 +1,6 @@
 #include "GSH_Hardware.h"
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include "GsMemory.h"
 #include "GsSurface.h"
@@ -8,6 +9,34 @@
 
 namespace
 {
+	uint64 NowUs()
+	{
+		return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	}
+
+	// Charges the time of the outermost stage only (stages call each other).
+	class CStageTimer
+	{
+	public:
+		explicit CStageTimer(int stage)
+		    : m_outer(g_depth++ == 0)
+		    , m_stage(stage)
+		    , m_start(m_outer ? NowUs() : 0)
+		{
+		}
+		~CStageTimer()
+		{
+			g_depth--;
+			if(m_outer) CGSH_Hardware::GetTimes().stageUs[m_stage] += NowUs() - m_start;
+		}
+
+	private:
+		static inline int g_depth = 0;
+		bool m_outer;
+		int m_stage;
+		uint64 m_start;
+	};
+
 	bool IsPsm16(uint32 psm)
 	{
 		return (psm == CGSHandler::PSMCT16) || (psm == CGSHandler::PSMCT16S);
@@ -33,6 +62,11 @@ namespace
 	uint32 PsmClass(uint32 psm)
 	{
 		return IsPsm16(psm) ? 16 : 32;
+	}
+
+	uint64 DiagKey(uint32 fbp, uint32 fbw, uint32 psm)
+	{
+		return (static_cast<uint64>(fbp) << 24) | (static_cast<uint64>(fbw) << 8) | psm;
 	}
 
 	uint32 ZMaxForPsm(uint32 zpsm)
@@ -148,6 +182,7 @@ CGSHandler::FactoryFunction CGSH_Hardware::GetFactoryFunction(const OPTIONS& opt
 bool CGSH_Hardware::Pump(uint32 timeoutMs)
 {
 	m_mailBox.WaitForCall(timeoutMs);
+	uint64 pumpStart = NowUs();
 	// The frontend draws on the same context between pumps.
 	m_stateApplied = false;
 	while(m_mailBox.IsPending() && !m_flipped)
@@ -155,6 +190,7 @@ bool CGSH_Hardware::Pump(uint32 timeoutMs)
 		m_mailBox.ReceiveCall();
 	}
 	FlushBatch();
+	GetTimes().pumpUs += NowUs() - pumpStart;
 	bool flipped = m_flipped;
 	m_flipped = false;
 	return flipped;
@@ -357,6 +393,7 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 	FlushBatch();
 
 	auto target = std::make_unique<TARGET>();
+	m_stats.targetsCreated++;
 	target->fbp = fbp;
 	target->fbw = fbw;
 	target->psm = psm;
@@ -433,6 +470,7 @@ void CGSH_Hardware::EnsureValidRows(TARGET& target, uint32 rows)
 
 void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 width, uint32 height)
 {
+	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
 	x0 = std::min(x0, target.width);
 	y0 = std::min(y0, target.height);
 	width = std::min(width, target.width - x0);
@@ -472,7 +510,10 @@ void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 wi
 		}
 	}
 	glBindTexture(GL_TEXTURE_2D, target.colorTexture);
+	uint64 glStart = NowUs();
 	glTexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	GetTimes().uploadGlUs += NowUs() - glStart;
+	GetTimes().uploadPixels += width * height;
 	m_stats.targetUploads++;
 	m_stats.uploadedPixels += width * height;
 	m_stateApplied = false;
@@ -501,16 +542,32 @@ void CGSH_Hardware::MarkTargetDirty(TARGET& target, int32 x0, int32 y0, int32 x1
 	target.dirtyY1 = std::max<uint32>(target.dirtyY1, y1);
 }
 
-void CGSH_Hardware::DownloadTarget(TARGET& target)
+void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEnd)
 {
+	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
 	if(!target.gpuDirty) return;
+	uint32 y0 = std::max(target.dirtyY0, rowBegin);
+	uint32 y1 = std::min(target.dirtyY1, rowEnd);
+	if(y0 >= y1) return;
+	// Downloaded rows must leave the dirty rectangle: the RGBA8 copy of GS
+	// pixels is lossy (alpha above 0x80), so writing it back again after GS
+	// memory changed (a transfer re-uploads rows) would corrupt that data.
+	// Rows from the middle cannot leave the rectangle: download all of it.
+	if((y0 != target.dirtyY0) && (y1 != target.dirtyY1))
+	{
+		y0 = target.dirtyY0;
+		y1 = target.dirtyY1;
+	}
 	FlushBatch();
-	uint32 x0 = target.dirtyX0, y0 = target.dirtyY0;
-	uint32 width = target.dirtyX1 - x0, height = target.dirtyY1 - y0;
+	uint32 x0 = target.dirtyX0;
+	uint32 width = target.dirtyX1 - x0, height = y1 - y0;
 	m_transferPixels.resize(width * height);
 	uint32* pixels = m_transferPixels.data();
 	glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
+	uint64 glStart = NowUs();
 	glReadPixels(x0, y0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	GetTimes().downloadGlUs += NowUs() - glStart;
+	GetTimes().downloadPixels += width * height;
 
 	GS_SURFACE surface;
 	surface.Init(target.psm, target.fbp, target.fbw);
@@ -544,17 +601,76 @@ void CGSH_Hardware::DownloadTarget(TARGET& target)
 	uint32 start = 0, end = 0;
 	RowsToBytes(target, y0, y0 + height, start, end);
 	m_textureCache.MarkBytesWritten(start, end - start);
-	target.gpuDirty = false;
+	DiscardDirtyRows(target, y0, y1);
 	m_stats.targetDownloads++;
 	m_stats.downloadedPixels += width * height;
 	m_stateApplied = false;
 }
 
-void CGSH_Hardware::DownloadTargetsOverlapping(uint32 start, uint32 size)
+bool CGSH_Hardware::DiscardDirtyRows(TARGET& target, uint32 rowBegin, uint32 rowEnd)
 {
+	if(!target.gpuDirty || (rowBegin >= rowEnd)) return true;
+	if((rowBegin <= target.dirtyY0) && (rowEnd >= target.dirtyY1))
+	{
+		target.gpuDirty = false;
+	}
+	else if((rowBegin <= target.dirtyY0) && (rowEnd > target.dirtyY0))
+	{
+		target.dirtyY0 = rowEnd;
+	}
+	else if((rowEnd >= target.dirtyY1) && (rowBegin < target.dirtyY1))
+	{
+		target.dirtyY1 = rowBegin;
+	}
+	else
+	{
+		return (rowEnd <= target.dirtyY0) || (rowBegin >= target.dirtyY1);
+	}
+	return true;
+}
+
+void CGSH_Hardware::DownloadTargetsOverlapping(uint32 start, uint32 size, bool overwritten)
+{
+	// Only the rows stored in [start, start + size) are needed. When the caller
+	// is about to overwrite every byte of the range, rows lying entirely inside
+	// it are not needed either.
 	for(auto& target : m_targets)
 	{
-		if(target->gpuDirty && RowsOverlap(*target, target->dirtyY0, target->dirtyY1, start, size)) DownloadTarget(*target);
+		if(!target->gpuDirty) continue;
+		uint32 rowBegin = 0, rowEnd = 0;
+		if(!BytesToRows(*target, start, size, rowBegin, rowEnd)) continue;
+		if(!overwritten)
+		{
+			DownloadTarget(*target, rowBegin, rowEnd);
+			continue;
+		}
+		GS_SURFACE surface;
+		surface.Init(target->psm, target->fbp, target->fbw);
+		uint32 rowBytes = std::max<uint32>(surface.pagesPerRow, 1) * 8192;
+		uint32 rowsPerPage = surface.phMask + 1;
+		// Page rows of the target covered completely: [coveredBegin, coveredEnd).
+		uint32 coveredBegin = rowEnd, coveredEnd = rowEnd;
+		for(uint32 row = rowBegin; row < rowEnd; row += rowsPerPage)
+		{
+			uint32 rowStart = target->fbp + (row / rowsPerPage) * rowBytes;
+			bool covered = (rowStart >= start) && (rowStart + rowBytes <= start + size);
+			if(covered && (coveredBegin == rowEnd)) coveredBegin = row;
+			if(!covered && (coveredBegin != rowEnd))
+			{
+				coveredEnd = row;
+				break;
+			}
+		}
+		// GPU pixels of the covered rows are about to be overwritten in memory
+		// (and re-uploaded from it): drop them from the dirty rectangle, or
+		// download everything when they sit in its middle.
+		if(!DiscardDirtyRows(*target, coveredBegin, coveredEnd))
+		{
+			DownloadTarget(*target);
+			continue;
+		}
+		DownloadTarget(*target, rowBegin, coveredBegin);
+		if(coveredEnd < rowEnd) DownloadTarget(*target, coveredEnd, rowEnd);
 	}
 }
 
@@ -580,13 +696,23 @@ void CGSH_Hardware::BeginTransferWrite()
 	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
 	auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
 	auto [start, size] = GsTransfer::GetDstRange(bltBuf, trxReg, trxPos);
-	// Keep pixels the GPU rendered around the transferred rectangle.
-	DownloadTargetsOverlapping(start, size);
+	// Keep pixels the GPU rendered around the transferred rectangle. A
+	// rectangle spanning whole pages of its buffer (textures uploaded into
+	// framebuffer memory, every frame in some games) overwrites its whole
+	// range: GPU pixels there need not go back to memory first.
+	auto pageSize = CGsPixelFormats::GetPsmPageSize(bltBuf.nDstPsm);
+	uint32 bufferWidth = bltBuf.GetDstWidth();
+	bool wholePages = (trxPos.nDSAX == 0) && (bufferWidth != 0) && ((bufferWidth % pageSize.first) == 0) &&
+	                  (trxReg.nRRW == bufferWidth) && ((trxPos.nDSAY % pageSize.second) == 0) &&
+	                  ((trxReg.nRRH % pageSize.second) == 0);
+	DownloadTargetsOverlapping(start, size, wholePages);
 	CGSH_Primitives::BeginTransferWrite();
 }
 
 void CGSH_Hardware::ProcessHostToLocalTransfer()
 {
+	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
+	m_stats.transfersIn++;
 	auto bltBuf = make_convertible<BITBLTBUF>(m_nReg[GS_REG_BITBLTBUF]);
 	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
 	auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
@@ -609,6 +735,8 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 		}
 		else
 		{
+			// Data in another layout (usually textures) written over the
+			// target: only the page rows it touched change.
 			UploadTarget(*target, 0, rowBegin, target->width, rowEnd - rowBegin);
 		}
 	}
@@ -617,6 +745,8 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 
 void CGSH_Hardware::ProcessLocalToHostTransfer()
 {
+	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
+	m_stats.transfersOut++;
 	FlushBatch();
 	auto bltBuf = make_convertible<BITBLTBUF>(m_nReg[GS_REG_BITBLTBUF]);
 	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
@@ -627,6 +757,8 @@ void CGSH_Hardware::ProcessLocalToHostTransfer()
 
 void CGSH_Hardware::ProcessLocalToLocalTransfer()
 {
+	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
+	m_stats.transfersLocal++;
 	FlushBatch();
 	auto bltBuf = make_convertible<BITBLTBUF>(m_nReg[GS_REG_BITBLTBUF]);
 	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
@@ -695,6 +827,7 @@ void CGSH_Hardware::OnStateChanged()
 
 void CGSH_Hardware::BindTexture()
 {
+	CStageTimer stageTimer(GPU_STAGE_TEXTURE);
 	const auto& s = m_state;
 	glActiveTexture(GL_TEXTURE0);
 	glEnable(GL_TEXTURE_2D);
@@ -784,11 +917,8 @@ void CGSH_Hardware::BindTexture()
 		texture->DecodeAll();
 		if(!glTexture.texture) glGenTextures(1, &glTexture.texture);
 		glBindTexture(GL_TEXTURE_2D, glTexture.texture);
-		if((regionU.size == s.tw) && (regionV.size == s.th))
-		{
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, s.tw, s.th, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture->Texels());
-		}
-		else
+		const void* texels = texture->Texels();
+		if((regionU.size != s.tw) || (regionV.size != s.th))
 		{
 			m_transferPixels.resize(regionU.size * regionV.size);
 			for(uint32 y = 0; y < regionV.size; y++)
@@ -796,8 +926,11 @@ void CGSH_Hardware::BindTexture()
 				std::memcpy(m_transferPixels.data() + y * regionU.size,
 				            texture->Texels() + (regionV.origin + y) * s.tw + regionU.origin, regionU.size * 4);
 			}
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, regionU.size, regionV.size, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_transferPixels.data());
+			texels = m_transferPixels.data();
 		}
+		// Always new storage: draws queued earlier in the frame may still
+		// sample the previous contents.
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, regionU.size, regionV.size, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
 		glTexture.generation = texture->GetGeneration();
 		m_stats.textureUploads++;
 	}
@@ -888,6 +1021,7 @@ void CGSH_Hardware::ApplyState()
 	TARGET* target = FindTarget(s.fbp, s.fbw, s.fpsm, true, static_cast<uint32>(std::max(s.scay1, 0)) + 1);
 	if(!target)
 	{
+		if(m_diagFile) m_diagDropped[DiagKey(s.fbp, s.fbw, s.fpsm)]++;
 		m_drawNothing = true;
 		return;
 	}
@@ -1263,6 +1397,7 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 
 void CGSH_Hardware::FlushBatch()
 {
+	CStageTimer stageTimer(GPU_STAGE_GL);
 	if(m_batch.empty()) return;
 	const GLsizei stride = sizeof(BATCH_VERTEX);
 	glVertexPointer(4, GL_FLOAT, stride, &m_batch[0].x);
@@ -1299,15 +1434,59 @@ void CGSH_Hardware::FlushBatch()
 	}
 	m_batch.clear();
 	m_stats.drawCalls++;
+	if(m_diagFile && m_currentTarget) m_diagDraws[DiagKey(m_currentTarget->fbp, m_currentTarget->fbw, m_currentTarget->psm)]++;
 }
 
 //-----------------------------------------------------------------------------
 // Display
 //-----------------------------------------------------------------------------
 
+void CGSH_Hardware::SetDiagnosticsFile(const char* path, uint32 maxLines)
+{
+	if(m_diagFile) std::fclose(m_diagFile);
+	m_diagFile = std::fopen(path, "w");
+	m_diagLinesLeft = maxLines;
+	m_diagDraws.clear();
+	m_diagDropped.clear();
+}
+
+void CGSH_Hardware::WriteFlipDiagnostics(const DISPLAY_INFO& dispInfo)
+{
+	if(!m_diagFile) return;
+	if(m_diagLinesLeft == 0)
+	{
+		std::fclose(m_diagFile);
+		m_diagFile = nullptr;
+		return;
+	}
+	m_diagLinesLeft--;
+	const auto& layer = dispInfo.layers[0];
+	std::fprintf(m_diagFile, "flip %u: %s buf %X fbw %u psm %X off %u,%u size %ux%u skip %d | draws", m_diagFlips++,
+	             layer.enabled ? "on" : "off", layer.bufPtr, layer.bufWidth / 64, layer.psm, layer.offsetX, layer.offsetY,
+	             dispInfo.width, dispInfo.height, m_lastFrameSkipped ? 1 : 0);
+	for(const auto& [key, count] : m_diagDraws)
+		std::fprintf(m_diagFile, " %X/%u/%X:%u", static_cast<uint32>(key >> 24), static_cast<uint32>((key >> 8) & 0xFFFF), static_cast<uint32>(key & 0xFF), count);
+	if(!m_diagDropped.empty())
+	{
+		std::fprintf(m_diagFile, " | dropped");
+		for(const auto& [key, count] : m_diagDropped)
+			std::fprintf(m_diagFile, " %X/%u/%X:%u", static_cast<uint32>(key >> 24), static_cast<uint32>((key >> 8) & 0xFFFF), static_cast<uint32>(key & 0xFF), count);
+	}
+	std::fprintf(m_diagFile, " | targets");
+	for(const auto& target : m_targets)
+		std::fprintf(m_diagFile, " %X/%u/%X %ux%u v%u%s", target->fbp, target->fbw, target->psm, target->width, target->height,
+		             target->validRows, target->gpuDirty ? "d" : "");
+	std::fprintf(m_diagFile, "\n");
+	std::fflush(m_diagFile);
+	m_diagDraws.clear();
+	m_diagDropped.clear();
+}
+
 void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 {
+	CStageTimer stageTimer(GPU_STAGE_DISPLAY);
 	FlushBatch();
+	WriteFlipDiagnostics(dispInfo);
 	const auto& layer = dispInfo.layers[0];
 	// A skipped frame was not drawn: keep showing the last drawn one (double
 	// buffered games would otherwise flash an older frame).
@@ -1358,13 +1537,36 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 			// after fetching anything the GPU drew there.
 			m_displayStats.fromMemory++;
 			GS_SURFACE surface;
-			surface.Init(layer.psm, layer.bufPtr, bufWidth);
+			bool tabled = surface.Init(layer.psm, layer.bufPtr, bufWidth) && !surface.nibbles;
 			uint32 pageRows = ((layer.offsetY + height) + surface.phMask) >> surface.phShift;
 			DownloadTargetsOverlapping(layer.bufPtr, std::max<uint32>(surface.pagesPerRow, 1) * pageRows * 8192);
 			m_frameBuffer.resize(width * height);
-			for(uint32 y = 0; y < height; y++)
-				for(uint32 x = 0; x < width; x++)
-					m_frameBuffer[x + y * width] = CSoftwareRasterizer::ReadColor32(m_pRAM, layer.psm, layer.bufPtr, bufWidth, layer.offsetX + x, layer.offsetY + y) | 0xFF000000;
+			bool is16 = (layer.psm == CGSHandler::PSMCT16) || (layer.psm == CGSHandler::PSMCT16S);
+			bool is32 = (layer.psm == CGSHandler::PSMCT32) || (layer.psm == CGSHandler::PSMCT24);
+			if(tabled && (is16 || is32))
+			{
+				// Movies and 2D games come through here every frame: walk each
+				// row with the page table instead of a generic call per pixel.
+				for(uint32 y = 0; y < height; y++)
+				{
+					uint32 gsY = (layer.offsetY + y) & 2047;
+					uint32 rowBase = surface.RowBase(gsY);
+					const uint32* rowTable = surface.RowTable(gsY);
+					uint32* dst = m_frameBuffer.data() + y * width;
+					for(uint32 x = 0; x < width; x++)
+					{
+						uint32 offset = surface.Offset(rowBase, rowTable, (layer.offsetX + x) & 2047);
+						dst[x] = is16 ? GsMemory::Color16To32(*reinterpret_cast<const uint16*>(m_pRAM + offset)) | 0xFF000000
+						              : *reinterpret_cast<const uint32*>(m_pRAM + offset) | 0xFF000000;
+					}
+				}
+			}
+			else
+			{
+				for(uint32 y = 0; y < height; y++)
+					for(uint32 x = 0; x < width; x++)
+						m_frameBuffer[x + y * width] = CSoftwareRasterizer::ReadColor32(m_pRAM, layer.psm, layer.bufPtr, bufWidth, layer.offsetX + x, layer.offsetY + y) | 0xFF000000;
+			}
 			glBindTexture(GL_TEXTURE_2D, m_displayUploadTexture);
 			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, m_frameBuffer.data());
 			m_display.texture = m_displayUploadTexture;

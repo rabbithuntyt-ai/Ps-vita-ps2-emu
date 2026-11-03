@@ -57,6 +57,16 @@ int main(int argc, char** argv)
 	int changes = 0;
 	for(int i = 0; i < 120; i++) changes += autoRate.Update((i & 1) ? 0.5f : 0.0f, 30, 60) ? 1 : 0;
 	Check(changes == 0, "no flapping on alternating samples");
+	// Loading screens (recompiling) and GS/SPU bound scenes are not EE bound.
+	autoRate.Reset();
+	for(int i = 0; i < 10; i++) autoRate.Update(0.0f, 5, 60, 0.9f);
+	Check(autoRate.GetRate() == 100, "no step down while recompiling");
+	for(int i = 0; i < 10; i++) autoRate.Update(0.0f, 20, 60, 0.6f);
+	Check(autoRate.GetRate() == 100, "no step down while waiting for the GS");
+	for(int i = 0; i < 3; i++) autoRate.Update(0.0f, 30, 60);
+	Check(autoRate.GetRate() == 90, "steps down when really EE bound");
+	for(int i = 0; i < 40; i++) autoRate.Update(0.05f, 20, 60, 0.7f);
+	Check(autoRate.GetRate() == 100, "climbs back when stalled elsewhere");
 	autoRate.Reset();
 	Check(autoRate.GetRate() == 100, "reset");
 

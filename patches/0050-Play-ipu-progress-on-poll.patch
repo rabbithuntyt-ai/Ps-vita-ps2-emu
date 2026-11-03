@@ -1,0 +1,22 @@
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -480,6 +480,18 @@ bool CSubSystem::IsWaitStatusRegister(uint32 address)
+ uint32 CSubSystem::IOPortReadHandler(uint32 nAddress)
+ {
+ 	uint32 nReturn = 0;
++	//The IPU works in parallel with the EE: a game polling it (or the DMA
++	//channels feeding it) must see the progress that is already possible,
++	//not the state at the last EE slice boundary. Otherwise every poll that
++	//finds it busy idles the rest of the slice (movies: thousands per second).
++	if(((nAddress >= CIPU::IPU_CMD) && (nAddress <= CIPU::IPU_TOP + 4)) ||
++	   (nAddress == CDMAC::D3_CHCR) || (nAddress == CDMAC::D4_CHCR) || (nAddress == CDMAC::D_STAT))
++	{
++		if(m_ipu.WillExecuteCommand() || m_ipu.HasPendingOUTFIFOData() || m_dmac.IsDMA4Started())
++		{
++			ExecuteIpu();
++		}
++	}
+ 	if(nAddress >= 0x10000000 && nAddress <= 0x1000183F)
+ 	{
+ 		nReturn = m_timer.GetRegister(nAddress);

@@ -21,6 +21,7 @@
 #include <fstream>
 #include <sstream>
 #include <map>
+#include <exception>
 #include <memory>
 #include <string>
 #include <vector>
@@ -41,6 +42,7 @@
 #include "CpuScreen.h"
 #include "EmuSession.h"
 #include "EmuProfile.h"
+#include "Jitter.h"
 #include "Log.h"
 #include "GameProfiles.h"
 #include "GSH_Hardware.h"
@@ -76,6 +78,7 @@ namespace
 	constexpr const char* AUTOSTART_PATH = "ux0:data/VitaPS2/autostart.txt";
 	constexpr const char* AUTOSTART_DONE_PATH = "ux0:data/VitaPS2/autostart.done";
 	constexpr const char* PERF_PATH = "ux0:data/VitaPS2/perf.csv";
+	uint64_t g_presentUs = 0; //frontend frame drawing + vglSwapBuffers (perf.csv)
 
 	// autostart.txt boots a game directly, for scripted tests:
 	//   game=ux0:data/VitaPS2/games/game.iso
@@ -107,6 +110,9 @@ namespace
 
 	void BeginFrame()
 	{
+		// Every screen (browser, menus, game) draws through here: keep the
+		// Vita from dimming and suspending while the app is in front.
+		sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
 		Gfx::BeginFrame(SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BG);
 	}
 
@@ -525,12 +531,20 @@ namespace
 			{
 				std::fprintf(perfFile, "t,vm_fps,out_fps,ee_idle,ee_rate");
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",ps2_%s", EmuProfile::GetSectionName(i));
-				std::fprintf(perfFile, ",spu_full_waits,spu_read_waits,ipu_idec,ipu_bdec,ipu_out_kb,ipu_stalls,audio_underruns,audio_tempo,threads\n");
+				std::fprintf(perfFile, ",spu_full_waits,spu_read_waits,ipu_idec,ipu_bdec,ipu_out_kb,ipu_stalls,audio_underruns,audio_tempo");
+				std::fprintf(perfFile, ",jit_blocks,jit_writes,jit_write_ms,jit_alloc_ms,jit_free_ranges,jit_translate_ms,jit_finish_ms,jit_install_ms,jit_guest_instr,jit_code_kb,jit_opt_ms,jit_alloc_regs_ms,jit_codegen_ms,jit_statements");
+				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,threads\n");
 			}
 		}
 		const uint64_t runStart = sceKernelGetProcessTimeWide();
 		uint32_t perfSpuFull = 0, perfSpuRead = 0;
 		CIPU::STATS perfIpu;
+		VITAJIT_STATS perfJit = VitaJit_GetStats();
+		uint64_t perfJitPhases[5] = {EmuProfile::g_jit.translateUs.load(), EmuProfile::g_jit.finishUs.load(), EmuProfile::g_jit.installUs.load(), EmuProfile::g_jit.guestInstructions.load(), EmuProfile::g_jit.codeBytes.load()};
+		uint32_t perfIdle[EmuProfile::IDLE_SOURCE_COUNT] = {};
+		uint64_t perfCodeGen[4] = {Jitter::g_compileStats.optimizeUs.load(), Jitter::g_compileStats.allocateUs.load(), Jitter::g_compileStats.generateUs.load(), Jitter::g_compileStats.statements.load()};
+		CGSH_Hardware::GPU_TIMES perfGpu = CGSH_Hardware::GetTimes();
+		uint64_t perfPresentUs = g_presentUs;
 		// Before anything is compiled for this game.
 		CEmuSession::SetSafeJit(settings.safeJit);
 		std::printf("safe jit: %s\n", settings.safeJit ? "on" : "off");
@@ -584,6 +598,15 @@ namespace
 			sessionPtr = session.get();
 			session->SetSpeedHacks(ToSpeedHacks(settings, autoRate));
 			session->Boot(path);
+			// Scripted runs: gs_diag=N logs N flips (buffers, targets) to gsdiag.txt.
+			if(gpu && autostart)
+			{
+				for(const auto& [key, value] : autostart->settings)
+				{
+					if(key != "gs_diag") continue;
+					if(auto gs = GetHardwareGs(session.get())) gs->SetDiagnosticsFile("ux0:data/VitaPS2/gsdiag.txt", std::atoi(value.c_str()));
+				}
+			}
 		}
 		catch(const std::exception& e)
 		{
@@ -646,6 +669,10 @@ namespace
 				SaveSettings(path, settings);
 				newContent = true;
 			}
+
+			// Cutscenes and movies run without input: keep the Vita from
+			// dimming and suspending while a game runs.
+			sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
 
 			if(gpu)
 			{
@@ -713,8 +740,13 @@ namespace
 				statsPresented = presented;
 				statsTime = now;
 				threadUsage = ThreadProfiler::Sample();
+				// Emulation thread time not spent running the EE: compiling, waiting
+				// for the GS or the SPU thread. A slower EE does not help there.
+				float stallShare = 0.0f;
 				{
 					auto profile = session->TakeProfile();
+					stallShare = profile.share[EmuProfile::SECTION_JIT] + profile.share[EmuProfile::SECTION_GS_WAIT] +
+					             (settings.threadedSpu ? profile.share[EmuProfile::SECTION_SPU] : 0.0f);
 					if(perfFile)
 					{
 						uint32_t eeRateNow = (settings.eeCycleRate == 0) ? autoRate.GetRate() : settings.eeCycleRate;
@@ -727,9 +759,46 @@ namespace
 						             ipu.commands[1] - perfIpu.commands[1], ipu.commands[2] - perfIpu.commands[2],
 						             static_cast<unsigned int>((ipu.outBytes - perfIpu.outBytes) / 1024), ipu.outStalls - perfIpu.outStalls,
 						             CSH_Vita::GetUnderruns(), CSH_Vita::GetTempo());
+						auto jit = VitaJit_GetStats();
+						std::fprintf(perfFile, "%u,%u,%.1f,%.1f,%u,", jit.allocs - perfJit.allocs, jit.writes - perfJit.writes,
+						             (jit.writeUs - perfJit.writeUs) / 1000.0, (jit.allocUs - perfJit.allocUs) / 1000.0, jit.freeRanges);
+						const auto& jitPhases = EmuProfile::g_jit;
+						uint64_t jitNow[5] = {jitPhases.translateUs.load(), jitPhases.finishUs.load(), jitPhases.installUs.load(), jitPhases.guestInstructions.load(), jitPhases.codeBytes.load()};
+						std::fprintf(perfFile, "%.1f,%.1f,%.1f,%u,%u,", (jitNow[0] - perfJitPhases[0]) / 1000.0, (jitNow[1] - perfJitPhases[1]) / 1000.0, (jitNow[2] - perfJitPhases[2]) / 1000.0,
+						             static_cast<unsigned int>(jitNow[3] - perfJitPhases[3]), static_cast<unsigned int>((jitNow[4] - perfJitPhases[4]) / 1024));
+						std::copy(std::begin(jitNow), std::end(jitNow), std::begin(perfJitPhases));
+						const auto& codeGenStats = Jitter::g_compileStats;
+						uint64_t codeGenNow[4] = {codeGenStats.optimizeUs.load(), codeGenStats.allocateUs.load(), codeGenStats.generateUs.load(), codeGenStats.statements.load()};
+						std::fprintf(perfFile, "%.1f,%.1f,%.1f,%u,", (codeGenNow[0] - perfCodeGen[0]) / 1000.0, (codeGenNow[1] - perfCodeGen[1]) / 1000.0, (codeGenNow[2] - perfCodeGen[2]) / 1000.0, static_cast<unsigned int>(codeGenNow[3] - perfCodeGen[3]));
+						std::copy(std::begin(codeGenNow), std::end(codeGenNow), std::begin(perfCodeGen));
+						perfJit = jit;
+						if(gpu)
+						{
+							const auto& times = CGSH_Hardware::GetTimes();
+							auto frame = GetHardwareGs(session.get())->GetLastFrameStats();
+							std::fprintf(perfFile, "%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%u,%u,%u,%u,", (times.pumpUs - perfGpu.pumpUs) / 1000.0,
+							             (times.stageUs[0] - perfGpu.stageUs[0]) / 1000.0, (times.stageUs[1] - perfGpu.stageUs[1]) / 1000.0,
+							             (times.stageUs[2] - perfGpu.stageUs[2]) / 1000.0, (times.stageUs[3] - perfGpu.stageUs[3]) / 1000.0,
+							             (g_presentUs - perfPresentUs) / 1000.0, frame.drawCalls, frame.textureUploads, frame.targetUploads, frame.targetDownloads);
+							std::fprintf(perfFile, "%.1f,%u,%.1f,%u,", (times.uploadGlUs - perfGpu.uploadGlUs) / 1000.0, static_cast<unsigned int>((times.uploadPixels - perfGpu.uploadPixels) / 1000),
+							             (times.downloadGlUs - perfGpu.downloadGlUs) / 1000.0, static_cast<unsigned int>((times.downloadPixels - perfGpu.downloadPixels) / 1000));
+							std::fprintf(perfFile, "%u,%u,%u,%u,", frame.targetsCreated, frame.transfersIn, frame.transfersOut, frame.transfersLocal);
+							perfGpu = times;
+							perfPresentUs = g_presentUs;
+						}
+						else
+						{
+							std::fprintf(perfFile, ",,,,,,,,,,,,,,,,,,");
+						}
 						perfSpuFull = full;
 						perfSpuRead = read;
 						perfIpu = ipu;
+						for(unsigned int i = 0; i < EmuProfile::IDLE_SOURCE_COUNT; i++)
+						{
+							uint32_t count = EmuProfile::g_idleTriggers[i].load();
+							std::fprintf(perfFile, "%u%s", count - perfIdle[i], (i + 1 < EmuProfile::IDLE_SOURCE_COUNT) ? ";" : ",");
+							perfIdle[i] = count;
+						}
 						for(const auto& usage : threadUsage) std::fprintf(perfFile, "%s=%.1f;", usage.name.c_str(), usage.cpuPercent);
 						std::fprintf(perfFile, "\n");
 						std::fflush(perfFile);
@@ -769,7 +838,7 @@ namespace
 				}
 				float eeIdle = session->GetEeIdleRatio();
 				std::printf("fps vm %.1f out %.1f ee-idle %.0f%%\n", vmFps, presentFps, eeIdle * 100.0f);
-				if((settings.eeCycleRate == 0) && autoRate.Update(eeIdle, vmFps, targetFps))
+				if((settings.eeCycleRate == 0) && autoRate.Update(eeIdle, vmFps, targetFps, stallShare))
 				{
 					std::printf("auto ee cycle rate: %u%%\n", autoRate.GetRate());
 					session->SetSpeedHacks(ToSpeedHacks(settings, autoRate));
@@ -848,6 +917,7 @@ namespace
 			newContent = false;
 			lastPresent = now;
 
+			const uint64_t presentStart = sceKernelGetProcessTimeWide();
 			BeginFrame();
 			DrawScreen(screen, settings.stretch);
 			if(settings.showStats)
@@ -942,6 +1012,7 @@ namespace
 				}
 			}
 			EndFrame();
+			g_presentUs += sceKernelGetProcessTimeWide() - presentStart;
 		}
 
 		session.reset();
@@ -978,6 +1049,31 @@ int main()
 	if(std::freopen(LOG_PATH, "w", stdout)) setvbuf(stdout, nullptr, _IOLBF, 0);
 	if(std::freopen(LOG_PATH, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
 	std::printf("VitaPS2 %s starting\n", VITAPS2_BUILD);
+	// Aborts (uncaught exceptions) leave no crash dump: record why.
+	std::set_terminate([]() {
+		if(FILE* file = std::fopen("ux0:data/VitaPS2/crash.txt", "w"))
+		{
+			const char* what = "no exception";
+			if(auto exception = std::current_exception())
+			{
+				try
+				{
+					std::rethrow_exception(exception);
+				}
+				catch(const std::exception& e)
+				{
+					what = e.what();
+				}
+				catch(...)
+				{
+					what = "unknown exception type";
+				}
+			}
+			std::fprintf(file, "VitaPS2 %s terminate: %s\n", VITAPS2_BUILD, what);
+			std::fclose(file);
+		}
+		std::abort();
+	});
 	ThreadProfiler::RegisterCurrentThread("UI/GPU");
 	// Core 1: keep core 0 free for the EE/IOP thread (the bottleneck).
 	sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x20000 /* SCE_KERNEL_CPU_MASK_USER_1 */);

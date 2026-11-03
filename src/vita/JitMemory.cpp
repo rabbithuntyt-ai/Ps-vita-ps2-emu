@@ -5,6 +5,7 @@
 #include <string>
 #include <cstdlib>
 #include <mutex>
+#include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
 #include "JitPool.h"
 
@@ -19,6 +20,15 @@ namespace
 	std::recursive_mutex g_writeMutex;
 	int g_writeDepth = 0;
 	std::string g_diagnostics;
+	VITAJIT_STATS g_stats;
+	SceUInt64 g_writeStart = 0;
+}
+
+VITAJIT_STATS VitaJit_GetStats()
+{
+	VITAJIT_STATS stats = g_stats;
+	stats.freeRanges = static_cast<unsigned int>(g_pool.GetFreeRangeCount());
+	return stats;
 }
 
 std::string VitaJit_GetDiagnostics()
@@ -82,7 +92,10 @@ size_t VitaJit_GetCapacity()
 
 extern "C" void* vitaps2_jit_alloc(size_t size)
 {
+	SceUInt64 start = sceKernelGetProcessTimeWide();
 	void* result = g_pool.Alloc(size);
+	g_stats.allocUs += sceKernelGetProcessTimeWide() - start;
+	g_stats.allocs++;
 	if(!result)
 	{
 		std::printf("JIT pool exhausted (%u bytes requested, %u/%u used)\n",
@@ -103,6 +116,7 @@ extern "C" void vitaps2_jit_begin_write()
 	g_writeMutex.lock();
 	if(g_writeDepth++ == 0)
 	{
+		g_writeStart = sceKernelGetProcessTimeWide();
 		sceKernelOpenVMDomain();
 	}
 }
@@ -116,6 +130,11 @@ extern "C" void vitaps2_jit_end_write(void* ptr, size_t size)
 	if(ptr && size)
 	{
 		sceKernelSyncVMDomain(g_block, ptr, size);
+	}
+	if(g_writeDepth == 0)
+	{
+		g_stats.writes++;
+		g_stats.writeUs += sceKernelGetProcessTimeWide() - g_writeStart;
 	}
 	g_writeMutex.unlock();
 }

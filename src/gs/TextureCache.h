@@ -101,6 +101,8 @@ public:
 	private:
 		friend class CTextureCache;
 		void DecodeTile(uint32 tileX, uint32 tileY);
+		// Texels [x0, x1) of row v, format resolved once per span (needs m_hasSurface).
+		void DecodeSpan(uint32* row, uint32 x0, uint32 x1, uint32 v) const;
 		uint32 DecodeTexel(uint32 u, uint32 v) const;
 		uint32 LookupClut(uint32 index) const;
 		uint32 Expand16(uint32 color16) const;
@@ -117,6 +119,9 @@ public:
 		uint32 m_pageCount = 0;
 		uint32 m_decodeStamp = 0;
 		uint32 m_generation = 0;
+		// Hash of the GS memory pages it was decoded from (0: not hashed). Games
+		// re-upload unchanged textures every frame; equal contents skip a decode.
+		uint64 m_contentHash = 0;
 		uint64 m_uniqueId = 0;
 		uint64 m_lastUse = 0;
 		std::array<uint32, 256> m_clut = {};
@@ -163,6 +168,7 @@ private:
 
 	bool IsValid(const CTexture&) const;
 	void Reset(CTexture&);
+	uint64 HashPages(const CTexture&) const;
 
 	uint8* m_ram = nullptr;
 	const uint16* m_clutRam = nullptr;

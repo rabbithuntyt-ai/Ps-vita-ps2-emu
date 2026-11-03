@@ -15,6 +15,7 @@
 // All OpenGL calls must happen on one thread: run the GS non-threaded and
 // pump it with ProcessSingleFrame() from the thread owning the GL context.
 
+#include <cstdio>
 #include <functional>
 #include <map>
 #include <memory>
@@ -61,6 +62,10 @@ public:
 	// Speed hack: draw only one frame out of frameSkip + 1.
 	void SetFrameSkip(uint32 frameSkip) override;
 
+	// Appends one line per flip (displayed buffer, render target used, draws per
+	// target since the previous flip) to a file, up to maxLines (diagnostics).
+	void SetDiagnosticsFile(const char* path, uint32 maxLines);
+
 	DISPLAY_TEXTURE GetDisplayTexture() const
 	{
 		return m_display;
@@ -81,6 +86,8 @@ public:
 		uint32 uploadedPixels = 0;
 		uint32 approximateBlends = 0;
 		uint32 approximateWrapModes = 0; //region repeat masks GL cannot express
+		uint32 targetsCreated = 0;
+		uint32 transfersIn = 0, transfersOut = 0, transfersLocal = 0; //host->local, local->host, local->local
 		uint32 redundantStateChanges = 0; //state rewrites that did not break batching //state changes with a blend GL cannot express
 	};
 
@@ -112,6 +119,29 @@ public:
 	STATS GetCurrentFrameStats() const
 	{
 		return m_stats;
+	}
+
+	// Time spent on the GS thread by stage since start, in microseconds
+	// (perf.csv). Nested stages count toward the outermost one.
+	enum GPU_STAGE
+	{
+		GPU_STAGE_GL,       //batch submission (FlushBatch)
+		GPU_STAGE_TEXTURE,  //texture decode + upload (BindTexture)
+		GPU_STAGE_TRANSFER, //GS memory transfers, target uploads/downloads
+		GPU_STAGE_DISPLAY,  //flip: display image preparation
+		GPU_STAGE_COUNT
+	};
+	struct GPU_TIMES
+	{
+		uint64 pumpUs = 0; //everything done in Pump (the rest is primitive setup)
+		uint64 stageUs[GPU_STAGE_COUNT] = {};
+		uint64 uploadGlUs = 0, uploadPixels = 0;     //render target uploads: glTexSubImage2D only
+		uint64 downloadGlUs = 0, downloadPixels = 0; //render target downloads: glReadPixels only
+	};
+	static GPU_TIMES& GetTimes()
+	{
+		static GPU_TIMES times;
+		return times;
 	}
 
 protected:
@@ -177,8 +207,13 @@ private:
 	bool RowsOverlap(const TARGET&, uint32 rowBegin, uint32 rowEnd, uint32 start, uint32 size) const;
 
 	void UploadTarget(TARGET&, uint32 x, uint32 y, uint32 width, uint32 height);
-	void DownloadTarget(TARGET&);
-	void DownloadTargetsOverlapping(uint32 start, uint32 size);
+	// Writes GPU pixels of rows [rowBegin, rowEnd) of the dirty rectangle back to GS memory.
+	void DownloadTarget(TARGET&, uint32 rowBegin = 0, uint32 rowEnd = ~0U);
+	// overwritten: the caller writes every byte of the range next.
+	void DownloadTargetsOverlapping(uint32 start, uint32 size, bool overwritten = false);
+	// Forgets GPU pixels of rows [rowBegin, rowEnd) (overwritten in GS memory). False
+	// when they are in the middle of the dirty rectangle (it cannot have holes).
+	bool DiscardDirtyRows(TARGET&, uint32 rowBegin, uint32 rowEnd);
 	void UploadTargetsOverlapping(uint32 start, uint32 size);
 
 	// Part of a decoded texture uploaded as a GL texture, with its wrap mode:
@@ -191,6 +226,7 @@ private:
 	};
 	AXIS_REGION ResolveWrap(uint32 mode, uint32 minValue, uint32 maxValue, uint32 size);
 
+	void WriteFlipDiagnostics(const DISPLAY_INFO&);
 	void ApplyState();
 	void SetupAlphaCombiner(bool fix);
 	void SetupFog();
@@ -236,4 +272,9 @@ private:
 	STATS m_stats;
 	STATS m_lastFrameStats;
 	DISPLAY_STATS m_displayStats;
+	std::FILE* m_diagFile = nullptr;
+	uint32 m_diagLinesLeft = 0;
+	uint32 m_diagFlips = 0;
+	// Draw batches per (fbp, fbw, psm) since the last flip; dropped: no color target.
+	std::map<uint64, uint32> m_diagDraws, m_diagDropped;
 };

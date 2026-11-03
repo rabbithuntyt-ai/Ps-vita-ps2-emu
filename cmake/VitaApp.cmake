@@ -13,6 +13,7 @@ add_executable(vitaps2
 	src/vita/main_vita.cpp
 	src/vita/CpuScreen.cpp
 	src/vita/CpuScreen.h
+	src/vita/FastNew.cpp
 	src/vita/JitMemory.cpp
 	src/vita/JitMemory.h
 	src/vita/PH_Vita.cpp

@@ -1,6 +1,7 @@
 #include "TextureCache.h"
 #include <algorithm>
 #include "GsMemory.h"
+#include "xxhash.h"
 
 void CTextureCache::SetMemory(uint8* ram, const uint16* clut)
 {
@@ -57,6 +58,21 @@ void CTextureCache::Reset(CTexture& texture)
 	texture.m_generation++;
 }
 
+uint64 CTextureCache::HashPages(const CTexture& texture) const
+{
+	//Bounded: hashing costs about as much as decoding past this size.
+	if(texture.m_pageCount > 64) return 0;
+	constexpr uint32 PAGE_SIZE = 1 << GS_SURFACE::PAGE_SHIFT;
+	uint32 first = texture.m_firstPage & (PAGE_COUNT - 1);
+	uint32 contiguous = std::min<uint32>(texture.m_pageCount, PAGE_COUNT - first);
+	uint64 hash = XXH3_64bits(m_ram + first * PAGE_SIZE, contiguous * PAGE_SIZE);
+	if(contiguous < texture.m_pageCount)
+	{
+		hash = XXH3_64bits_withSeed(m_ram, (texture.m_pageCount - contiguous) * PAGE_SIZE, hash);
+	}
+	return (hash != 0) ? hash : 1;
+}
+
 CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 {
 	m_useCounter++;
@@ -69,7 +85,15 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 			{
 				if(!IsValid(*texture))
 				{
+					uint64 hash = HashPages(*texture);
+					if((hash != 0) && (hash == texture->m_contentHash))
+					{
+						//Pages were rewritten with the same contents.
+						texture->m_decodeStamp = m_stamp;
+						return texture.get();
+					}
 					Reset(*texture);
+					texture->m_contentHash = hash;
 				}
 				else
 				{
@@ -109,6 +133,7 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 	texture->m_decodeStamp = m_stamp;
 
 	GetPageRange(key, texture->m_firstPage, texture->m_pageCount);
+	texture->m_contentHash = HashPages(*texture);
 
 	//Snapshot the CLUT (the key holds its hash, so contents are fixed for this entry).
 	if(CGsPixelFormats::IsPsmIDTEX(key.tpsm))
@@ -264,6 +289,11 @@ void CTextureCache::CTexture::DecodeTile(uint32 tileX, uint32 tileY)
 	for(uint32 v = y0; v < y1; v++)
 	{
 		uint32* row = m_texels.data() + v * m_key.tw;
+		if(m_hasSurface)
+		{
+			DecodeSpan(row, x0, x1, v);
+			continue;
+		}
 		for(uint32 u = x0; u < x1; u++)
 		{
 			row[u] = DecodeTexel(u, v);
@@ -271,6 +301,79 @@ void CTextureCache::CTexture::DecodeTile(uint32 tileX, uint32 tileY)
 	}
 	m_tileValid[tileY * m_tilesW + tileX].store(1, std::memory_order_release);
 	m_cache->m_decodedTiles++;
+}
+
+void CTextureCache::CTexture::DecodeSpan(uint32* row, uint32 x0, uint32 x1, uint32 v) const
+{
+	// Same results as DecodeTexel, with the format switch and the row's
+	// page table lookup hoisted out of the texel loop.
+	const uint8* ram = m_cache->m_ram;
+	const uint32* clut = m_clut.data();
+	if(m_surface.nibbles)
+	{
+		// NibbleOffset with the row's page and table lookups done once.
+		const uint32 nibbleMask = GS_SURFACE::RAM_MASK * 2 + 1;
+		uint32 rowPageStart = m_surface.base + (((v >> m_surface.phShift) * m_surface.pagesPerRow) << GS_SURFACE::PAGE_SHIFT);
+		const uint32* rowTable = m_surface.table + ((v & m_surface.phMask) << m_surface.pwShift);
+		for(uint32 u = x0; u < x1; u++)
+		{
+			uint32 pageStart = (rowPageStart + ((u >> m_surface.pwShift) << GS_SURFACE::PAGE_SHIFT)) * 2;
+			uint32 nibble = (pageStart + rowTable[u & m_surface.pwMask]) & nibbleMask;
+			row[u] = clut[(ram[nibble >> 1] >> ((nibble & 1) * 4)) & 0xF];
+		}
+		return;
+	}
+	uint32 rowBase = m_surface.RowBase(v);
+	const uint32* rowTable = m_surface.RowTable(v);
+	auto read32 = [&](uint32 u) { return *reinterpret_cast<const uint32*>(ram + m_surface.Offset(rowBase, rowTable, u)); };
+	switch(m_key.tpsm)
+	{
+	case CGSHandler::PSMT8:
+		for(uint32 u = x0; u < x1; u++) row[u] = clut[ram[m_surface.Offset(rowBase, rowTable, u)]];
+		break;
+	case CGSHandler::PSMCT16:
+	case CGSHandler::PSMCT16S:
+	case CGSHandler::PSMZ16:
+	case CGSHandler::PSMZ16S:
+	{
+		uint32 ta0 = (m_key.texa & 0xFF) << 24;
+		uint32 ta1 = ((m_key.texa >> 8) & 0xFF) << 24;
+		bool aem = (m_key.texa >> 16) & 1;
+		for(uint32 u = x0; u < x1; u++)
+		{
+			uint32 color16 = *reinterpret_cast<const uint16*>(ram + m_surface.Offset(rowBase, rowTable, u));
+			uint32 rgb = ((color16 & 0x001F) << 3) | ((color16 & 0x03E0) << 6) | ((color16 & 0x7C00) << 9);
+			uint32 alpha = (color16 & 0x8000) ? ta1 : ((aem && ((color16 & 0x7FFF) == 0)) ? 0 : ta0);
+			row[u] = rgb | alpha;
+		}
+	}
+	break;
+	case CGSHandler::PSMCT24:
+	case CGSHandler::PSMCT24_UNK:
+	case CGSHandler::PSMZ24:
+	{
+		uint32 ta0 = (m_key.texa & 0xFF) << 24;
+		bool aem = (m_key.texa >> 16) & 1;
+		for(uint32 u = x0; u < x1; u++)
+		{
+			uint32 rgb = read32(u) & 0x00FFFFFF;
+			row[u] = rgb | ((aem && (rgb == 0)) ? 0 : ta0);
+		}
+	}
+	break;
+	case CGSHandler::PSMT8H:
+		for(uint32 u = x0; u < x1; u++) row[u] = clut[read32(u) >> 24];
+		break;
+	case CGSHandler::PSMT4HL:
+		for(uint32 u = x0; u < x1; u++) row[u] = clut[(read32(u) >> 24) & 0xF];
+		break;
+	case CGSHandler::PSMT4HH:
+		for(uint32 u = x0; u < x1; u++) row[u] = clut[read32(u) >> 28];
+		break;
+	default:
+		for(uint32 u = x0; u < x1; u++) row[u] = read32(u);
+		break;
+	}
 }
 
 void CTextureCache::CTexture::DecodeAll()
