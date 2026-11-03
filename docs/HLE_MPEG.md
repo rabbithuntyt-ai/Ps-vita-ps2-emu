@@ -78,6 +78,34 @@ the plan is to take over whole pictures: decode the MPEG-2 stream natively
   viBufAddDMA 0x2A4620); 0x2A5870 (0x2A4890, stop DMA); 0x2A58A0 (0x2A4980,
   restart DMA); 0x2A58D0 (timestamps, 0x2A5040 returns PTS/DTS).
 
+### libmpeg details found so far
+
+- `sceMpeg` layout (SDK): +0 width, +4 height, +8 frameCount, +0x10 pts,
+  +0x18 dts, +0x20 flags, +0x28 pts2nd, +0x30 dts2nd, +0x38 flags2nd,
+  +0x40 sys. The game reads flags right after each picture (0x2A56EC:
+  `(flags >> 3) & 3 == 3`, then `flags & 0x180`).
+- Callback table at `sys+0x08`: (data, function) per type: 0 error
+  (0x2A5810), 1 no data (0x2A5820: reads the disc, viBufAddDMA), 2 stop DMA
+  (0x2A5870), 3 restart DMA (0x2A58A0), 4 background (none), 5 timestamp
+  (0x2A58D0: writes pts/dts into the cbdata at +8/+16).
+- At picture output (0x20C950) libmpeg calls 0x20C638(frame, &mp->pts,
+  &mp->dts, &mp->flags), then the same for the second frame into pts2nd...,
+  and ORs 0x40 into the flags when its state (0x363EAC) is 2. 0x20C638 takes
+  the frame's recorded PTS or interpolates it (sys+0x70..0x90, helper
+  0x1F51D0) and builds the flags from picture structure state (sys+0xF8).
+
+### Plan: shadow mode first
+
+The native decoder (src/common/Mpeg2Decoder.cpp) decodes Silent Hill 2's
+movies correctly on a PC (tests/mpeg2_decoder_tests: I/P/B, 268 pictures/s on
+x86). Before replacing libmpeg:
+
+1. Shadow mode: tee every byte DMA4 delivers to the IPU into the native
+   decoder; after each sceMpegGetPicture compare the native picture with
+   libmpeg's RGB32 output and log frameCount/pts/dts/flags next to the native
+   picture type. Measures the native decoder's speed on the Vita too.
+2. Replace mode with the observed rules for flags and timestamps.
+
 ### Takeover protocol
 
 At `sceMpegGetPicture` (0x20E518): decode the next picture natively from the
