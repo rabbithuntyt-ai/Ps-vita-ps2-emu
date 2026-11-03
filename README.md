@@ -19,6 +19,8 @@ with [tools/vita_realworld.sh](tools/vita_realworld.sh). Full speed is 60
 emulated fps; the title screen shows 30 fps and movies play at 30 pictures per
 second. Full history: [docs/perf/vita_realworld.md](docs/perf/vita_realworld.md).
 
+![Silent Hill 2 frame rates on a real PS Vita, per build](docs/perf/vita_realworld.svg)
+
 <!-- vita-realworld-start -->
 | Build | Title screen fps | Movie: emulated fps | Movie: shown fps | Movie: pictures/s | JIT ms/block | Movie: EE % | VIF % | SPU wait % | GS wait % | VIF1 kQW/s |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -42,15 +44,75 @@ This tracks CPU emulation cost only: it is not a frame rate. The Vita's A9
 also has a lower clock and fewer instructions per cycle than the PS2 needs
 for its EE, VUs and GS together, and games differ in what they stress.
 
+## How VitaPS2 is optimized for the Vita, and why
+
+A PS2 has three very different processors (the EE CPU with 128-bit MMI, two
+vector units, the GS rasterizer) plus the IOP and SPU2. The Vita has three
+usable Cortex-A9 cores at 444 MHz and a mobile GPU. Nothing can be brute
+forced, so every change here comes from a measurement on the device:
+`perf.csv` (written in autostart mode) records ~70 counters per second
+(time per emulator section, JIT phases, GPU stages, idle loop triggers per
+register and DMA channel, VIF unpack formats, audio waits), and
+[tools/vita_realworld.sh](tools/vita_realworld.sh) turns a run on the Vita
+into the table and chart above. Changes to the Play! core live in
+[patches/](patches/) (one file per change, applied at configure time) so each
+one can be measured, reviewed and reverted on its own.
+
+**CPU emulation: a recompiler built for ARMv7 + NEON.** The EE, VUs and IOP
+are translated to ARM code at run time. On the Vita that recompiler gained
+NEON registers for 128-bit MMI and VU math, VFP registers for the FPU,
+interval register allocation, loop register promotion, compare/select
+sinking, inlined guest memory access and a VM memory pool from
+`sceKernelAllocMemBlockForVM`. The CI measures the result exactly, as ARM
+instructions per PS2 instruction (chart below): since the first measurement,
+FPU code went from 15.5 to 7.9 and loads/stores from 19.8 to 7.8. Compile
+time matters as much as code quality for scene changes: Jitter symbols use
+non-atomic reference counts (each block compile made tens of thousands of
+atomic updates, ~40 cycles each on the A9).
+
+**Three cores, each with one job.** The EE thread runs on core 0, the GS
+(GPU) and frontend on core 1, VU1, SPU2 mixing and the movie decoder on
+core 2. Moving SPU2 mixing to its own core cut the EE's audio waits from 27%
+of its time to 0.1%.
+
+**A GPU GS renderer that avoids round trips.** GS frame buffers stay in GPU
+render targets; GS memory is synchronized only when the CPU side needs it,
+row by row. Menus that write textures into frame buffer memory every frame
+were the worst case: those writes now go a row run at a time (2.3x faster),
+unchanged data is skipped, and uploads into a render target that the next
+opaque full-screen draw replaces are skipped entirely.
+
+**Idle loops cost nothing.** Games poll hardware registers in tight loops.
+The EE detects those loops per register and DMA channel and skips ahead;
+during movies this took the IPU from 45,000 wasted poll loops per second to
+none.
+
+**Data paths without per-element overhead.** VIF unpacks (geometry for VU1)
+have fast loops per format and masked lanes (VIF time during the movie: 30% ->
+12%); the texture cache decodes whole spans per format and hashes page
+contents; a lock-protected arena allocator replaces malloc for the core's
+many small objects.
+
+**Movies decoded natively (experimental, `mpeg_hle=1`).** Emulating Sony's
+MPEG library costs ~1.3 ms of Vita CPU per macroblock, under 1 picture per
+second. VitaPS2 can replace `sceMpegGetPicture` with its own MPEG-2 decoder
+on core 2 (word-wise bit reader, 11-bit VLC tables, NEON prediction; 2.2x
+faster than its first version, bit-identical output) fed straight from the
+game's DMA stream.
+
+**Save states** (SELECT + R to save, SELECT + Triangle to load) make each
+scene repeatable, so a change can be measured on the exact same frames.
+
 ## Status
 
 | Component | State |
 |---|---|
-| EE / IOP / VU / SPU2 / HLE BIOS | Play! core, unchanged except 3 small patches |
-| JIT on Vita (`sceKernelAllocMemBlockForVM` pool) | Implemented, needs hardware testing |
-| GPU GS renderer (vitaGL, default) | Implemented, tested against the software renderer on the host; needs hardware testing |
+| EE / IOP / VU / SPU2 / HLE BIOS | Play! core with ~60 performance and Vita patches ([patches/](patches/)) |
+| JIT on Vita (`sceKernelAllocMemBlockForVM` pool) | Running on hardware |
+| GPU GS renderer (vitaGL, default) | Running on hardware; tested against the software renderer on the host |
 | Software GS renderer (accuracy fallback) | Implemented and unit tested (see below) |
-| Vita frontend (game list, display, controls, audio) | Implemented, needs hardware testing |
+| Vita frontend (game list, display, controls, audio, save states) | Running on hardware |
+| Silent Hill 2 (SLUS-20228) | Boots through the menus and plays the opening movie (below full speed) |
 | Host build + automated tests | Passing |
 | VPK build | CI with the official VitaSDK Docker image |
 
@@ -76,6 +138,7 @@ for its EE, VUs and GS together, and games differ in what they stress.
 | Front touch bottom-left / bottom-right corner | L3 / R3 |
 | SELECT + START | pause menu: renderer, speed hacks, aspect, overlay, quit |
 | SELECT + L | toggle performance overlay |
+| SELECT + R / SELECT + Triangle | save state / load state (one per game, `ux0:data/VitaPS2/states/`) |
 
 Settings chosen in the pause menu are saved per game in
 `ux0:data/VitaPS2/settings/`.

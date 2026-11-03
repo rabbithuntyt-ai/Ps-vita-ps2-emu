@@ -83,3 +83,6 @@ if grep -q "<!-- vita-realworld-start -->" "$README"; then
 		/<!-- vita-realworld-end -->/ { skip = 0 }
 		!skip' "$README" > "$README.tmp" && mv "$README.tmp" "$README"
 fi
+
+# Chart of all measured builds (README).
+python3 "$ROOT/tools/realworld_svg.py" "$CSV" "$ROOT/docs/perf/vita_realworld.svg" || echo "chart not redrawn (python3 missing?)"
