@@ -130,3 +130,36 @@ Still to settle: the fields libmpeg updates per picture that the game reads
    picture (the game's callback has to run first).
 3. Native MPEG-2 video decoder: headers, VLC (Play's IPU tables), IDCT
    (Framework fast IDCT), motion compensation and YCbCr->RGB with NEON.
+
+## Replace mode (src/common/MpegHle.cpp, autostart key `mpeg_hle=1`)
+
+Status: works up to the display hand-off; not verified to play through yet.
+
+- Patch 0060 adds the hooks: IPU input sink (DMA4 data to the frontend
+  instead of the IN FIFO, with back pressure), IPU reset notification, an HLE
+  syscall range 0xA00-0xA0F (0x800-0x900 belongs to CLibMc2: 0x900 is
+  GETDBCSTATUS) and a vblank hook on the EE thread for code patches.
+- `sceMpegGetPicture` is found by its code (masked jal) and its first 14
+  words become a stub; the original epilogue stays, so a state saved inside
+  libmpeg still returns correctly. The stub loops: `syscall 0xA00` (start) /
+  `0xA01` (again) either returns a picture (v0 = 1) or asks for the game's
+  no-data callback (`sys+0x14`, called with a cbdata of type 1 at sp+8).
+- Silent Hill 2 asks for RAW8 macroblocks (256 Y, 64 Cb, 64 Cr; 0x48000
+  bytes for 512x384; its output buffers are 0x60000 apart) and converts the
+  colours itself. Writing RGB32 overflowed into the next buffer.
+- The game reads `mp->frameCount` (+8): the vblank display handler (0x2A20D8)
+  shows a buffer only while frameCount < the movie's end frame (0x12118F4),
+  and after a picture with frameCount 0 it builds each output buffer's VIF1
+  DMA chain (0x2A5738 -> 0x2A17C0). A nonzero first frameCount leaves the
+  chains unbuilt: the display then waits on VIF1 forever (sceDmaSync at
+  0x1F8338 from 0x2A1DF8). frameCount starts at 0 for a new movie and
+  continues from the saved value after a state load.
+- Every DMA4 register write is the game's own ViBuf code (0x2A4xxx:
+  viBufAddDMA reads D4_MADR to count consumed 2 KB units and appends REF tags),
+  so the sink needs nothing else from libmpeg.
+- Decoder speed (host, x86, 300 pictures of the opening movie, output
+  identical at every step): 268 pictures/s -> 588 with a word-wise bit reader,
+  11-bit VLC lookup tables built from Framework's tables, dequantisation of
+  the decoded coefficients only and an unclamped prediction path. On ARM the
+  prediction and block add use NEON (Mpeg2Simd.h); the HLE runs a NEON vs
+  scalar self-test at startup and falls back to scalar on any mismatch.

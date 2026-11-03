@@ -204,6 +204,22 @@ void CMpegShadow::Compare(const PICTURE& picture, uint32_t frameCount)
 		}
 		std::fprintf(m_log, "  RAW8 best match frame buffer %d: mean diff %.3f, %.2f%% bytes equal\n", best, bestDiff,
 		             picture.raw8.empty() ? 0.0 : bestExact * 100.0 / picture.raw8.size());
+		// Both versions of the first I picture, for analysis on a PC.
+		if(!m_dumpedIntra && (picture.type == 1) && (best >= 0))
+		{
+			m_dumpedIntra = true;
+			uint32_t frameBuffer = Read32(m_ram, sys + frameOffsets[best]) & 0x01FFFFFF;
+			if(FILE* file = std::fopen("ux0:data/VitaPS2/mpeg_native.raw8", "wb"))
+			{
+				std::fwrite(picture.raw8.data(), 1, picture.raw8.size(), file);
+				std::fclose(file);
+			}
+			if(FILE* file = std::fopen("ux0:data/VitaPS2/mpeg_libmpeg.raw8", "wb"))
+			{
+				std::fwrite(m_ram + frameBuffer, 1, picture.raw8.size(), file);
+				std::fclose(file);
+			}
+		}
 	}
 	// Color conversion samples: native Y Cb Cr -> libmpeg's R G B (first pictures).
 	if((frameCount <= 2) && (m_width != 0))

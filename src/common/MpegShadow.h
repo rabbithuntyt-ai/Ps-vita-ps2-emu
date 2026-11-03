@@ -52,6 +52,7 @@ private:
 	std::deque<PICTURE> m_pictures;
 	uint32_t m_lastFrameCount = 0;
 	uint32_t m_width = 0, m_height = 0;
+	bool m_dumpedIntra = false;
 	double m_decodeMsTotal = 0;
 	uint32_t m_decoded = 0;
 };

@@ -51,6 +51,13 @@ public:
 		return *m_display;
 	}
 
+	// The picture returned last is the final one of its sequence (the sequence
+	// end code flushed it).
+	bool PictureEndsSequence() const
+	{
+		return m_endsSequence;
+	}
+
 	// libmpeg's sceIpuRGB32 layout: 16x16 RGBA macroblocks in raster order,
 	// alpha 0x80 (IPU CSC with zero thresholds).
 	static void ConvertToRgb32Macroblocks(const FRAME&, uint32_t* out, uint32_t maxMacroblocks);
@@ -63,8 +70,10 @@ public:
 		m_ipuCompatibleQuantisation = enabled;
 	}
 
-private:
+	// Bit reader (internal; public for the VLC lookup tables in the .cpp).
 	struct BITS;
+
+private:
 
 	bool ParseSequenceHeader(BITS&);
 	bool ParseExtension(BITS&);
@@ -111,5 +120,6 @@ private:
 	FRAME* m_backward = nullptr;
 	FRAME* m_current = nullptr;
 	const FRAME* m_display = nullptr;
+	bool m_endsSequence = false;
 	bool m_pendingReference = false; //m_backward not displayed yet
 };

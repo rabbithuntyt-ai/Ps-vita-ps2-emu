@@ -1,0 +1,129 @@
+diff --git a/Source/ee/IPU.h b/Source/ee/IPU.h
+--- a/Source/ee/IPU.h
++++ b/Source/ee/IPU.h
+@@ -47,6 +47,27 @@ public:
+ 	static inline InputObserver g_inputObserver = nullptr;
+ 	static inline void* g_inputObserverContext = nullptr;
+ 
++	//Movie HLE: while a sink is set, DMA4 data goes to the sink instead of the
++	//IN FIFO (what the FIFO still holds goes first). The sink returns how many
++	//bytes it took; taking less stalls DMA4. The reset observer hears about
++	//IPU resets (IPU_CTRL RST), which games issue between movies.
++	using InputSink = uint32 (*)(void* context, const uint8* data, uint32 size);
++	using ResetObserver = void (*)(void* context);
++	static void SetInputSink(InputSink sink, void* context)
++	{
++		g_inputSink = sink;
++		g_inputSinkContext = context;
++	}
++	static void SetResetObserver(ResetObserver observer, void* context)
++	{
++		g_resetObserver = observer;
++		g_resetObserverContext = context;
++	}
++	static inline InputSink g_inputSink = nullptr;
++	static inline void* g_inputSinkContext = nullptr;
++	static inline ResetObserver g_resetObserver = nullptr;
++	static inline void* g_resetObserverContext = nullptr;
++
+ 	// Converts one 16x16 macroblock in RAW8 layout (256 Y, 64 Cb, 64 Cr) to
+ 	// RGBA32 with the CSC alpha thresholds. Integer arithmetic.
+ 	static void ConvertMacroblockToRgba32(const uint8* block, uint32* pixels, uint16 th0, uint16 th1);
+diff --git a/Source/ee/IPU.cpp b/Source/ee/IPU.cpp
+--- a/Source/ee/IPU.cpp
++++ b/Source/ee/IPU.cpp
+@@ -139,6 +139,7 @@ void CIPU::Reset()
+ 
+ 	m_IN_FIFO.Reset();
+ 	m_OUT_FIFO.Reset();
++	if(g_resetObserver) g_resetObserver(g_resetObserverContext);
+ }
+ 
+ uint32 CIPU::GetRegister(uint32 nAddress)
+@@ -274,6 +275,7 @@ void CIPU::SetRegister(uint32 nAddress, uint32 nValue)
+ 			m_nTH1 = 0;
+ 			m_IN_FIFO.Reset();
+ 			m_OUT_FIFO.Reset();
++			if(g_resetObserver) g_resetObserver(g_resetObserverContext);
+ 		}
+ 		nValue &= 0x3FFF0000;
+ 		m_IPU_CTRL &= ~0x3FFF0000;
+@@ -472,6 +474,24 @@ uint32 CIPU::ReceiveDMA4(uint32 address, uint32 nQWC, bool nTagIncluded, uint8*
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_IPU);
+ 	assert(nTagIncluded == false);
+ 
++	if(g_inputSink)
++	{
++		if(m_IN_FIFO.GetSize() != 0)
++		{
++			//Hand over the unread rest of the FIFO (from the next byte boundary).
++			unsigned int partialBits = m_IN_FIFO.GetAvailableBits() % 8;
++			if(partialBits != 0) m_IN_FIFO.Advance(static_cast<uint8>(partialBits));
++			uint8 rest[CINFIFO::BUFFERSIZE];
++			unsigned int restSize = m_IN_FIFO.ReadAlignedBytes(rest, sizeof(rest));
++			m_IN_FIFO.Reset();
++			if(restSize != 0) g_inputSink(g_inputSinkContext, rest, restSize);
++		}
++		uint8* source = (address & 0x80000000) ? spr + (address & (PS2::EE_SPR_SIZE - 1)) : ram + address;
++		uint32 maxSize = nQWC * 0x10;
++		if(address & 0x80000000) maxSize = std::min<uint32>(maxSize, PS2::EE_SPR_SIZE - (address & (PS2::EE_SPR_SIZE - 1)));
++		return g_inputSink(g_inputSinkContext, source, maxSize) / 0x10;
++	}
++
+ 	uint32 availableFifoSize = CINFIFO::BUFFERSIZE - m_IN_FIFO.GetSize();
+ 
+ 	uint32 size = std::min<uint32>(nQWC * 0x10, availableFifoSize);
+diff --git a/Source/ee/PS2OS.h b/Source/ee/PS2OS.h
+--- a/Source/ee/PS2OS.h
++++ b/Source/ee/PS2OS.h
+@@ -44,6 +44,25 @@ public:
+ 
+ 	Ee::CLibMc2& GetLibMc2();
+ 
++	//Frontend HLE (movie decoding, src/common/MpegHle): syscalls in
++	//[HLE_SYSCALL_START, HLE_SYSCALL_END) go to the syscall handler; the
++	//vblank hook runs on the EE thread at every vblank start (code patches).
++	enum
++	{
++		HLE_SYSCALL_START = 0xA00,
++		HLE_SYSCALL_END = 0xA10,
++	};
++	using HleHook = void (*)(void* context, CMIPS&);
++	static void SetHleHooks(HleHook syscallHandler, HleHook vblankHook, void* context)
++	{
++		g_hleSyscallHandler = syscallHandler;
++		g_hleVBlankHook = vblankHook;
++		g_hleContext = context;
++	}
++	static inline HleHook g_hleSyscallHandler = nullptr;
++	static inline HleHook g_hleVBlankHook = nullptr;
++	static inline void* g_hleContext = nullptr;
++
+ 	void HandleInterrupt(int32);
+ 	void HandleSyscall();
+ 	void HandleReturnFromException();
+diff --git a/Source/ee/PS2OS.cpp b/Source/ee/PS2OS.cpp
+--- a/Source/ee/PS2OS.cpp
++++ b/Source/ee/PS2OS.cpp
+@@ -3206,6 +3206,10 @@ void CPS2OS::HandleSyscall()
+ 	{
+ 		m_libMc2.HandleSyscall(m_ee);
+ 	}
++	else if((func >= HLE_SYSCALL_START) && (func < HLE_SYSCALL_END) && g_hleSyscallHandler)
++	{
++		g_hleSyscallHandler(g_hleContext, m_ee);
++	}
+ 	else
+ 	{
+ 		if(func & 0x80000000)
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -363,6 +363,7 @@ void CSubSystem::NotifyVBlankStart()
+ 	m_timer.NotifyVBlankStart();
+ 	m_intc.AssertLine(CINTC::INTC_LINE_VBLANK_START);
+ 	m_os->GetLibMc2().NotifyVBlankStart();
++	if(CPS2OS::g_hleVBlankHook) CPS2OS::g_hleVBlankHook(CPS2OS::g_hleContext, m_EE);
+ 	if(m_os->CheckVBlankFlag())
+ 	{
+ 		//Make sure a vblank start interrupt is serviced now because

@@ -131,6 +131,8 @@ add_library(vitaps2_common STATIC
 	src/common/GameProfiles.h
 	src/common/Mpeg2Decoder.cpp
 	src/common/Mpeg2Decoder.h
+	src/common/MpegHle.cpp
+	src/common/MpegHle.h
 	src/common/MpegShadow.cpp
 	src/common/MpegShadow.h
 )
@@ -205,6 +207,11 @@ else()
 	# (skipped without one) and writes PPM frames next to it.
 	add_executable(mpeg2_decoder_tests tests/mpeg2_decoder_tests.cpp)
 	target_link_libraries(mpeg2_decoder_tests PRIVATE vitaps2_common)
+
+	# NEON kernels against the scalar ones (build for ARM to test NEON).
+	add_executable(mpeg2_simd_tests tests/mpeg2_simd_tests.cpp)
+	target_include_directories(mpeg2_simd_tests PRIVATE src/common)
+	add_test(NAME mpeg2_simd_tests COMMAND mpeg2_simd_tests)
 
 	add_executable(game_profiles_tests tests/game_profiles_tests.cpp)
 	target_link_libraries(game_profiles_tests PRIVATE vitaps2_common)

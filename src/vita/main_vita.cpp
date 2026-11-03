@@ -44,6 +44,7 @@
 #include "CpuScreen.h"
 #include "EmuSession.h"
 #include "EmuProfile.h"
+#include "MpegHle.h"
 #include "MpegShadow.h"
 #include "Ps2Const.h"
 #include "ee/Ee_SubSystem.h"
@@ -563,6 +564,7 @@ namespace
 		bool eeHotMovie = false;
 		uint32_t eeHotSeconds = 0;
 		CMpegShadow mpegShadow; //movie HLE shadow mode (autostart key mpeg_shadow=1)
+		CMpegHle mpegHle;       //movie HLE replace mode (autostart key mpeg_hle=1)
 		std::future<bool> stateOperation; //save or load state in progress
 		bool stateIsLoad = false;
 		bool pendingStateLoad = false; //autostart load_state=1
@@ -646,6 +648,18 @@ namespace
 					{
 						// Silent Hill 2 (SLUS-20228): sceMpeg context at 0x1213080 (docs/HLE_MPEG.md).
 						if(value == "1") mpegShadow.Enable(session->GetVm()->m_ee->m_ram, 0x1213080, "ux0:data/VitaPS2/mpegshadow.txt");
+						continue;
+					}
+					if(key == "mpeg_hle")
+					{
+						// Native movie decoding (libmpeg 2.2 sceMpegGetPicture), decoder on
+						// core 2 (VU1 has little to do while the EE does not decode).
+						if(value == "1")
+						{
+							mpegHle.Enable(session->GetVm()->m_ee->m_ram, "ux0:data/VitaPS2/mpeghle.txt", []() {
+								sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */);
+							});
+						}
 						continue;
 					}
 					if(key != "gs_diag") continue;
@@ -1162,6 +1176,7 @@ namespace
 			g_presentUs += sceKernelGetProcessTimeWide() - presentStart;
 		}
 
+		mpegHle.Disable();
 		mpegShadow.Disable();
 		session.reset();
 		sessionPtr = nullptr;
