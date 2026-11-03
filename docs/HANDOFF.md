@@ -26,24 +26,44 @@ through **Vita Lab** (`vitalab` CLI + plugins; see the Vita-Lingo repo, `lab/`).
   PS2 thread time per subsystem, SPU waits, IPU activity, underruns, CPU per
   thread), `log.txt`, screenshots and crash dumps.
 - In game: Select+Start = pause menu (settings), Select+L = overlay.
+- Building on a Windows PC: WSL (Ubuntu 24.04, WSL1 works) with VitaSDK in
+  /usr/local/vitasdk, then `tools/build_vita_wsl.sh` (sources on the Windows
+  side, build directory in Linux). Check out with `core.autocrlf=false`: CRLF
+  breaks the patches.
+- `tools/vitalab_longrun.sh OUTDIR SECONDS [settings]`: like vitalab_run.sh
+  with a screenshot every 15s. Extra autostart key `gs_diag=N` logs N flips
+  (displayed buffer, draws per target, targets) to `ux0:data/VitaPS2/gsdiag.txt`.
+- Real-world numbers: after a run that plays to the opening movie, record them
+  with `tools/vita_realworld.sh RUN_DIR LABEL` (docs/perf/vita_realworld.*,
+  README table). log.txt stays empty on the Vita (the stdout redirect does
+  not work); uncaught exceptions write `ux0:data/VitaPS2/crash.txt`.
 
 ## Open problems (Silent Hill 2, SLUS-20228)
 
-1. **Intro movie plays at ~4 frames/s** while the VM runs at ~59 fps.
-   Audio is ruled out (no change with the SPU thread on/off). The overlay
-   line `IPU/s: idec/bdec/vdec/fdec/csc, out KB, stalls` (only while a movie
-   decodes) shows whether the IPU starves, waits on DMA3 (stalls) or whether
-   the game issues few commands. IPU pacing itself is ruled out: IDEC and
-   BDEC flush their own output and finish as soon as input is available
-   (tests/ipu_decode_test; with 960 macroblocks and long --frames the probe
-   decodes ~3200 pictures per emulated second, eager or not). Disc streaming
-   (CdStRead) returns immediately. Next suspects: the EE side of the player
-   (sceMpeg does motion compensation in software, so EE rate matters), the
-   game's audio/video sync, or the IOP. Compare perf.csv `ee_idle` and the
-   IPU columns during the movie.
-2. **Brightness flashing** on the title screen: not the renderer (software
-   too), not VU1 threading, not the JIT (Safe JIT). Less at EE rate 130%:
-   timing related. Auto EE rate changes speed mid-game; test fixed rates.
+1. **Intro movie is a slideshow** (measured on hardware: ~0.8 pictures/s,
+   emulated fps ~10 during the movie). Found and fixed on the way:
+   - The wait-loop idle check (0020) counted status reads per PC and never
+     reset: once at 5000, every IPU_CMD/IPU_CTRL/Dn_CHCR read ended the EE
+     slice, even when the unit was done (players read them once per IPU
+     command, ~10 per macroblock). 0048: only reads that find the unit busy
+     count. The ipu_decode_test probe never reaches 5000 reads from one PC.
+   - Polls that found the IPU busy ended the slice before the IPU could
+     advance (it only ran at slice boundaries): 0050 runs ExecuteIpu on reads
+     of the IPU registers and DMA3/DMA4/D_STAT. IPU idle triggers: up to
+     45000/s -> 0.
+   - Flips were skipped when no GS register was written that vblank (movie
+     players swap DISPFB): 0047.
+   Now: the emulation thread is busy (EE ~33%, VIF ~27%, SPU ~26%) at ~10
+   emulated fps since the EE clock fix (0037): raw EE speed is the limit.
+   CHCR polls with STR set still idle ~9000 slices/s (perf.csv
+   `idle_intc_gs_t1_ipu_dstat_chcr_vifgif`). User report: a white bar at the
+   bottom of the movie every other frame (not caught in screenshots yet).
+2. **Brightness flashing** on the Konami and title screens: fixed. The auto EE
+   rate stepped down during loading (JIT compile time counts as EE time) and
+   never climbed back; the triple-buffered game then showed unfinished
+   buffers. No flicker at a fixed 100% (user confirmed). AutoCycleRate now
+   ignores seconds spent compiling or waiting on the GS/SPU threads
+   (stallShare) and climbs back on them.
 3. **Black screen when the movie hands over to the game** (user report: let
    the movie play out; the screen stayed black afterwards). Unknown whether
    the game hangs or only the display is wrong: check whether vm_fps and EE
@@ -52,6 +72,20 @@ through **Vita Lab** (`vitalab` CLI + plugins; see the Vita-Lingo repo, `lab/`).
    full input FIFO, DMA4 still running).
 
 ## Recent work (newest first)
+
+- Hardware renderer (title screen 10-15 -> 26-30 fps on hardware, before the
+  EE clock fix): render target readbacks limited to the rows a memory access
+  needs, rows a whole-page transfer overwrites are dropped from the dirty
+  rectangle instead of read back (the RGBA8 copy is lossy: reading it back
+  over newer GS memory corrupts it), per-format span texture decode, texture
+  content hash (unchanged re-uploads skip the decode), row-wise display of GS
+  memory. perf.csv has GPU stage timings (gpu_*_ms, up/dl).
+- FastNew.cpp: operator new from a size-class arena (newlib malloc is 1.3us per
+  call on the Vita; new+delete now 0.48us). Headerless on purpose: something
+  frees malloc memory with delete.
+- The app keeps the Vita awake (sceKernelPowerTick) in menus and in game.
+- JIT compile timing in perf.csv (jit_*): ~3-4 ms per block on hardware for
+  ~30 statements (optimize ~1.5, regalloc ~1.5, codegen ~0.7 ms).
 
 - SPU voice mixing in two passes with a NEON (SSE2 on x86) saturating mix,
   exact /0x7FFF via shifts, reader/ADSR inlined: same output (checksum), ~21%

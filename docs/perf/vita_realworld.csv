@@ -1,0 +1,4 @@
+date,label,title_out_fps,movie_vm_fps,movie_out_fps,movie_pics,jit_ms_block
+2026-11-02,e47b4fa + local fixes (before cloud merge),9.9,56.5,0.0,0.3,4.27
+2026-11-02,26a0bfb + local fixes,8.6,12.3,7.8,0.8,4.41
+2026-11-02,26a0bfb + local fixes + IPU poll fix,8.7,9.9,9.8,0.8,4.41

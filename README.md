@@ -12,6 +12,17 @@ Graphics Synthesizer renderers and a native vitaGL frontend.
 > below full speed. See [docs/RESEARCH.md](docs/RESEARCH.md) for the analysis and [docs/ROADMAP.md](docs/ROADMAP.md) for the full checklist,
 > the options considered and the optimization roadmap.
 
+## Real-world performance (PS Vita hardware)
+
+Silent Hill 2 on an actual PS Vita, measured from the emulator's own counters
+with [tools/vita_realworld.sh](tools/vita_realworld.sh). Full speed is 60
+emulated fps; the title screen shows 30 fps and movies play at 30 pictures per
+second. Full history: [docs/perf/vita_realworld.md](docs/perf/vita_realworld.md).
+
+| Build | Title screen fps | Movie: emulated fps | Movie: shown fps | Movie: pictures/s | JIT ms/block |
+|---|---|---|---|---|---|
+| 26a0bfb + local fixes + IPU poll fix (2026-11-02) | 8.7 | 9.9 | 9.8 | 0.8 | 4.41 |
+
 ## Performance gap
 
 ![PS2 to Vita performance gap: ARM instructions per PS2 instruction over time](docs/perf/gap.svg)
