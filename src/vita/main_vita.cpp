@@ -53,6 +53,7 @@
 #include "Jitter.h"
 #include "Log.h"
 #include "GameProfiles.h"
+#include "JitCacheSetup.h"
 #include "Theme.h"
 #include "GSH_Hardware.h"
 #include "Gfx.h"
@@ -82,6 +83,7 @@ namespace
 	constexpr const char* GAMES_PATH = "ux0:data/VitaPS2/games";
 	constexpr const char* SETTINGS_PATH = "ux0:data/VitaPS2/settings";
 	constexpr const char* STATES_PATH = "ux0:data/VitaPS2/states";
+	constexpr const char* JIT_CACHE_PATH = "ux0:data/VitaPS2/jitcache";
 	constexpr const char* LOG_PATH = "ux0:data/VitaPS2/log.txt";
 	constexpr const char* BENCHMARK_PATH = "ux0:data/VitaPS2/benchmark.txt";
 	// Scripted runs (e.g. from Vita Lab): see ReadAutostart.
@@ -184,6 +186,7 @@ namespace
 		bool threadedVu1 = true; //VU1 microprograms on the third core
 		bool safeJit = false;    //no NEON/VFP register allocation in the JIT
 		bool threadedSpu = true; //SPU2 audio mixing on the second core
+		bool jitCache = true;    //keep compiled code between runs (ux0:data/VitaPS2/jitcache)
 	};
 
 	std::string SettingsPathFor(const std::string& gamePath)
@@ -211,6 +214,7 @@ namespace
 		else if(key == "threaded_vu1") settings.threadedVu1 = value != 0;
 		else if(key == "safe_jit") settings.safeJit = value != 0;
 		else if(key == "threaded_spu") settings.threadedSpu = value != 0;
+		else if(key == "jit_cache") settings.jitCache = value != 0;
 	}
 
 	// What the first-boot tuner found for a game (CAutoTuner).
@@ -660,6 +664,15 @@ namespace
 			session = std::make_unique<CEmuSession>(config);
 			sessionPtr = session.get();
 			session->SetSpeedHacks(ToSpeedHacks(settings, autoRate));
+			// Code compiled in earlier runs of this game (after SetSafeJit: the
+			// code generator's modes are part of the cache's fingerprint).
+			if(settings.jitCache)
+			{
+				auto slash = path.find_last_of('/');
+				std::string cachePath = std::string(JIT_CACHE_PATH) + "/" + path.substr(slash + 1) + ".jit";
+				bool opened = JitCacheSetup::Open(cachePath, "app0:eboot.bin");
+				std::printf("jit cache %s: %s\n", cachePath.c_str(), opened ? JitCacheSetup::Describe().c_str() : "not available");
+			}
 			session->Boot(path);
 			// Scripted runs: gs_diag=N logs N flips (buffers, targets) to gsdiag.txt.
 			if(gpu && autostart)
@@ -1233,6 +1246,11 @@ namespace
 		}
 
 		mpegHle.Disable();
+		if(settings.jitCache)
+		{
+			std::printf("%s\n", JitCacheSetup::Describe().c_str());
+			JitCacheSetup::Close();
+		}
 		mpegShadow.Disable();
 		session.reset();
 		sessionPtr = nullptr;
@@ -1311,6 +1329,7 @@ int main()
 	sceIoMkdir(GAMES_PATH, 0777);
 	sceIoMkdir(SETTINGS_PATH, 0777);
 	sceIoMkdir(STATES_PATH, 0777);
+	sceIoMkdir(JIT_CACHE_PATH, 0777);
 
 	// Before vitaGL, which takes most of the remaining memory for its pools.
 	if(!VitaJit_Init(JIT_POOL_MIN, JIT_POOL_MAX))

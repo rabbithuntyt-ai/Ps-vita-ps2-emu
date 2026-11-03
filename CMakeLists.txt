@@ -130,6 +130,8 @@ endif()
 # Frontend-independent glue shared by the Vita app and the host harness.
 add_library(vitaps2_common STATIC
 	src/common/EmuSession.cpp
+	src/common/JitCacheSetup.cpp
+	src/common/JitCacheSetup.h
 	src/common/EmuSession.h
 	src/common/FrameSink.h
 	src/common/AudioStretcher.cpp
@@ -227,6 +229,11 @@ else()
 
 	add_executable(game_profiles_tests tests/game_profiles_tests.cpp)
 	target_link_libraries(game_profiles_tests PRIVATE vitaps2_common)
+
+	# Persistent JIT cache: file format and relocation helpers (any host).
+	add_executable(jit_cache_tests tests/jit_cache_tests.cpp)
+	target_link_libraries(jit_cache_tests PRIVATE PlayCore)
+	add_test(NAME jit_cache_tests COMMAND jit_cache_tests)
 
 	add_executable(auto_tuner_tests tests/auto_tuner_tests.cpp)
 	target_include_directories(auto_tuner_tests PRIVATE src/common)
@@ -416,6 +423,34 @@ else()
 				endif()
 			endforeach()
 		endforeach()
+		if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
+			# Persistent JIT cache with real generated code: store, then load
+			# (default and chained frames, whose links use thunks).
+			foreach(JIT_CACHE_CASE "1;19501935;-;default" "100;D477E7D3;--loops;default" "100;D477E7D3;--loops;chained")
+				list(GET JIT_CACHE_CASE 0 JIT_CACHE_SEED)
+				list(GET JIT_CACHE_CASE 1 JIT_CACHE_EXPECTED)
+				list(GET JIT_CACHE_CASE 2 JIT_CACHE_ARGS)
+				list(GET JIT_CACHE_CASE 3 JIT_CACHE_MODE)
+				if(JIT_CACHE_ARGS STREQUAL "-")
+					set(JIT_CACHE_ARGS "")
+				endif()
+				set(JIT_CACHE_NAME jit_cache_ee_test_${JIT_CACHE_SEED}_${JIT_CACHE_MODE})
+				add_test(NAME ${JIT_CACHE_NAME}
+					COMMAND ${CMAKE_COMMAND}
+						-DPYTHON=${Python3_EXECUTABLE}
+						-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+						-DRUNNER=$<TARGET_FILE:vitaps2_host>
+						"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
+						-DSEED=${JIT_CACHE_SEED}
+						-DEXPECTED=${JIT_CACHE_EXPECTED}
+						-DFUZZ_ARGS=${JIT_CACHE_ARGS}
+						-DSUFFIX=_${JIT_CACHE_SEED}_${JIT_CACHE_MODE}
+						-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/jit_cache_test.cmake)
+				if(JIT_CACHE_MODE STREQUAL "chained")
+					set_tests_properties(${JIT_CACHE_NAME} PROPERTIES ENVIRONMENT CODEGEN_AARCH32_CHAINED=1)
+				endif()
+			endforeach()
+		endif()
 		if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
 			set_tests_properties(ee_memory_test_chained PROPERTIES ENVIRONMENT CODEGEN_AARCH32_CHAINED=1)
 			set_tests_properties(ee_memory_test_safe_jit PROPERTIES ENVIRONMENT "CODEGEN_AARCH32_CONSERVATIVE=1;CODEGEN_AARCH32_NO_GUESTMEMOPS=1")

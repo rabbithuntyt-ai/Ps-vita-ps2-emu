@@ -4,6 +4,7 @@
 //
 //   vitaps2_host <game.elf|game.iso> [--frames N] [--timeout SECONDS] [--out frame.ppm]
 //                [--gs-threads N] [--interlaced] [--frameskip N] [--hw] [--mtvu]
+//                [--jit-cache FILE]
 //
 // --hw renders with the GPU renderer on an offscreen Mesa context, pumped
 // from the main thread exactly like the Vita frontend does.
@@ -19,6 +20,7 @@
 #include <thread>
 #include <vector>
 #include "EmuSession.h"
+#include "JitCacheSetup.h"
 #include "EmuProfile.h"
 #include "ThreadProfiler.h"
 #include "PS2VM.h"
@@ -70,6 +72,7 @@ int main(int argc, char** argv)
 	bool threadedVu1 = false;
 	bool threadedSpu = false;
 	bool benchExit = false; //exit from the emulation thread right at the last frame (deterministic for measurements)
+	std::string jitCachePath; //persistent JIT cache file (32-bit ARM only)
 	for(int i = 2; i < argc; i++)
 	{
 		if(!std::strcmp(argv[i], "--frames") && (i + 1 < argc)) targetFrames = std::strtoull(argv[++i], nullptr, 10);
@@ -82,6 +85,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--mtvu")) threadedVu1 = true;
 		else if(!std::strcmp(argv[i], "--mtspu")) threadedSpu = true;
 		else if(!std::strcmp(argv[i], "--bench-exit")) benchExit = true;
+		else if(!std::strcmp(argv[i], "--jit-cache") && (i + 1 < argc)) jitCachePath = argv[++i];
 	}
 
 	const char* home = std::getenv("HOME");
@@ -156,6 +160,11 @@ int main(int argc, char** argv)
 			hacks.threadedSpu = threadedSpu;
 			session.SetSpeedHacks(hacks);
 		}
+		if(!jitCachePath.empty())
+		{
+			bool opened = JitCacheSetup::Open(jitCachePath, "/proc/self/exe");
+			std::printf("jit cache %s: %s\n", jitCachePath.c_str(), opened ? "open" : "not available here");
+		}
 		session.Boot(bootPath);
 
 		ThreadProfiler::Sample();
@@ -182,6 +191,11 @@ int main(int argc, char** argv)
 		            debug.eeRa, debug.iopPc, debug.iopRa, debug.iopThread, debug.intcStat, debug.intcMask, debug.dmacStat,
 		            debug.vu1Start, debug.vu1Pc, debug.vu1RunMs);
 		std::printf("EE s6 %08X s7 %08X\n", debug.eeGpr[22], debug.eeGpr[23]);
+		if(!jitCachePath.empty())
+		{
+			std::printf("%s\n", JitCacheSetup::Describe().c_str());
+			JitCacheSetup::Close();
+		}
 		std::printf("EE executed %llu idle %llu\n", (unsigned long long)session.GetEeExecutedTicks(), (unsigned long long)session.GetEeIdleTicks());
 		session.GetFrames().Fetch(serial, pixels, width, height);
 		for(const auto& usage : threadUsage)

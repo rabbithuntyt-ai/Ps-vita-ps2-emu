@@ -1,0 +1,683 @@
+diff --git a/Source/BasicBlock.h b/Source/BasicBlock.h
+--- a/Source/BasicBlock.h
++++ b/Source/BasicBlock.h
+@@ -2,6 +2,9 @@
+ 
+ #include "MIPS.h"
+ #include "MemoryFunction.h"
++#include "JitCache.h"
++#include "Jitter_CodeGen.h"
++#include <vector>
+ #ifdef AOT_BUILD_CACHE
+ #include "StdStream.h"
+ #include <mutex>
+@@ -99,6 +102,12 @@ public:
+ 
+ 	void CopyFunctionFrom(const std::shared_ptr<CBasicBlock>& basicBlock);
+ 
++	// Persistent JIT cache (JitCache.h): the compiled code with its embedded
++	// pointers as relocations (false if one is outside the cache's ranges),
++	// and the reverse, instead of Compile().
++	bool ExportToJitCache(CJitCache::ENTRY&) const;
++	bool ImportFromJitCache(const CJitCache::ENTRY&);
++
+ protected:
+ 	uint32 m_begin;
+ 	uint32 m_end;
+@@ -136,6 +145,15 @@ private:
+ 	uintptr_t m_linkSlotDefault[LINK_SLOT_MAX];
+ 	//Where linked blocks jump into this one (see CCodeGen::GetLinkEntryOffset)
+ 	uint32 m_linkEntryOffset = 0;
++
++	// Pointers the code generator embedded (recorded while the JIT cache is open).
++	struct EXTERNAL_REF
++	{
++		uintptr_t symbol;
++		uint32 offset;
++		Jitter::CCodeGen::SYMBOL_REF_TYPE type;
++	};
++	std::vector<EXTERNAL_REF> m_externalRefs;
+ #ifdef _DEBUG
+ 	CBasicBlock* m_linkBlock[LINK_SLOT_MAX];
+ #endif
+diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
+--- a/Source/BasicBlock.cpp
++++ b/Source/BasicBlock.cpp
+@@ -4,6 +4,10 @@
+ #include "MipsJitter.h"
+ #include "Jitter_CodeGenFactory.h"
+ #include "EmuProfile.h"
++#if defined(__arm__) && !defined(__aarch64__)
++#include "Jitter_CodeGen_AArch32.h"
++#endif
++#include <cstring>
+ #include <chrono>
+ 
+ #if defined(AOT_BUILD_CACHE) || defined(AOT_USE_CACHE)
+@@ -88,6 +92,7 @@ void CBasicBlock::Compile()
+ 	uint64 translatedUs = 0, finishedUs = 0;
+ 
+ 	Framework::CMemStream stream;
++	m_externalRefs.clear();
+ 	{
+ 		//One jitter per thread: blocks may be compiled concurrently (threaded VU1)
+ 		static thread_local CMipsJitter* jitter = nullptr;
+@@ -463,6 +468,7 @@ void CBasicBlock::UnlinkBlock(LINK_SLOT linkSlot)
+ 
+ void CBasicBlock::HandleExternalFunctionReference(uintptr_t symbol, uint32 offset, Jitter::CCodeGen::SYMBOL_REF_TYPE refType)
+ {
++	if(CJitCache::GetInstance().IsOpen()) m_externalRefs.push_back({symbol, offset, refType});
+ 	if(symbol == reinterpret_cast<uintptr_t>(&NextBlockTrampoline))
+ 	{
+ 		assert(refType == Jitter::CCodeGen::SYMBOL_REF_TYPE::NATIVE_POINTER);
+@@ -477,6 +483,84 @@ void CBasicBlock::HandleExternalFunctionReference(uintptr_t symbol, uint32 offse
+ 	}
+ }
+ 
++bool CBasicBlock::ExportToJitCache(CJitCache::ENTRY& entry) const
++{
++#if defined(__arm__) && !defined(__aarch64__) && !defined(AOT_ENABLED)
++	auto& cache = CJitCache::GetInstance();
++	if(m_function.IsEmpty() || (m_function.GetSize() == 0)) return false;
++	auto code = static_cast<const uint8*>(m_function.GetCode());
++	size_t size = m_function.GetSize();
++	entry.code.assign(code, code + size);
++	entry.relocs.clear();
++	for(const auto& ref : m_externalRefs)
++	{
++		CJitCache::RELOC reloc;
++		reloc.offset = ref.offset;
++		if(ref.offset + 8 > size) return false;
++		// Check the code holds what was reported: anything else is a pointer
++		// the cache doesn't know how to rebuild.
++		if(ref.type == Jitter::CCodeGen::SYMBOL_REF_TYPE::ARMV7_LOAD_HALF)
++		{
++			if(CJitCache::ReadMovwMovt(code, ref.offset) != ref.symbol) return false;
++			reloc.type = CJitCache::RELOC_MOVW_MOVT;
++		}
++		else if(ref.type == Jitter::CCodeGen::SYMBOL_REF_TYPE::NATIVE_POINTER)
++		{
++			uint32 word = 0;
++			memcpy(&word, code + ref.offset, 4);
++			if(word == ref.symbol) reloc.type = CJitCache::RELOC_WORD;
++			else if(word == Jitter::CCodeGen_AArch32::GetChainedThunk(ref.symbol)) reloc.type = CJitCache::RELOC_THUNK;
++			else return false;
++		}
++		else
++		{
++			return false;
++		}
++		if(!cache.Classify(ref.symbol, reloc.range, reloc.rangeOffset)) return false;
++		entry.relocs.push_back(reloc);
++	}
++	entry.linkEntryOffset = m_linkEntryOffset;
++	entry.trampolineOffset[0] = m_linkBlockTrampolineOffset[LINK_SLOT_NEXT];
++	entry.trampolineOffset[1] = m_linkBlockTrampolineOffset[LINK_SLOT_BRANCH];
++	return true;
++#else
++	(void)entry;
++	return false;
++#endif
++}
++
++bool CBasicBlock::ImportFromJitCache(const CJitCache::ENTRY& entry)
++{
++#if defined(__arm__) && !defined(__aarch64__) && !defined(AOT_ENABLED)
++	auto& cache = CJitCache::GetInstance();
++	if(entry.code.empty()) return false;
++	std::vector<uint8> code = entry.code;
++	for(const auto& reloc : entry.relocs)
++	{
++		uintptr_t value = cache.Resolve(reloc.range, reloc.rangeOffset);
++		if(reloc.type == CJitCache::RELOC_THUNK) value = Jitter::CCodeGen_AArch32::GetChainedThunk(value);
++		CJitCache::ApplyReloc(code.data(), reloc.type, reloc.offset, value);
++	}
++	m_function = CMemoryFunction(code.data(), code.size());
++	m_linkEntryOffset = entry.linkEntryOffset;
++	m_linkBlockTrampolineOffset[LINK_SLOT_NEXT] = entry.trampolineOffset[0];
++	m_linkBlockTrampolineOffset[LINK_SLOT_BRANCH] = entry.trampolineOffset[1];
++	// As at the end of Compile(): what an unlinked slot points to.
++	for(uint32 i = 0; i < LINK_SLOT_MAX; i++)
++	{
++		m_linkSlotDefault[i] = 0;
++		if(m_linkBlockTrampolineOffset[i] == INVALID_LINK_SLOT) continue;
++		if(m_linkBlockTrampolineOffset[i] + 4 > code.size()) return false;
++		auto installed = reinterpret_cast<const uint8*>(m_function.GetCode());
++		m_linkSlotDefault[i] = *reinterpret_cast<const uintptr_t*>(installed + m_linkBlockTrampolineOffset[i]);
++	}
++	return true;
++#else
++	(void)entry;
++	return false;
++#endif
++}
++
+ void CBasicBlock::CopyFunctionFrom(const std::shared_ptr<CBasicBlock>& other)
+ {
+ #ifndef AOT_USE_CACHE
+diff --git a/Source/CMakeLists.txt b/Source/CMakeLists.txt
+--- a/Source/CMakeLists.txt
++++ b/Source/CMakeLists.txt
+@@ -143,6 +143,7 @@ endif()
+ 
+ set(COMMON_SRC_FILES
+ 	BasicBlock.cpp
++	JitCache.cpp
+ 	BasicBlock.h
+ 	BiosDebugInfoProvider.h
+ 	BlockLookupOneWay.h
+diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
+--- a/Source/ee/EeExecutor.cpp
++++ b/Source/ee/EeExecutor.cpp
+@@ -1,4 +1,5 @@
+ #include "EeExecutor.h"
++#include "../JitCache.h"
+ #include "../EmuProfile.h"
+ #include "../Ps2Const.h"
+ #include "AlignedAlloc.h"
+@@ -235,7 +236,47 @@ BasicBlockPtr CEeExecutor::BlockFactory(CMIPS& context, uint32 start, uint32 end
+ 		result->AddBlockCompileHints(CMA_EE::COMPILEHINT_FPU_USE_ACCURATE_ADD_SUB);
+ 	}
+ 
+-	result->Compile();
++	// Persistent JIT cache: code compiled in an earlier run of this game.
++	auto& jitCache = CJitCache::GetInstance();
++	bool useJitCache = isCacheableBlock && jitCache.IsOpen();
++	CJitCache::KEY jitCacheKey;
++	jitCacheKey.category = m_blockCategory;
++	jitCacheKey.begin = start;
++	jitCacheKey.size = blockSize;
++	jitCacheKey.hash = hash;
++	bool imported = false;
++	if(useJitCache)
++	{
++		if(const auto* entry = jitCache.Find(jitCacheKey))
++		{
++			imported = result->ImportFromJitCache(*entry);
++			if(imported)
++			{
++				jitCache.CountHit();
++			}
++			else
++			{
++				jitCache.CountFailure();
++				result = std::make_shared<CEeBasicBlock>(context, start, end, m_blockCategory);
++			}
++		}
++	}
++	if(!imported)
++	{
++		result->Compile();
++		if(useJitCache)
++		{
++			CJitCache::ENTRY entry;
++			if(result->ExportToJitCache(entry))
++			{
++				jitCache.Store(jitCacheKey, std::move(entry));
++			}
++			else
++			{
++				jitCache.CountUncacheable();
++			}
++		}
++	}
+ 	if(isCacheableBlock)
+ 	{
+ 		m_cachedBlocks.insert(std::make_pair(blockKey, result));
+diff --git a/Source/JitCache.h b/Source/JitCache.h
+new file mode 100644
+--- /dev/null
++++ b/Source/JitCache.h
+@@ -0,0 +1,133 @@
++#pragma once
++
++// Persistent JIT cache (VitaStation2, docs/AOT_TRANSLATION.md): compiled blocks
++// are written to a file per game and loaded on later runs, so code is
++// recompiled once per game instead of at every scene change.
++//
++// Code is stored as compiled, before blocks are linked to each other. Every
++// pointer the code generator embeds is reported (external symbol references)
++// and stored as an offset into one of the registered image ranges (the
++// executable's code and data segments, whose addresses change from run to
++// run). A block holding any other pointer is not stored.
++//
++// Only the 32-bit ARM code generator reports all its pointers: on other
++// hosts IsSupported() is false and Open() fails.
++
++#include <cstdint>
++#include <cstdio>
++#include <mutex>
++#include <string>
++#include <unordered_map>
++#include <vector>
++#include "Types.h"
++#include "uint128.h"
++
++class CJitCache
++{
++public:
++	struct RANGE
++	{
++		uintptr_t start = 0;
++		size_t size = 0;
++	};
++
++	enum RELOC_TYPE : uint8
++	{
++		RELOC_MOVW_MOVT, //ARMv7 MOVW/MOVT pair loading the pointer
++		RELOC_WORD,      //32-bit literal word
++		RELOC_THUNK,     //32-bit literal word holding the chained-frame thunk of the pointer
++	};
++
++	struct RELOC
++	{
++		uint32 offset = 0;
++		RELOC_TYPE type = RELOC_WORD;
++		uint8 range = 0;
++		uint32 rangeOffset = 0;
++	};
++
++	struct KEY
++	{
++		uint32 category = 0;
++		uint32 begin = 0;
++		uint32 size = 0;
++		uint128 hash = {};
++
++		bool operator==(const KEY& other) const
++		{
++			return (category == other.category) && (begin == other.begin) && (size == other.size) &&
++			       (hash.nD0 == other.hash.nD0) && (hash.nD1 == other.hash.nD1);
++		}
++	};
++
++	struct ENTRY
++	{
++		std::vector<uint8> code;
++		std::vector<RELOC> relocs;
++		uint32 linkEntryOffset = 0;
++		uint32 trampolineOffset[2] = {~0U, ~0U};
++	};
++
++	struct STATS
++	{
++		uint32 loaded = 0;      //entries read from the file
++		uint32 hits = 0;        //blocks taken from the cache
++		uint32 stored = 0;      //blocks written this run
++		uint32 uncacheable = 0; //blocks with a pointer outside the ranges
++		uint32 failures = 0;    //entries that could not be applied
++	};
++
++	static CJitCache& GetInstance();
++	static bool IsSupported();
++	// Tests on other hosts: the file format and relocation helpers without code.
++	static void SetForceSupported(bool);
++
++	// ranges: the executable's segments (relocation bases). fingerprint:
++	// identifies the emulator build and code generator settings; a file made
++	// with another fingerprint is discarded.
++	bool Open(const std::string& path, uint64 fingerprint, const std::vector<RANGE>& ranges, size_t maxFileSize = 32 * 1024 * 1024);
++	void Close();
++	bool IsOpen() const
++	{
++		return m_file != nullptr;
++	}
++
++	const ENTRY* Find(const KEY&);
++	void Store(const KEY&, ENTRY&&);
++	void CountHit();
++	void CountUncacheable();
++	void CountFailure();
++	STATS GetStats();
++
++	// Pointer <-> (range, offset).
++	bool Classify(uintptr_t pointer, uint8& range, uint32& offset) const;
++	uintptr_t Resolve(uint8 range, uint32 offset) const;
++
++	// Writes 'value' into an encoded relocation of 'code'.
++	static void ApplyReloc(uint8* code, RELOC_TYPE, uint32 offset, uintptr_t value);
++	// Reads the pointer an ARMv7 MOVW/MOVT pair loads.
++	static uintptr_t ReadMovwMovt(const uint8* code, uint32 offset);
++
++private:
++	struct KEY_HASH
++	{
++		size_t operator()(const KEY& key) const
++		{
++			return static_cast<size_t>(key.hash.nD0 ^ (key.hash.nD1 * 31) ^ key.begin);
++		}
++	};
++
++	void ReadEntries();
++	bool WriteHeader();
++
++	std::mutex m_mutex;
++	std::FILE* m_file = nullptr;
++	std::string m_path;
++	uint64 m_fingerprint = 0;
++	std::vector<RANGE> m_ranges;
++	size_t m_maxFileSize = 0;
++	size_t m_fileSize = 0;
++	std::unordered_map<KEY, ENTRY, KEY_HASH> m_entries;
++	STATS m_stats;
++	uint32 m_unflushed = 0;
++};
+diff --git a/Source/JitCache.cpp b/Source/JitCache.cpp
+new file mode 100644
+--- /dev/null
++++ b/Source/JitCache.cpp
+@@ -0,0 +1,314 @@
++#include "JitCache.h"
++#include <cstring>
++
++// File layout (little endian):
++//   header: "VS2JITC\1", fingerprint (8), range count (4), range sizes (4 each)
++//   records: size of the rest (4), KEY, link entry offset (4), trampoline
++//            offsets (2 x 4), code size (4), code, reloc count (4), relocs
++// Records are appended as blocks get compiled; a record cut short (the app
++// was closed while writing) ends the file.
++
++namespace
++{
++	const char MAGIC[8] = {'V', 'S', '2', 'J', 'I', 'T', 'C', 1};
++	constexpr uint32 RELOC_SIZE = 4 + 1 + 1 + 4;
++	constexpr uint32 FLUSH_EVERY = 64;
++
++	struct READER
++	{
++		const uint8* data;
++		size_t size;
++		size_t position = 0;
++
++		bool Read(void* out, size_t count)
++		{
++			if(position + count > size) return false;
++			std::memcpy(out, data + position, count);
++			position += count;
++			return true;
++		}
++
++		bool Read32(uint32& value)
++		{
++			return Read(&value, 4);
++		}
++	};
++
++	void Append(std::vector<uint8>& buffer, const void* data, size_t size)
++	{
++		auto bytes = static_cast<const uint8*>(data);
++		buffer.insert(buffer.end(), bytes, bytes + size);
++	}
++
++	void Append32(std::vector<uint8>& buffer, uint32 value)
++	{
++		Append(buffer, &value, 4);
++	}
++}
++
++CJitCache& CJitCache::GetInstance()
++{
++	static CJitCache instance;
++	return instance;
++}
++
++namespace
++{
++	bool g_forceSupported = false;
++}
++
++void CJitCache::SetForceSupported(bool force)
++{
++	g_forceSupported = force;
++}
++
++bool CJitCache::IsSupported()
++{
++#if defined(__arm__) && !defined(__aarch64__)
++	return true;
++#else
++	return g_forceSupported;
++#endif
++}
++
++bool CJitCache::Open(const std::string& path, uint64 fingerprint, const std::vector<RANGE>& ranges, size_t maxFileSize)
++{
++	Close();
++	std::lock_guard<std::mutex> lock(m_mutex);
++	if(!IsSupported() || ranges.empty() || (ranges.size() > 255)) return false;
++	m_path = path;
++	m_fingerprint = fingerprint;
++	m_ranges = ranges;
++	m_maxFileSize = maxFileSize;
++	m_entries.clear();
++	m_stats = STATS();
++	ReadEntries();
++	if(m_entries.empty() && (m_fileSize == 0))
++	{
++		// New or discarded file.
++		m_file = std::fopen(m_path.c_str(), "wb");
++		if(!m_file || !WriteHeader())
++		{
++			if(m_file) std::fclose(m_file);
++			m_file = nullptr;
++			return false;
++		}
++	}
++	else
++	{
++		m_file = std::fopen(m_path.c_str(), "r+b");
++		if(!m_file) return false;
++		// Append after the last complete record (drops a cut-off one).
++		std::fseek(m_file, static_cast<long>(m_fileSize), SEEK_SET);
++	}
++	return true;
++}
++
++void CJitCache::Close()
++{
++	std::lock_guard<std::mutex> lock(m_mutex);
++	if(m_file)
++	{
++		std::fflush(m_file);
++		std::fclose(m_file);
++	}
++	m_file = nullptr;
++	m_entries.clear();
++	m_unflushed = 0;
++}
++
++bool CJitCache::WriteHeader()
++{
++	std::vector<uint8> header;
++	Append(header, MAGIC, sizeof(MAGIC));
++	Append(header, &m_fingerprint, sizeof(m_fingerprint));
++	Append32(header, static_cast<uint32>(m_ranges.size()));
++	for(const auto& range : m_ranges) Append32(header, static_cast<uint32>(range.size));
++	m_fileSize = header.size();
++	return std::fwrite(header.data(), 1, header.size(), m_file) == header.size();
++}
++
++void CJitCache::ReadEntries()
++{
++	m_fileSize = 0;
++	std::FILE* file = std::fopen(m_path.c_str(), "rb");
++	if(!file) return;
++	std::fseek(file, 0, SEEK_END);
++	long length = std::ftell(file);
++	std::fseek(file, 0, SEEK_SET);
++	std::vector<uint8> data((length > 0) ? static_cast<size_t>(length) : 0);
++	bool read = data.empty() || (std::fread(data.data(), 1, data.size(), file) == data.size());
++	std::fclose(file);
++	if(!read) return;
++
++	READER reader{data.data(), data.size()};
++	char magic[8];
++	uint64 fingerprint = 0;
++	uint32 rangeCount = 0;
++	if(!reader.Read(magic, 8) || std::memcmp(magic, MAGIC, 8) || !reader.Read(&fingerprint, 8) || (fingerprint != m_fingerprint) ||
++	   !reader.Read32(rangeCount) || (rangeCount != m_ranges.size()))
++	{
++		return; //another build or format: start over
++	}
++	for(const auto& range : m_ranges)
++	{
++		uint32 size = 0;
++		if(!reader.Read32(size) || (size != range.size)) return; //segments changed: another build
++	}
++	m_fileSize = reader.position;
++	while(true)
++	{
++		uint32 recordSize = 0;
++		size_t recordStart = reader.position;
++		if(!reader.Read32(recordSize) || (reader.position + recordSize > reader.size)) break;
++		READER record{data.data() + reader.position, recordSize};
++		KEY key;
++		ENTRY entry;
++		uint32 codeSize = 0, relocCount = 0;
++		bool ok = record.Read(&key, sizeof(key)) && record.Read32(entry.linkEntryOffset) && record.Read32(entry.trampolineOffset[0]) &&
++		          record.Read32(entry.trampolineOffset[1]) && record.Read32(codeSize) && (codeSize <= recordSize);
++		if(ok)
++		{
++			entry.code.resize(codeSize);
++			ok = record.Read(entry.code.data(), codeSize) && record.Read32(relocCount) && (relocCount * RELOC_SIZE <= recordSize);
++		}
++		for(uint32 i = 0; ok && (i < relocCount); i++)
++		{
++			RELOC reloc;
++			uint8 type = 0;
++			ok = record.Read32(reloc.offset) && record.Read(&type, 1) && record.Read(&reloc.range, 1) && record.Read32(reloc.rangeOffset) &&
++			     (type <= RELOC_THUNK) && (reloc.range < m_ranges.size()) && (reloc.offset + 8 <= codeSize);
++			reloc.type = static_cast<RELOC_TYPE>(type);
++			entry.relocs.push_back(reloc);
++		}
++		if(!ok) break;
++		reader.position += recordSize;
++		m_fileSize = reader.position;
++		m_entries[key] = std::move(entry);
++		(void)recordStart;
++	}
++	m_stats.loaded = static_cast<uint32>(m_entries.size());
++}
++
++const CJitCache::ENTRY* CJitCache::Find(const KEY& key)
++{
++	std::lock_guard<std::mutex> lock(m_mutex);
++	if(!m_file) return nullptr;
++	auto iterator = m_entries.find(key);
++	return (iterator != m_entries.end()) ? &iterator->second : nullptr;
++}
++
++void CJitCache::Store(const KEY& key, ENTRY&& entry)
++{
++	std::lock_guard<std::mutex> lock(m_mutex);
++	if(!m_file || (m_entries.find(key) != m_entries.end())) return;
++	std::vector<uint8> record;
++	Append(record, &key, sizeof(key));
++	Append32(record, entry.linkEntryOffset);
++	Append32(record, entry.trampolineOffset[0]);
++	Append32(record, entry.trampolineOffset[1]);
++	Append32(record, static_cast<uint32>(entry.code.size()));
++	Append(record, entry.code.data(), entry.code.size());
++	Append32(record, static_cast<uint32>(entry.relocs.size()));
++	for(const auto& reloc : entry.relocs)
++	{
++		Append32(record, reloc.offset);
++		uint8 type = reloc.type;
++		Append(record, &type, 1);
++		Append(record, &reloc.range, 1);
++		Append32(record, reloc.rangeOffset);
++	}
++	if(m_fileSize + 4 + record.size() > m_maxFileSize) return; //full: keep what is there
++	uint32 recordSize = static_cast<uint32>(record.size());
++	if((std::fwrite(&recordSize, 4, 1, m_file) != 1) || (std::fwrite(record.data(), 1, record.size(), m_file) != record.size()))
++	{
++		//Storage full or gone: stop writing, keep using what was loaded.
++		std::fclose(m_file);
++		m_file = nullptr;
++		return;
++	}
++	m_fileSize += 4 + record.size();
++	m_entries[key] = std::move(entry);
++	m_stats.stored++;
++	if(++m_unflushed >= FLUSH_EVERY)
++	{
++		std::fflush(m_file);
++		m_unflushed = 0;
++	}
++}
++
++void CJitCache::CountHit()
++{
++	std::lock_guard<std::mutex> lock(m_mutex);
++	m_stats.hits++;
++}
++
++void CJitCache::CountUncacheable()
++{
++	std::lock_guard<std::mutex> lock(m_mutex);
++	m_stats.uncacheable++;
++}
++
++void CJitCache::CountFailure()
++{
++	std::lock_guard<std::mutex> lock(m_mutex);
++	m_stats.failures++;
++}
++
++CJitCache::STATS CJitCache::GetStats()
++{
++	std::lock_guard<std::mutex> lock(m_mutex);
++	return m_stats;
++}
++
++bool CJitCache::Classify(uintptr_t pointer, uint8& range, uint32& offset) const
++{
++	for(size_t i = 0; i < m_ranges.size(); i++)
++	{
++		const auto& r = m_ranges[i];
++		if((pointer >= r.start) && (pointer < r.start + r.size))
++		{
++			range = static_cast<uint8>(i);
++			offset = static_cast<uint32>(pointer - r.start);
++			return true;
++		}
++	}
++	return false;
++}
++
++uintptr_t CJitCache::Resolve(uint8 range, uint32 offset) const
++{
++	return m_ranges[range].start + offset;
++}
++
++uintptr_t CJitCache::ReadMovwMovt(const uint8* code, uint32 offset)
++{
++	uint32 movw, movt;
++	std::memcpy(&movw, code + offset, 4);
++	std::memcpy(&movt, code + offset + 4, 4);
++	auto imm16 = [](uint32 instruction) { return ((instruction >> 4) & 0xF000) | (instruction & 0xFFF); };
++	return static_cast<uintptr_t>(imm16(movw) | (imm16(movt) << 16));
++}
++
++void CJitCache::ApplyReloc(uint8* code, RELOC_TYPE type, uint32 offset, uintptr_t value)
++{
++	uint32 value32 = static_cast<uint32>(value);
++	if(type == RELOC_MOVW_MOVT)
++	{
++		// MOVW/MOVT: imm16 = imm4 (bits 19-16) : imm12 (bits 11-0).
++		auto encode = [](uint32 instruction, uint32 imm16) {
++			return (instruction & 0xFFF0F000) | ((imm16 & 0xF000) << 4) | (imm16 & 0x0FFF);
++		};
++		uint32 movw, movt;
++		std::memcpy(&movw, code + offset, 4);
++		std::memcpy(&movt, code + offset + 4, 4);
++		movw = encode(movw, value32 & 0xFFFF);
++		movt = encode(movt, value32 >> 16);
++		std::memcpy(code + offset, &movw, 4);
++		std::memcpy(code + offset + 4, &movt, 4);
++	}
++	else
++	{
++		std::memcpy(code + offset, &value32, 4);
++	}
++}

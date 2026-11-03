@@ -1,0 +1,36 @@
+# Persistent JIT cache end to end (32-bit ARM): random EE code runs twice with
+# the same cache file. The first run compiles and stores blocks, the second
+# must load them from the cache (hits, no failures) and still produce the
+# reference register checksum.
+execute_process(COMMAND ${PYTHON} ${SOURCE_DIR}/tools/make_ee_fuzz_elf.py jit_cache${SUFFIX}.elf ${SEED} ${FUZZ_ARGS} RESULT_VARIABLE r)
+if(NOT r EQUAL 0)
+	message(FATAL_ERROR "make_ee_fuzz_elf.py failed")
+endif()
+set(CACHE_FILE jit_cache${SUFFIX}.jit)
+file(REMOVE ${CACHE_FILE})
+
+foreach(RUN 1 2)
+	execute_process(COMMAND ${EMULATOR} ${RUNNER} jit_cache${SUFFIX}.elf --frames 60 --timeout 100 --jit-cache ${CACHE_FILE}
+		OUTPUT_VARIABLE out ERROR_VARIABLE err)
+	if(NOT out MATCHES "EE s6 00000D0E s7 ${EXPECTED}")
+		message(FATAL_ERROR "run ${RUN}: wrong result (expected ${EXPECTED}):\n${out}\n${err}")
+	endif()
+	if(NOT out MATCHES "jit cache: ([0-9]+) loaded, ([0-9]+) hits, ([0-9]+) stored, ([0-9]+) uncacheable, ([0-9]+) failures")
+		message(FATAL_ERROR "run ${RUN}: no jit cache statistics:\n${out}\n${err}")
+	endif()
+	set(LOADED ${CMAKE_MATCH_1})
+	set(HITS ${CMAKE_MATCH_2})
+	set(STORED ${CMAKE_MATCH_3})
+	set(UNCACHEABLE ${CMAKE_MATCH_4})
+	set(FAILURES ${CMAKE_MATCH_5})
+	message(STATUS "run ${RUN}: ${LOADED} loaded, ${HITS} hits, ${STORED} stored, ${UNCACHEABLE} uncacheable, ${FAILURES} failures")
+	if(NOT FAILURES EQUAL 0)
+		message(FATAL_ERROR "run ${RUN}: ${FAILURES} cache entries could not be applied")
+	endif()
+	if(RUN EQUAL 1 AND (STORED EQUAL 0 OR NOT LOADED EQUAL 0))
+		message(FATAL_ERROR "run 1: expected an empty cache that gets blocks stored")
+	endif()
+	if(RUN EQUAL 2 AND (HITS EQUAL 0 OR LOADED EQUAL 0))
+		message(FATAL_ERROR "run 2: expected blocks loaded from the cache")
+	endif()
+endforeach()
