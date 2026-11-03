@@ -23,7 +23,7 @@ CSV="$ROOT/docs/perf/vita_realworld.csv"; MD="$ROOT/docs/perf/vita_realworld.md"
 PERF="$RUN/perf.csv"
 [ -f "$PERF" ] || { echo "no $PERF"; exit 1; }
 
-col() { head -1 "$PERF" | tr ',' '\n' | grep -nx "$1" | cut -d: -f1; }
+col() { head -1 "$PERF" | tr ',' '\n' | grep -nx "$1" | cut -d: -f1 || true; }
 VM=$(col vm_fps); OUT=$(col out_fps); BDEC=$(col ipu_bdec)
 JB=$(col jit_blocks); JO=$(col jit_opt_ms); JA=$(col jit_alloc_regs_ms); JG=$(col jit_codegen_ms)
 
@@ -37,9 +37,20 @@ MOVIE_VM=$(awk -F, -v v=$VM -v b=$BDEC 'NR>1 && $b>0 {print $v}' "$PERF" | media
 MOVIE_OUT=$(awk -F, -v o=$OUT -v b=$BDEC 'NR>1 && $b>0 {print $o}' "$PERF" | median)
 MOVIE_PICS=$(awk -F, -v b=$BDEC 'NR>1 && $b>0 {print $b/896}' "$PERF" | median)
 JIT=$(awk -F, -v n=$JB -v o=$JO -v a=$JA -v g=$JG 'NR>1 {b+=$n; t+=$o+$a+$g} END {if(b) printf "%.2f", t/b; else print "-"}' "$PERF")
+# Movie bottleneck breakdown: emulation thread shares (EE, VIF, SPU wait, GS wait)
+# and VIF1 throughput, medians over the movie seconds.
+share() { local c; c=$(col "$1"); [ -z "$c" ] && { echo "-"; return; }; awk -F, -v s=$c -v b=$BDEC 'NR>1 && $b>0 {print $s*100}' "$PERF" | median; }
+MOVIE_EE=$(share ps2_EE); MOVIE_VIF=$(share ps2_VIF); MOVIE_SPU=$(share ps2_SPU); MOVIE_GSW=$(share ps2_GSwait)
+V=$(col vif1_kqw)
+MOVIE_VIF1="-"; [ -n "$V" ] && MOVIE_VIF1=$(awk -F, -v v=$V -v b=$BDEC 'NR>1 && $b>0 {print $v}' "$PERF" | median)
 
-[ -f "$CSV" ] || echo "date,label,title_out_fps,movie_vm_fps,movie_out_fps,movie_pics,jit_ms_block" > "$CSV"
-echo "$(date +%F),$LABEL,$TITLE,$MOVIE_VM,$MOVIE_OUT,$MOVIE_PICS,$JIT" >> "$CSV"
+HEADER="date,label,title_out_fps,movie_vm_fps,movie_out_fps,movie_pics,jit_ms_block,movie_ee_pct,movie_vif_pct,movie_spu_wait_pct,movie_gs_wait_pct,movie_vif1_kqw"
+if [ ! -f "$CSV" ]; then echo "$HEADER" > "$CSV"
+elif [ "$(head -1 "$CSV")" != "$HEADER" ]; then
+	# Older rows lack the newer columns.
+	{ echo "$HEADER"; tail -n +2 "$CSV" | awk -F, -v n=12 '{l=$0; for(i=NF+1;i<=n;i++) l=l ",-"; print l}'; } > "$CSV.tmp" && mv "$CSV.tmp" "$CSV"
+fi
+echo "$(date +%F),$LABEL,$TITLE,$MOVIE_VM,$MOVIE_OUT,$MOVIE_PICS,$JIT,$MOVIE_EE,$MOVIE_VIF,$MOVIE_SPU,$MOVIE_GSW,$MOVIE_VIF1" >> "$CSV"
 
 {
 	echo "# Real-world performance on a PS Vita"
@@ -51,8 +62,24 @@ echo "$(date +%F),$LABEL,$TITLE,$MOVIE_VM,$MOVIE_OUT,$MOVIE_PICS,$JIT" >> "$CSV"
 	echo "instruction gap (\`gap.svg\`) says how much ARM code runs per PS2"
 	echo "instruction; these numbers say what a player sees."
 	echo
-	echo "| Date | Build | Title screen fps | Movie: emulated fps | Movie: shown fps | Movie: pictures/s | JIT ms/block |"
-	echo "|---|---|---|---|---|---|---|"
-	tail -n +2 "$CSV" | tac | awk -F, '{printf "| %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6, $7}'
+	echo "| Date | Build | Title screen fps | Movie: emulated fps | Movie: shown fps | Movie: pictures/s | JIT ms/block | Movie: EE % | VIF % | SPU wait % | GS wait % | VIF1 kQW/s |"
+	echo "|---|---|---|---|---|---|---|---|---|---|---|---|"
+	tail -n +2 "$CSV" | tac | awk -F, '{printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12}'
 } > "$MD"
-echo "$LABEL: title $TITLE fps, movie vm $MOVIE_VM / shown $MOVIE_OUT fps, $MOVIE_PICS pictures/s, JIT $JIT ms/block"
+echo "$LABEL: title $TITLE fps, movie vm $MOVIE_VM / shown $MOVIE_OUT fps, $MOVIE_PICS pictures/s, JIT $JIT ms/block; movie EE $MOVIE_EE% VIF $MOVIE_VIF% SPU wait $MOVIE_SPU% GS wait $MOVIE_GSW% VIF1 $MOVIE_VIF1 kQW/s"
+
+# README: the latest row between the markers.
+README="$ROOT/README.md"
+if grep -q "<!-- vita-realworld-start -->" "$README"; then
+	LATEST=$(tail -1 "$CSV" | awk -F, '{printf "| %s (%s) | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |", $2, $1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12}')
+	awk -v latest="$LATEST" '
+		/<!-- vita-realworld-start -->/ {
+			print
+			print "| Build | Title screen fps | Movie: emulated fps | Movie: shown fps | Movie: pictures/s | JIT ms/block | Movie: EE % | VIF % | SPU wait % | GS wait % | VIF1 kQW/s |"
+			print "|---|---|---|---|---|---|---|---|---|---|---|"
+			print latest
+			skip = 1; next
+		}
+		/<!-- vita-realworld-end -->/ { skip = 0 }
+		!skip' "$README" > "$README.tmp" && mv "$README.tmp" "$README"
+fi

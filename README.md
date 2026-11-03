@@ -19,9 +19,11 @@ with [tools/vita_realworld.sh](tools/vita_realworld.sh). Full speed is 60
 emulated fps; the title screen shows 30 fps and movies play at 30 pictures per
 second. Full history: [docs/perf/vita_realworld.md](docs/perf/vita_realworld.md).
 
-| Build | Title screen fps | Movie: emulated fps | Movie: shown fps | Movie: pictures/s | JIT ms/block |
-|---|---|---|---|---|---|
-| 26a0bfb + local fixes + IPU poll fix (2026-11-02) | 8.7 | 9.9 | 9.8 | 0.8 | 4.41 |
+<!-- vita-realworld-start -->
+| Build | Title screen fps | Movie: emulated fps | Movie: shown fps | Movie: pictures/s | JIT ms/block | Movie: EE % | VIF % | SPU wait % | GS wait % | VIF1 kQW/s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| SPU mixer on core 2 (2026-11-02) |  masked unpack lanes | 10.8 | 11.2 | 10.7 | 0.8 | 4.41 | 26.2 | 12.6 | 0.1 | 9.8 |
+<!-- vita-realworld-end -->
 
 ## Performance gap
 
