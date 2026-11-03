@@ -129,6 +129,8 @@ add_library(vitaps2_common STATIC
 	src/common/AudioStretcher.h
 	src/common/GameProfiles.cpp
 	src/common/GameProfiles.h
+	src/common/Mpeg2Decoder.cpp
+	src/common/Mpeg2Decoder.h
 )
 target_include_directories(vitaps2_common PUBLIC src/common)
 target_link_libraries(vitaps2_common PUBLIC gsh_software PlayCore)
@@ -196,6 +198,11 @@ else()
 	add_executable(ipu_tests tests/ipu_tests.cpp)
 	target_link_libraries(ipu_tests PRIVATE PlayCore)
 	add_test(NAME ipu_tests COMMAND ipu_tests)
+
+	# Native MPEG-2 decoder (movie HLE): decodes a .pss given as argument
+	# (skipped without one) and writes PPM frames next to it.
+	add_executable(mpeg2_decoder_tests tests/mpeg2_decoder_tests.cpp)
+	target_link_libraries(mpeg2_decoder_tests PRIVATE vitaps2_common)
 
 	add_executable(game_profiles_tests tests/game_profiles_tests.cpp)
 	target_link_libraries(game_profiles_tests PRIVATE vitaps2_common)
