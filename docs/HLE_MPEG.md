@@ -39,6 +39,26 @@ the plan is to take over whole pictures: decode the MPEG-2 stream natively
 - The IPU gets the stream through DMA channel 4 from libmpeg's ring buffer,
   refilled by the game's callback (EE code).
 
+### Mapped from a dump 30 s into the opening movie (`eeregs.txt` next to the dump)
+
+- `mp` (sceMpeg) is a global at 0x1213080: width 512, height 384 (32x24
+  macroblocks), `mp->sys` (+0x40) = 0x152E880.
+- `sys+0x0C..0x38`: the game's callbacks (0x2A5810, 0x2A5820, 0x2A5870,
+  0x2A58A0, 0x2A58D0), registered with sceMpegAddCallback; one of them
+  refills the stream when the IPU runs dry.
+- `sys+0xD8` = output buffer (0x18AB480 | 0x20000000), `sys+0xE4` = 0x400.
+- `sys+0xFC..0x110`: four YCbCr 4:2:0 frame buffers, 0x48000 bytes each
+  (512x384x1.5): 0x152EFC0, 0x1576FC0, 0x15BEFC0, 0x1606FC0.
+- DMA3 (from IPU) targets the scratchpad (0x80003600): macroblocks go to SPR,
+  then to the frame buffers.
+- DMA4 (to IPU) runs a source chain: 253 REF tags + 1 REFE tag at
+  0x1211F00..0x1212ED0, each 0x80 qwords (2 KB) from a contiguous ring
+  0x14AE880..0x152D880 (~508 KB). The REFE tag ends the chain; libmpeg
+  restarts DMA4 at the ring start to wrap.
+- Stream read position = DMA4 MADR - IPU input FIFO + IPU_BP. The write
+  position (how far the game has filled the ring) is kept by the game, not
+  libmpeg: next, the callbacks above and the code that builds the tag list.
+
 ## Takeover design (next steps)
 
 1. Map the input: dump `mp`, `mp->sys` and the DMA4 chain during the movie;

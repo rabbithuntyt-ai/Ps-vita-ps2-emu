@@ -832,6 +832,20 @@ namespace
 									std::fwrite(session->GetVm()->m_ee->m_ram, 1, PS2::EE_RAM_SIZE, dump);
 									std::fclose(dump);
 								}
+								// The MPEG input path at the same moment: DMA4 (to IPU),
+								// DMA3 (from IPU) and the IPU registers.
+								if(FILE* regs = std::fopen("ux0:data/VitaPS2/eeregs.txt", "w"))
+								{
+									auto& ee = *session->GetVm()->m_ee;
+									static const uint32_t dmacRegs[] = {0x1000B000, 0x1000B010, 0x1000B020, 0x1000B030, 0x1000B400, 0x1000B410, 0x1000B420, 0x1000B430, 0x1000E010};
+									static const char* dmacNames[] = {"D3_CHCR", "D3_MADR", "D3_QWC", "D3_TADR", "D4_CHCR", "D4_MADR", "D4_QWC", "D4_TADR", "D_STAT"};
+									for(unsigned int i = 0; i < 9; i++) std::fprintf(regs, "%s %08X\n", dmacNames[i], ee.m_dmac.GetRegister(dmacRegs[i]));
+									static const uint32_t ipuRegs[] = {0x10002000, 0x10002004, 0x10002010, 0x10002020, 0x10002030};
+									static const char* ipuNames[] = {"IPU_CMD", "IPU_CMD_HI", "IPU_CTRL", "IPU_BP", "IPU_TOP"};
+									for(unsigned int i = 0; i < 5; i++) std::fprintf(regs, "%s %08X\n", ipuNames[i], ee.m_ipu.GetRegister(ipuRegs[i]));
+									std::fprintf(regs, "EE_PC %08X\n", ee.m_EE.m_State.nPC);
+									std::fclose(regs);
+								}
 							}
 						}
 						perfIpu = ipu;
