@@ -96,6 +96,7 @@ public:
 		uint32 transfersIn = 0, transfersOut = 0, transfersLocal = 0; //host->local, local->host, local->local
 		uint32 deferredUploads = 0;   //target rows left to fill from GS memory on use (texture data over a target)
 		uint32 skippedUploadRows = 0; //target rows an opaque sprite replaced before they were uploaded
+		uint32 unchangedTransfers = 0; //host to local transfers that changed no byte of GS memory
 		uint32 redundantStateChanges = 0; //state rewrites that did not break batching //state changes with a blend GL cannot express
 	};
 
@@ -286,6 +287,7 @@ private:
 	std::vector<uint32> m_transferPixels;
 	STATS m_stats;
 	STATS m_lastFrameStats;
+	bool m_transferDiscards = false; //the current transfer dropped GPU pixels without a download
 	DISPLAY_STATS m_displayStats;
 	std::FILE* m_diagFile = nullptr;
 	uint32 m_diagLinesLeft = 0;

@@ -705,6 +705,17 @@ void CGSH_Hardware::BeginTransferWrite()
 	bool wholePages = (trxPos.nDSAX == 0) && (bufferWidth != 0) && ((bufferWidth % pageSize.first) == 0) &&
 	                  (trxReg.nRRW == bufferWidth) && ((trxPos.nDSAY % pageSize.second) == 0) &&
 	                  ((trxReg.nRRH % pageSize.second) == 0);
+	// Rows discarded here (not downloaded) leave GS memory older than the GPU
+	// copy: then even a transfer that changes no byte must update the target.
+	m_transferDiscards = false;
+	if(wholePages)
+	{
+		for(auto& target : m_targets)
+		{
+			uint32 rowBegin = 0, rowEnd = 0;
+			if(target->gpuDirty && BytesToRows(*target, start, size, rowBegin, rowEnd)) m_transferDiscards = true;
+		}
+	}
 	DownloadTargetsOverlapping(start, size, wholePages);
 	CGSH_Primitives::BeginTransferWrite();
 }
@@ -717,6 +728,13 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
 	auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
 	auto [start, size] = GsTransfer::GetDstRange(bltBuf, trxReg, trxPos);
+	if(!m_trxCtx.nDirty && !m_transferDiscards)
+	{
+		// Same bytes as already in memory (menus send the same images every
+		// frame): textures and targets stay current.
+		m_stats.unchangedTransfers++;
+		return;
+	}
 	m_textureCache.MarkBytesWritten(start, size);
 	if(m_diagFile && (m_diagUploads.size() < 600))
 	{
