@@ -1316,21 +1316,14 @@ void CGSH_Hardware::AddVertex(const CSoftwareRasterizer::VERTEX& v)
 	out.fogT = 0.5f;
 	if(s.fst)
 	{
-		float u = m_texClamp ? std::clamp(v.u, m_texMinS, m_texMaxS) : v.u;
-		float tv = m_texClamp ? std::clamp(v.v, m_texMinT, m_texMaxT) : v.v;
-		out.s = u / static_cast<float>(s.tw) * m_texScaleS + m_texOffsetS;
-		out.t = tv / static_cast<float>(s.th) * m_texScaleT + m_texOffsetT;
+		out.s = v.u / static_cast<float>(s.tw) * m_texScaleS + m_texOffsetS;
+		out.t = v.v / static_cast<float>(s.th) * m_texScaleT + m_texOffsetT;
 	}
 	else
 	{
 		// Q <= 0 cannot be expressed as a clip space w; clamp.
 		float q = std::max(v.q, 1.0e-12f);
 		float texS = v.s / q, texT = v.t / q;
-		if(m_texClamp)
-		{
-			texS = std::clamp(texS, m_texMinS, m_texMaxS);
-			texT = std::clamp(texT, m_texMinT, m_texMaxT);
-		}
 		out.s = texS * m_texScaleS + m_texOffsetS;
 		out.t = texT * m_texScaleT + m_texOffsetT;
 		if(s.textured)
@@ -1468,39 +1461,12 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 			return v;
 		};
 		auto tl = corner(false, false), tr = corner(true, false), bl = corner(false, true), br = corner(true, true);
-		// On the GS the edge pixels of a blit sample the edge texels; the
-		// GPU's rasterization and interpolation can reach the texel beyond (point
-		// sampling too, at the last row of a stretched blit), which in a
-		// render target is whatever lies below the picture (a bright line
-		// under Silent Hill 2's movies, different in each work buffer).
-		m_texClamp = m_state.textured;
-		if(m_texClamp)
-		{
-			// Bounds in the units AddVertex reads: texels (UV) or normalized
-			// coordinates (STQ, already divided by q in corner()).
-			auto range = [](float a, float b, float half, float& lo, float& hi) {
-				lo = std::min(a, b) + half;
-				hi = std::max(a, b) - half;
-				if(lo > hi) lo = hi = (a + b) * 0.5f;
-			};
-			if(m_state.fst)
-			{
-				range(a.u, b.u, 0.5f, m_texMinS, m_texMaxS);
-				range(a.v, b.v, 0.5f, m_texMinT, m_texMaxT);
-			}
-			else
-			{
-				range(tl.s, br.s, 0.5f / static_cast<float>(m_state.tw), m_texMinS, m_texMaxS);
-				range(tl.t, br.t, 0.5f / static_cast<float>(m_state.th), m_texMinT, m_texMaxT);
-			}
-		}
 		AddVertex(tl);
 		AddVertex(tr);
 		AddVertex(bl);
 		AddVertex(tr);
 		AddVertex(br);
 		AddVertex(bl);
-		m_texClamp = false;
 	}
 	break;
 	}

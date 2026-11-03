@@ -266,10 +266,6 @@ private:
 	std::vector<BATCH_VERTEX> m_batch;
 	// Texture coordinate transform for render target textures.
 	float m_texScaleS = 1, m_texScaleT = 1, m_texOffsetS = 0, m_texOffsetT = 0;
-	// Textured sprites (2D blits): texel coordinates are kept between the centers
-	// of the sprite's edge texels (the GPU would blend in the texel beyond).
-	bool m_texClamp = false;
-	float m_texMinS = 0, m_texMaxS = 1, m_texMinT = 0, m_texMaxT = 1;
 	bool m_fixAlpha = false;
 	bool m_alphaPass = false;
 	bool m_colorMask[4] = {true, true, true, true};
