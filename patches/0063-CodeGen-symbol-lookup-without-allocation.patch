@@ -1,0 +1,13 @@
+diff --git a/src/Jitter_SymbolTable.cpp b/src/Jitter_SymbolTable.cpp
+--- a/src/Jitter_SymbolTable.cpp
++++ b/src/Jitter_SymbolTable.cpp
+@@ -28,5 +28,8 @@ SymbolPtr CSymbolTable::MakeSymbol(const SymbolPtr& srcSymbol)
+ SymbolPtr CSymbolTable::MakeSymbol(SYM_TYPE type, uint32 valueLow, uint32 valueHigh)
+ {
+ 	CSymbol symbol(type, valueLow, valueHigh);
+-	return MakeSymbol(SymbolPtr(&symbol, SymbolNullDeleter()));
++	//Non-owning pointer for the lookup (aliasing an empty pointer): no control
++	//block allocation, unlike a pointer with a null deleter. Most lookups find
++	//an existing symbol.
++	return MakeSymbol(SymbolPtr(SymbolPtr(), &symbol));
+ }
