@@ -88,7 +88,7 @@ This is the "longer load times" trade spread over play: the first sessions
 of a game are as fast as today and get faster as hot code is translated;
 later sessions start translated.
 
-## Persistent JIT cache: findings
+## Persistent JIT cache (implemented: patches 0064 and 0065)
 
 The cache is the first building block (it removes scene-change stalls from
 the second play on, and it stores tier-2 code later). What the code

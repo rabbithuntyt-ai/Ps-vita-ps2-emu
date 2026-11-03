@@ -30,8 +30,8 @@ common VU1 microprograms and common GS usage.
 3. **Persistent JIT cache per disc serial.** The first play compiles and
    stores blocks (keyed by code hash), later plays load them: scene changes
    stop stalling after one pass, for every game. See docs/AOT_TRANSLATION.md.
-   - [ ] Relocatable block code (no absolute addresses baked in), cache file per serial
-   - [ ] Load on boot, validate by code hash, fall back to the JIT on a miss
+   - [x] EE blocks stored with relocations in `ux0:data/VitaPS2/jitcache/<game>.jit` (patches 0064, 0065), loaded on later runs, JIT on a miss; tested end to end under qemu (ARM CI)
+   - [ ] Measure on the Vita (scene-change stalls on a second play); IOP and VU blocks
 4. **VU1 microprograms on the GPU.** Games reuse a small set of transform
    and lighting microprograms (SDK samples, middleware). Translate the common
    ones to GXM vertex programs, keyed by microcode hash, so the Vita's GPU
