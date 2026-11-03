@@ -1,0 +1,6444 @@
+diff --git a/include/Jitter_Symbol.h b/include/Jitter_Symbol.h
+--- a/include/Jitter_Symbol.h
++++ b/include/Jitter_Symbol.h
+@@ -1,257 +1,277 @@
+-#pragma once
+-
+-#include "Types.h"
+-#include <memory>
+-#include <string>
+-#include <cassert>
+-#include <cstdlib>
+-#include <cstdint>
+-
+-namespace Jitter
+-{
+-	enum SYM_TYPE
+-	{
+-		SYM_CONTEXT,
+-
+-		SYM_CONSTANT,
+-		SYM_CONSTANTPTR,
+-		SYM_RELATIVE,
+-		SYM_TEMPORARY,
+-		SYM_REGISTER,
+-
+-		SYM_REL_REFERENCE,
+-		SYM_TMP_REFERENCE,
+-		SYM_REG_REFERENCE,
+-
+-		SYM_RELATIVE64,
+-		SYM_TEMPORARY64,
+-		SYM_CONSTANT64,
+-
+-		SYM_RELATIVE128,
+-		SYM_TEMPORARY128,
+-		SYM_REGISTER128,
+-
+-		SYM_TEMPORARY256,
+-
+-		SYM_FP_RELATIVE32,
+-		SYM_FP_TEMPORARY32,
+-		SYM_FP_REGISTER32,
+-	};
+-
+-	class CSymbol
+-	{
+-	public:
+-		CSymbol(SYM_TYPE type, uint32 valueLow, uint32 valueHigh)
+-		    : m_type(type)
+-		    , m_valueLow(valueLow)
+-		    , m_valueHigh(valueHigh)
+-		{
+-		}
+-
+-		std::string ToString() const
+-		{
+-			switch(m_type)
+-			{
+-			case SYM_CONTEXT:
+-				return "CTX";
+-				break;
+-			case SYM_CONSTANT:
+-				return std::to_string(m_valueLow);
+-				break;
+-			case SYM_CONSTANTPTR:
+-				return std::to_string(GetConstantPtr());
+-				break;
+-			case SYM_RELATIVE:
+-				return "REL[" + std::to_string(m_valueLow) + "]";
+-				break;
+-			case SYM_TEMPORARY:
+-				return "TMP[" + std::to_string(m_valueLow) + "]";
+-				break;
+-			case SYM_REL_REFERENCE:
+-				return "REL&[" + std::to_string(m_valueLow) + "]";
+-				break;
+-			case SYM_TMP_REFERENCE:
+-				return "TMP&[" + std::to_string(m_valueLow) + "]";
+-				break;
+-			case SYM_REG_REFERENCE:
+-				return "REG&[" + std::to_string(m_valueLow) + "]";
+-				break;
+-			case SYM_CONSTANT64:
+-				return "CST64[" + std::to_string(m_valueLow) + ", " + std::to_string(m_valueHigh) + "]";
+-				break;
+-			case SYM_TEMPORARY64:
+-				return "TMP64[" + std::to_string(m_valueLow) + "]";
+-				break;
+-			case SYM_RELATIVE64:
+-				return "REL64[" + std::to_string(m_valueLow) + "]";
+-				break;
+-			case SYM_REGISTER:
+-				return "REG[" + std::to_string(m_valueLow) + "]";
+-				break;
+-			case SYM_FP_RELATIVE32:
+-				return "FPREL32[" + std::to_string(m_valueLow) + "]";
+-				break;
+-			case SYM_FP_TEMPORARY32:
+-				return "FPTMP32[" + std::to_string(m_valueLow) + "]";
+-				break;
+-			case SYM_FP_REGISTER32:
+-				return "FPREG32[" + std::to_string(m_valueLow) + "]";
+-				break;
+-			case SYM_RELATIVE128:
+-				return "REL128[" + std::to_string(m_valueLow) + "]";
+-				break;
+-			case SYM_TEMPORARY128:
+-				return "TMP128[" + std::to_string(m_valueLow) + "]";
+-				break;
+-			case SYM_REGISTER128:
+-				return "REG128[" + std::to_string(m_valueLow) + "]";
+-				break;
+-			case SYM_TEMPORARY256:
+-				return "TMP256[" + std::to_string(m_valueLow) + "]";
+-				break;
+-			default:
+-				return "";
+-				break;
+-			}
+-		}
+-
+-		int GetSize() const
+-		{
+-			switch(m_type)
+-			{
+-			case SYM_RELATIVE:
+-			case SYM_REGISTER:
+-			case SYM_CONSTANT:
+-			case SYM_TEMPORARY:
+-				return 4;
+-				break;
+-			case SYM_RELATIVE64:
+-			case SYM_TEMPORARY64:
+-			case SYM_CONSTANT64:
+-				return 8;
+-				break;
+-			case SYM_RELATIVE128:
+-			case SYM_TEMPORARY128:
+-				return 16;
+-				break;
+-			case SYM_TEMPORARY256:
+-				return 32;
+-				break;
+-			case SYM_FP_RELATIVE32:
+-			case SYM_FP_TEMPORARY32:
+-				return 4;
+-				break;
+-			case SYM_REL_REFERENCE:
+-			case SYM_TMP_REFERENCE:
+-				return sizeof(void*);
+-				break;
+-			default:
+-				assert(0);
+-				return 4;
+-				break;
+-			}
+-		}
+-
+-		bool IsRegister() const
+-		{
+-			return (m_type == SYM_REGISTER) ||
+-			       (m_type == SYM_REG_REFERENCE) ||
+-			       (m_type == SYM_FP_REGISTER32) ||
+-			       (m_type == SYM_REGISTER128);
+-		}
+-
+-		bool IsRelative() const
+-		{
+-			return (m_type == SYM_RELATIVE) ||
+-			       (m_type == SYM_RELATIVE64) ||
+-			       (m_type == SYM_RELATIVE128) ||
+-			       (m_type == SYM_REL_REFERENCE) ||
+-			       (m_type == SYM_FP_RELATIVE32);
+-		}
+-
+-		bool IsConstant() const
+-		{
+-			return (m_type == SYM_CONSTANT) || (m_type == SYM_CONSTANT64);
+-		}
+-
+-		bool IsTemporary() const
+-		{
+-			return (m_type == SYM_TEMPORARY) ||
+-			       (m_type == SYM_TEMPORARY64) ||
+-			       (m_type == SYM_TEMPORARY128) ||
+-			       (m_type == SYM_TEMPORARY256) ||
+-			       (m_type == SYM_TMP_REFERENCE) ||
+-			       (m_type == SYM_FP_TEMPORARY32);
+-		}
+-
+-		bool Equals(CSymbol* symbol) const
+-		{
+-			return (symbol) &&
+-			       (symbol->m_type == m_type) &&
+-			       (symbol->m_valueLow == m_valueLow) &&
+-			       (symbol->m_valueHigh == m_valueHigh);
+-		}
+-
+-		uint64 GetConstant64() const
+-		{
+-			assert(m_type == SYM_CONSTANT64);
+-			return m_value64;
+-		}
+-
+-		uintptr_t GetConstantPtr() const
+-		{
+-			assert(m_type == SYM_CONSTANTPTR);
+-#if(UINTPTR_MAX == UINT32_MAX)
+-			return m_valueLow;
+-#elif(UINTPTR_MAX == UINT64_MAX)
+-			return m_value64;
+-#else
+-			static_assert(false, "Unsupported pointer size.");
+-#endif
+-		}
+-
+-		bool Aliases(CSymbol* symbol) const
+-		{
+-			if(!IsRelative()) return false;
+-			if(!symbol->IsRelative()) return false;
+-			//Symbol alias each other if their memory ranges overlap
+-			uint32 start1 = m_valueLow;
+-			uint32 start2 = symbol->m_valueLow;
+-			uint32 end1 = start1 + GetSize();
+-			uint32 end2 = start2 + symbol->GetSize();
+-			return (start1 < end2) && (start2 < end1);
+-		}
+-
+-		SYM_TYPE m_type;
+-		union
+-		{
+-			struct
+-			{
+-				uint32 m_valueLow;
+-				uint32 m_valueHigh;
+-			};
+-			uint64 m_value64;
+-		};
+-
+-		unsigned int m_stackLocation = -1;
+-	};
+-
+-	typedef std::shared_ptr<CSymbol> SymbolPtr;
+-	typedef std::weak_ptr<CSymbol> WeakSymbolPtr;
+-
+-	struct SymbolComparator
+-	{
+-		bool operator()(const SymbolPtr& sym1, const SymbolPtr& sym2) const
+-		{
+-			return sym1->Equals(sym2.get());
+-		}
+-	};
+-
+-	struct SymbolHasher
+-	{
+-		size_t operator()(const SymbolPtr& symbol) const
+-		{
+-			return (symbol->m_type << 24) ^ symbol->m_valueLow ^ symbol->m_valueHigh;
+-		}
+-	};
+-}
++#pragma once
++
++#include "Types.h"
++#include <memory>
++#include <utility>
++#include <string>
++#include <cassert>
++#include <cstdlib>
++#include <cstdint>
++
++namespace Jitter
++{
++	enum SYM_TYPE
++	{
++		SYM_CONTEXT,
++
++		SYM_CONSTANT,
++		SYM_CONSTANTPTR,
++		SYM_RELATIVE,
++		SYM_TEMPORARY,
++		SYM_REGISTER,
++
++		SYM_REL_REFERENCE,
++		SYM_TMP_REFERENCE,
++		SYM_REG_REFERENCE,
++
++		SYM_RELATIVE64,
++		SYM_TEMPORARY64,
++		SYM_CONSTANT64,
++
++		SYM_RELATIVE128,
++		SYM_TEMPORARY128,
++		SYM_REGISTER128,
++
++		SYM_TEMPORARY256,
++
++		SYM_FP_RELATIVE32,
++		SYM_FP_TEMPORARY32,
++		SYM_FP_REGISTER32,
++	};
++
++	class CSymbol
++	{
++	public:
++		CSymbol(SYM_TYPE type, uint32 valueLow, uint32 valueHigh)
++		    : m_type(type)
++		    , m_valueLow(valueLow)
++		    , m_valueHigh(valueHigh)
++		{
++		}
++
++		std::string ToString() const
++		{
++			switch(m_type)
++			{
++			case SYM_CONTEXT:
++				return "CTX";
++				break;
++			case SYM_CONSTANT:
++				return std::to_string(m_valueLow);
++				break;
++			case SYM_CONSTANTPTR:
++				return std::to_string(GetConstantPtr());
++				break;
++			case SYM_RELATIVE:
++				return "REL[" + std::to_string(m_valueLow) + "]";
++				break;
++			case SYM_TEMPORARY:
++				return "TMP[" + std::to_string(m_valueLow) + "]";
++				break;
++			case SYM_REL_REFERENCE:
++				return "REL&[" + std::to_string(m_valueLow) + "]";
++				break;
++			case SYM_TMP_REFERENCE:
++				return "TMP&[" + std::to_string(m_valueLow) + "]";
++				break;
++			case SYM_REG_REFERENCE:
++				return "REG&[" + std::to_string(m_valueLow) + "]";
++				break;
++			case SYM_CONSTANT64:
++				return "CST64[" + std::to_string(m_valueLow) + ", " + std::to_string(m_valueHigh) + "]";
++				break;
++			case SYM_TEMPORARY64:
++				return "TMP64[" + std::to_string(m_valueLow) + "]";
++				break;
++			case SYM_RELATIVE64:
++				return "REL64[" + std::to_string(m_valueLow) + "]";
++				break;
++			case SYM_REGISTER:
++				return "REG[" + std::to_string(m_valueLow) + "]";
++				break;
++			case SYM_FP_RELATIVE32:
++				return "FPREL32[" + std::to_string(m_valueLow) + "]";
++				break;
++			case SYM_FP_TEMPORARY32:
++				return "FPTMP32[" + std::to_string(m_valueLow) + "]";
++				break;
++			case SYM_FP_REGISTER32:
++				return "FPREG32[" + std::to_string(m_valueLow) + "]";
++				break;
++			case SYM_RELATIVE128:
++				return "REL128[" + std::to_string(m_valueLow) + "]";
++				break;
++			case SYM_TEMPORARY128:
++				return "TMP128[" + std::to_string(m_valueLow) + "]";
++				break;
++			case SYM_REGISTER128:
++				return "REG128[" + std::to_string(m_valueLow) + "]";
++				break;
++			case SYM_TEMPORARY256:
++				return "TMP256[" + std::to_string(m_valueLow) + "]";
++				break;
++			default:
++				return "";
++				break;
++			}
++		}
++
++		int GetSize() const
++		{
++			switch(m_type)
++			{
++			case SYM_RELATIVE:
++			case SYM_REGISTER:
++			case SYM_CONSTANT:
++			case SYM_TEMPORARY:
++				return 4;
++				break;
++			case SYM_RELATIVE64:
++			case SYM_TEMPORARY64:
++			case SYM_CONSTANT64:
++				return 8;
++				break;
++			case SYM_RELATIVE128:
++			case SYM_TEMPORARY128:
++				return 16;
++				break;
++			case SYM_TEMPORARY256:
++				return 32;
++				break;
++			case SYM_FP_RELATIVE32:
++			case SYM_FP_TEMPORARY32:
++				return 4;
++				break;
++			case SYM_REL_REFERENCE:
++			case SYM_TMP_REFERENCE:
++				return sizeof(void*);
++				break;
++			default:
++				assert(0);
++				return 4;
++				break;
++			}
++		}
++
++		bool IsRegister() const
++		{
++			return (m_type == SYM_REGISTER) ||
++			       (m_type == SYM_REG_REFERENCE) ||
++			       (m_type == SYM_FP_REGISTER32) ||
++			       (m_type == SYM_REGISTER128);
++		}
++
++		bool IsRelative() const
++		{
++			return (m_type == SYM_RELATIVE) ||
++			       (m_type == SYM_RELATIVE64) ||
++			       (m_type == SYM_RELATIVE128) ||
++			       (m_type == SYM_REL_REFERENCE) ||
++			       (m_type == SYM_FP_RELATIVE32);
++		}
++
++		bool IsConstant() const
++		{
++			return (m_type == SYM_CONSTANT) || (m_type == SYM_CONSTANT64);
++		}
++
++		bool IsTemporary() const
++		{
++			return (m_type == SYM_TEMPORARY) ||
++			       (m_type == SYM_TEMPORARY64) ||
++			       (m_type == SYM_TEMPORARY128) ||
++			       (m_type == SYM_TEMPORARY256) ||
++			       (m_type == SYM_TMP_REFERENCE) ||
++			       (m_type == SYM_FP_TEMPORARY32);
++		}
++
++		bool Equals(CSymbol* symbol) const
++		{
++			return (symbol) &&
++			       (symbol->m_type == m_type) &&
++			       (symbol->m_valueLow == m_valueLow) &&
++			       (symbol->m_valueHigh == m_valueHigh);
++		}
++
++		uint64 GetConstant64() const
++		{
++			assert(m_type == SYM_CONSTANT64);
++			return m_value64;
++		}
++
++		uintptr_t GetConstantPtr() const
++		{
++			assert(m_type == SYM_CONSTANTPTR);
++#if(UINTPTR_MAX == UINT32_MAX)
++			return m_valueLow;
++#elif(UINTPTR_MAX == UINT64_MAX)
++			return m_value64;
++#else
++			static_assert(false, "Unsupported pointer size.");
++#endif
++		}
++
++		bool Aliases(CSymbol* symbol) const
++		{
++			if(!IsRelative()) return false;
++			if(!symbol->IsRelative()) return false;
++			//Symbol alias each other if their memory ranges overlap
++			uint32 start1 = m_valueLow;
++			uint32 start2 = symbol->m_valueLow;
++			uint32 end1 = start1 + GetSize();
++			uint32 end2 = start2 + symbol->GetSize();
++			return (start1 < end2) && (start2 < end1);
++		}
++
++		SYM_TYPE m_type;
++		union
++		{
++			struct
++			{
++				uint32 m_valueLow;
++				uint32 m_valueHigh;
++			};
++			uint64 m_value64;
++		};
++
++		unsigned int m_stackLocation = -1;
++	};
++
++#if defined(__GLIBCXX__)
++	// A Jitter and its symbols live on one thread: plain reference counts
++	// (atomic ones cost ~40 cycles each on ARM, tens of thousands per block).
++	typedef std::__shared_ptr<CSymbol, __gnu_cxx::_S_single> SymbolPtr;
++	typedef std::__weak_ptr<CSymbol, __gnu_cxx::_S_single> WeakSymbolPtr;
++
++	template <typename... Args>
++	SymbolPtr MakeSymbolPtr(Args&&... args)
++	{
++		return std::__make_shared<CSymbol, __gnu_cxx::_S_single>(std::forward<Args>(args)...);
++	}
++#else
++	typedef std::shared_ptr<CSymbol> SymbolPtr;
++	typedef std::weak_ptr<CSymbol> WeakSymbolPtr;
++
++	template <typename... Args>
++	SymbolPtr MakeSymbolPtr(Args&&... args)
++	{
++		return std::make_shared<CSymbol>(std::forward<Args>(args)...);
++	}
++#endif
++
++	struct SymbolComparator
++	{
++		bool operator()(const SymbolPtr& sym1, const SymbolPtr& sym2) const
++		{
++			return sym1->Equals(sym2.get());
++		}
++	};
++
++	struct SymbolHasher
++	{
++		size_t operator()(const SymbolPtr& symbol) const
++		{
++			return (symbol->m_type << 24) ^ symbol->m_valueLow ^ symbol->m_valueHigh;
++		}
++	};
++}
+diff --git a/include/Jitter_SymbolRef.h b/include/Jitter_SymbolRef.h
+--- a/include/Jitter_SymbolRef.h
++++ b/include/Jitter_SymbolRef.h
+@@ -1,60 +1,76 @@
+-#pragma once
+-
+-#include "Jitter_Symbol.h"
+-#include "maybe_unused.h"
+-
+-namespace Jitter
+-{
+-	class CSymbolRef final
+-	{
+-	public:
+-		static constexpr int UNVERSIONED = -1;
+-
+-		CSymbolRef(const SymbolPtr& symbol, int version = UNVERSIONED)
+-		    : m_symbol(symbol)
+-		    , m_version(version)
+-		{
+-		}
+-
+-		SymbolPtr GetSymbol() const
+-		{
+-			return m_symbol.lock();
+-		}
+-
+-		std::string ToString() const
+-		{
+-			return GetSymbol()->ToString();
+-		}
+-
+-		bool Equals(CSymbolRef* symbolRef) const
+-		{
+-			if(!symbolRef) return false;
+-			return (m_version == symbolRef->m_version) && GetSymbol()->Equals(symbolRef->GetSymbol().get());
+-		}
+-
+-		int GetVersion() const
+-		{
+-			return m_version;
+-		}
+-
+-		bool IsVersioned() const
+-		{
+-			return m_version != UNVERSIONED;
+-		}
+-
+-	private:
+-		WeakSymbolPtr m_symbol;
+-		int m_version = UNVERSIONED;
+-	};
+-
+-	typedef std::shared_ptr<CSymbolRef> SymbolRefPtr;
+-
+-	FRAMEWORK_MAYBE_UNUSED
+-	static CSymbol* dynamic_symbolref_cast(SYM_TYPE type, const SymbolRefPtr& symbolRef)
+-	{
+-		if(!symbolRef) return nullptr;
+-		auto result = symbolRef->GetSymbol().get();
+-		if(result->m_type != type) return nullptr;
+-		return result;
+-	}
+-}
++#pragma once
++
++#include "Jitter_Symbol.h"
++#include "maybe_unused.h"
++
++namespace Jitter
++{
++	class CSymbolRef final
++	{
++	public:
++		static constexpr int UNVERSIONED = -1;
++
++		CSymbolRef(const SymbolPtr& symbol, int version = UNVERSIONED)
++		    : m_symbol(symbol)
++		    , m_version(version)
++		{
++		}
++
++		SymbolPtr GetSymbol() const
++		{
++			return m_symbol.lock();
++		}
++
++		std::string ToString() const
++		{
++			return GetSymbol()->ToString();
++		}
++
++		bool Equals(CSymbolRef* symbolRef) const
++		{
++			if(!symbolRef) return false;
++			return (m_version == symbolRef->m_version) && GetSymbol()->Equals(symbolRef->GetSymbol().get());
++		}
++
++		int GetVersion() const
++		{
++			return m_version;
++		}
++
++		bool IsVersioned() const
++		{
++			return m_version != UNVERSIONED;
++		}
++
++	private:
++		WeakSymbolPtr m_symbol;
++		int m_version = UNVERSIONED;
++	};
++
++#if defined(__GLIBCXX__)
++	typedef std::__shared_ptr<CSymbolRef, __gnu_cxx::_S_single> SymbolRefPtr; //see SymbolPtr
++
++	template <typename... Args>
++	SymbolRefPtr MakeSymbolRefPtr(Args&&... args)
++	{
++		return std::__make_shared<CSymbolRef, __gnu_cxx::_S_single>(std::forward<Args>(args)...);
++	}
++#else
++	typedef std::shared_ptr<CSymbolRef> SymbolRefPtr;
++
++	template <typename... Args>
++	SymbolRefPtr MakeSymbolRefPtr(Args&&... args)
++	{
++		return std::make_shared<CSymbolRef>(std::forward<Args>(args)...);
++	}
++#endif
++
++	FRAMEWORK_MAYBE_UNUSED
++	static CSymbol* dynamic_symbolref_cast(SYM_TYPE type, const SymbolRefPtr& symbolRef)
++	{
++		if(!symbolRef) return nullptr;
++		auto result = symbolRef->GetSymbol().get();
++		if(result->m_type != type) return nullptr;
++		return result;
++	}
++}
+diff --git a/src/Jitter_Optimize.cpp b/src/Jitter_Optimize.cpp
+--- a/src/Jitter_Optimize.cpp
++++ b/src/Jitter_Optimize.cpp
+@@ -1,2381 +1,2381 @@
+-#include <assert.h>
+-#include <vector>
+-#include <algorithm>
+-#include "Jitter.h"
+-#include <cstdlib>
+-#include "BitManip.h"
+-
+-#ifdef _DEBUG
+-//#define DUMP_STATEMENTS
+-#endif
+-
+-#ifdef DUMP_STATEMENTS
+-#include <iostream>
+-#endif
+-
+-using namespace Jitter;
+-
+-unsigned int CJitter::CRelativeVersionManager::GetRelativeVersion(uint32 relativeId)
+-{
+-	RelativeVersionMap::const_iterator versionIterator(m_relativeVersions.find(relativeId));
+-	if(versionIterator == m_relativeVersions.end()) return 0;
+-	return versionIterator->second;
+-}
+-
+-unsigned int CJitter::CRelativeVersionManager::IncrementRelativeVersion(uint32 relativeId)
+-{
+-	unsigned int nextVersion = GetRelativeVersion(relativeId) + 1;
+-	m_relativeVersions[relativeId] = nextVersion;
+-	return nextVersion;
+-}
+-
+-CJitter::VERSIONED_STATEMENT_LIST CJitter::GenerateVersionedStatementList(const StatementList& statements)
+-{
+-	VERSIONED_STATEMENT_LIST result;
+-
+-	struct ReplaceUse
+-	{
+-		void operator()(SymbolRefPtr& symbolRef, CRelativeVersionManager& relativeVersions) const
+-		{
+-			if(CSymbol* symbol = dynamic_symbolref_cast(SYM_RELATIVE, symbolRef))
+-			{
+-				unsigned int currentVersion = relativeVersions.GetRelativeVersion(symbol->m_valueLow);
+-				symbolRef = std::make_shared<CSymbolRef>(symbolRef->GetSymbol(), currentVersion);
+-			}
+-			else if(CSymbol* symbol = dynamic_symbolref_cast(SYM_REL_REFERENCE, symbolRef))
+-			{
+-				unsigned int currentVersion = relativeVersions.GetRelativeVersion(symbol->m_valueLow);
+-				symbolRef = std::make_shared<CSymbolRef>(symbolRef->GetSymbol(), currentVersion);
+-			}
+-			else if(CSymbol* symbol = dynamic_symbolref_cast(SYM_RELATIVE64, symbolRef))
+-			{
+-				//Since this symbol can be aliased, use the sum of the versions of all
+-				//of its parts.
+-				unsigned int currentVersion =
+-				    relativeVersions.GetRelativeVersion(symbol->m_valueLow + 0x0) +
+-				    relativeVersions.GetRelativeVersion(symbol->m_valueLow + 0x4);
+-				symbolRef = std::make_shared<CSymbolRef>(symbolRef->GetSymbol(), currentVersion);
+-			}
+-			else if(CSymbol* symbol = dynamic_symbolref_cast(SYM_FP_RELATIVE32, symbolRef))
+-			{
+-				unsigned int currentVersion = relativeVersions.GetRelativeVersion(symbol->m_valueLow);
+-				symbolRef = std::make_shared<CSymbolRef>(symbolRef->GetSymbol(), currentVersion);
+-			}
+-			else if(CSymbol* symbol = dynamic_symbolref_cast(SYM_RELATIVE128, symbolRef))
+-			{
+-				//Since this symbol can be aliased, use the sum of the versions of all
+-				//of its parts.
+-				unsigned int currentVersion =
+-				    relativeVersions.GetRelativeVersion(symbol->m_valueLow + 0x0) +
+-				    relativeVersions.GetRelativeVersion(symbol->m_valueLow + 0x4) +
+-				    relativeVersions.GetRelativeVersion(symbol->m_valueLow + 0x8) +
+-				    relativeVersions.GetRelativeVersion(symbol->m_valueLow + 0xC);
+-				symbolRef = std::make_shared<CSymbolRef>(symbolRef->GetSymbol(), currentVersion);
+-			}
+-		}
+-	};
+-
+-	for(auto newStatement : statements)
+-	{
+-		ReplaceUse()(newStatement.src1, result.relativeVersions);
+-		ReplaceUse()(newStatement.src2, result.relativeVersions);
+-		ReplaceUse()(newStatement.src3, result.relativeVersions);
+-
+-		if(auto dst = dynamic_symbolref_cast(SYM_RELATIVE, newStatement.dst))
+-		{
+-			unsigned int nextVersion = result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow);
+-			newStatement.dst = std::make_shared<CSymbolRef>(newStatement.dst->GetSymbol(), nextVersion);
+-		}
+-		//Increment relative versions to prevent some optimization problems
+-		else if(auto dst = dynamic_symbolref_cast(SYM_REL_REFERENCE, newStatement.dst))
+-		{
+-			result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow);
+-		}
+-		else if(auto dst = dynamic_symbolref_cast(SYM_FP_RELATIVE32, newStatement.dst))
+-		{
+-			result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow);
+-		}
+-		else if(auto dst = dynamic_symbolref_cast(SYM_RELATIVE64, newStatement.dst))
+-		{
+-			result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow + 0);
+-			result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow + 4);
+-		}
+-		else if(auto dst = dynamic_symbolref_cast(SYM_RELATIVE128, newStatement.dst))
+-		{
+-			uint8 mask = 0xF;
+-			if(newStatement.op == OP_MD_MOV_MASKED)
+-			{
+-				mask = static_cast<uint8>(newStatement.jmpCondition);
+-			}
+-
+-			result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow + 0);
+-			if(mask & 0x02) result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow + 4);
+-			if(mask & 0x04) result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow + 8);
+-			if(mask & 0x08) result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow + 12);
+-		}
+-
+-		result.statements.push_back(newStatement);
+-	}
+-
+-	return result;
+-}
+-
+-StatementList CJitter::CollapseVersionedStatementList(const VERSIONED_STATEMENT_LIST& statements)
+-{
+-	StatementList result;
+-	for(auto newStatement : statements.statements)
+-	{
+-		newStatement.VisitOperands(
+-		    [](SymbolRefPtr& symbolRef, bool) {
+-			    if(symbolRef->IsVersioned())
+-			    {
+-				    symbolRef = std::make_shared<CSymbolRef>(symbolRef->GetSymbol());
+-			    }
+-		    });
+-
+-		result.push_back(newStatement);
+-	}
+-	return result;
+-}
+-
+-void CJitter::Compile()
+-{
+-	auto nowUs = []() {
+-		return static_cast<uint64>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+-	};
+-	uint64 startUs = nowUs();
+-	{
+-		uint64 statementCount = 0;
+-		for(const auto& basicBlock : m_basicBlocks) statementCount += basicBlock.statements.size();
+-		g_compileStats.statements.fetch_add(statementCount, std::memory_order_relaxed);
+-	}
+-
+-	while(1)
+-	{
+-		for(auto& basicBlock : m_basicBlocks)
+-		{
+-			if(!basicBlock.optimized)
+-			{
+-				m_currentBlock = &basicBlock;
+-
+-				//DumpStatementList(m_currentBlock->statements);
+-
+-				//These don't need to be run more than once
+-				ClampingElimination(basicBlock.statements);
+-				if(m_codeGenSupportsCmpSelect)
+-				{
+-					MergeCmpSelectOps(basicBlock.statements);
+-				}
+-
+-				auto versionedStatements = GenerateVersionedStatementList(basicBlock.statements);
+-
+-				while(1)
+-				{
+-					bool dirty = false;
+-					dirty |= ConstantPropagation(versionedStatements.statements);
+-					dirty |= ConstantFolding(versionedStatements.statements);
+-					dirty |= ReorderAdd(versionedStatements.statements);
+-					dirty |= CopyPropagation(versionedStatements.statements);
+-					dirty |= DeadcodeElimination(versionedStatements);
+-					dirty |= CommonExpressionElimination(versionedStatements);
+-
+-					if(!dirty) break;
+-				}
+-
+-				basicBlock.statements = CollapseVersionedStatementList(versionedStatements);
+-				FixFlowControl(basicBlock.statements);
+-				basicBlock.optimized = true;
+-			}
+-		}
+-
+-		bool dirty = false;
+-		dirty |= PruneBlocks();
+-		dirty |= MergeBlocks();
+-
+-		if(!dirty) break;
+-	}
+-
+-	PromoteLoopRegisters();
+-
+-	uint64 optimizedUs = nowUs();
+-	g_compileStats.optimizeUs.fetch_add(optimizedUs - startUs, std::memory_order_relaxed);
+-
+-	unsigned int stackSize = 0;
+-
+-	//Allocate registers
+-	for(auto& basicBlock : m_basicBlocks)
+-	{
+-		m_currentBlock = &basicBlock;
+-
+-		CoalesceIntoRelatives(basicBlock);
+-		CoalesceTemporaries(basicBlock);
+-		RemoveSelfAssignments(basicBlock);
+-		PruneSymbols(basicBlock);
+-
+-		AllocateRegisters(basicBlock);
+-		unsigned int blockStackSize = AllocateStack(basicBlock);
+-		stackSize = std::max<unsigned int>(stackSize, blockStackSize);
+-
+-		NormalizeStatements(basicBlock);
+-	}
+-
+-	uint64 allocatedUs = nowUs();
+-	g_compileStats.allocateUs.fetch_add(allocatedUs - optimizedUs, std::memory_order_relaxed);
+-
+-	auto result = ConcatBlocks(m_basicBlocks);
+-
+-#ifdef DUMP_STATEMENTS
+-	DumpStatementList(result.statements);
+-	std::cout << std::endl;
+-#endif
+-
+-	m_codeGen->GenerateCode(result.statements, stackSize);
+-	g_compileStats.generateUs.fetch_add(nowUs() - allocatedUs, std::memory_order_relaxed);
+-
+-	m_labels.clear();
+-}
+-
+-void CJitter::InsertStatement(const STATEMENT& statement)
+-{
+-	m_currentBlock->statements.push_back(statement);
+-}
+-
+-SymbolPtr CJitter::MakeSymbol(SYM_TYPE type, uint32 value)
+-{
+-	return MakeSymbol(m_currentBlock, type, value, 0);
+-}
+-
+-SymbolPtr CJitter::MakeConstantPtr(uintptr_t value)
+-{
+-#if(UINTPTR_MAX == UINT32_MAX)
+-	uint32 valueLo = static_cast<uint32>(value);
+-	return MakeSymbol(m_currentBlock, SYM_CONSTANTPTR, valueLo, 0);
+-#elif(UINTPTR_MAX == UINT64_MAX)
+-	uint32 valueLo = static_cast<uint32>(value);
+-	uint32 valueHi = static_cast<uint32>(value >> 32);
+-	return MakeSymbol(m_currentBlock, SYM_CONSTANTPTR, valueLo, valueHi);
+-#else
+-	static_assert(false, "Unsupported pointer size.");
+-#endif
+-}
+-
+-SymbolPtr CJitter::MakeConstant64(uint64 value)
+-{
+-	uint32 valueLo = static_cast<uint32>(value);
+-	uint32 valueHi = static_cast<uint32>(value >> 32);
+-	return MakeSymbol(m_currentBlock, SYM_CONSTANT64, valueLo, valueHi);
+-}
+-
+-SymbolPtr CJitter::MakeSymbol(BASIC_BLOCK* basicBlock, SYM_TYPE type, uint32 valueLo, uint32 valueHi)
+-{
+-	CSymbolTable& currentSymbolTable(basicBlock->symbolTable);
+-	return currentSymbolTable.MakeSymbol(type, valueLo, valueHi);
+-}
+-
+-SymbolRefPtr CJitter::MakeSymbolRef(const SymbolPtr& symbol)
+-{
+-	return std::make_shared<CSymbolRef>(symbol);
+-}
+-
+-int CJitter::GetSymbolSize(const SymbolRefPtr& symbolRef)
+-{
+-	return symbolRef->GetSymbol().get()->GetSize();
+-}
+-
+-bool CJitter::FoldConstantOperation(STATEMENT& statement)
+-{
+-	auto src1cst = dynamic_symbolref_cast(SYM_CONSTANT, statement.src1);
+-	auto src2cst = dynamic_symbolref_cast(SYM_CONSTANT, statement.src2);
+-	auto src3cst = dynamic_symbolref_cast(SYM_CONSTANT, statement.src3);
+-
+-	//Nothing we can do
+-	if(!src1cst && !src2cst && !src3cst) return false;
+-
+-	bool changed = false;
+-
+-	if(statement.op == OP_ADD)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			//Adding 2 constants
+-			uint32 result = src1cst->m_valueLow + src2cst->m_valueLow;
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		else if(src1cst && src1cst->m_valueLow == 0)
+-		{
+-			statement.op = OP_MOV;
+-			statement.src1 = statement.src2;
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		else if(src2cst && src2cst->m_valueLow == 0)
+-		{
+-			statement.op = OP_MOV;
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_SUB)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			//2 constants
+-			uint32 result = src1cst->m_valueLow - src2cst->m_valueLow;
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		else if(src2cst && src2cst->m_valueLow == 0)
+-		{
+-			statement.op = OP_MOV;
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_AND)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			//2 constants
+-			uint32 result = src1cst->m_valueLow & src2cst->m_valueLow;
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		else if(
+-		    (src1cst && src1cst->m_valueLow == 0) ||
+-		    (src2cst && src2cst->m_valueLow == 0))
+-		{
+-			//Anding with zero
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, 0));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		else if(src2cst && src2cst->m_valueLow == ~0)
+-		{
+-			//Anding with ~0
+-			statement.op = OP_MOV;
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_OR)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			uint32 result = src1cst->m_valueLow | src2cst->m_valueLow;
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		else if(src1cst && src1cst->m_valueLow == 0)
+-		{
+-			//Oring with zero
+-			statement.op = OP_MOV;
+-			std::swap(statement.src1, statement.src2);
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		else if(src2cst && src2cst->m_valueLow == 0)
+-		{
+-			//Oring with zero
+-			statement.op = OP_MOV;
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_XOR)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			uint32 result = src1cst->m_valueLow ^ src2cst->m_valueLow;
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		else if(src1cst && src1cst->m_valueLow == 0)
+-		{
+-			//Xoring with zero
+-			statement.op = OP_MOV;
+-			std::swap(statement.src1, statement.src2);
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		else if(src2cst && src2cst->m_valueLow == 0)
+-		{
+-			//Xoring with zero
+-			statement.op = OP_MOV;
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_NOT)
+-	{
+-		if(src1cst)
+-		{
+-			uint32 result = ~src1cst->m_valueLow;
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_SRA)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			uint32 result = static_cast<int32>(src1cst->m_valueLow) >> static_cast<int32>(src2cst->m_valueLow & 0x1F);
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		else if(src2cst && ((src2cst->m_valueLow & 0x1F) == 0))
+-		{
+-			statement.op = OP_MOV;
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_SRL)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			uint32 result = src1cst->m_valueLow >> (src2cst->m_valueLow & 0x1F);
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		else if(src2cst && ((src2cst->m_valueLow & 0x1F) == 0))
+-		{
+-			statement.op = OP_MOV;
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_SLL)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			uint32 result = src1cst->m_valueLow << (src2cst->m_valueLow & 0x1F);
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		else if(src2cst && ((src2cst->m_valueLow & 0x1F) == 0))
+-		{
+-			statement.op = OP_MOV;
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_LZC)
+-	{
+-		if(src1cst)
+-		{
+-			uint32 result = src1cst->m_valueLow;
+-			if(result & 0x80000000) result = ~result;
+-			if(result == 0)
+-			{
+-				result = 0x1F;
+-			}
+-			else
+-			{
+-				result = __builtin_clz(result) - 1;
+-			}
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_MERGETO64)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			uint64 result = static_cast<uint64>(src1cst->m_valueLow) | (static_cast<uint64>(src2cst->m_valueLow) << 32);
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeConstant64(result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_MUL)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			uint64 result = static_cast<uint64>(src1cst->m_valueLow) * static_cast<uint64>(src2cst->m_valueLow);
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeConstant64(result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_MULS)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			int64 result = static_cast<int64>(static_cast<int32>(src1cst->m_valueLow)) * static_cast<int64>(static_cast<int32>(src2cst->m_valueLow));
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeConstant64(static_cast<uint64>(result)));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_DIV)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			uint64 result = 0;
+-			if(src2cst->m_valueLow != 0)
+-			{
+-				uint32 quotient = src1cst->m_valueLow / src2cst->m_valueLow;
+-				uint32 remainder = src1cst->m_valueLow % src2cst->m_valueLow;
+-				result = static_cast<uint64>(quotient) | (static_cast<uint64>(remainder) << 32);
+-			}
+-			else
+-			{
+-				result = ~0ULL;
+-			}
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeConstant64(result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		//else if(src2cst && IsPowerOfTwo(src2cst->m_valueLow))
+-		//{
+-		//	statement.op = OP_SRL;
+-		//	src2cst->m_valueLow = GetPowerOf2(src2cst->m_valueLow);
+-		//}
+-	}
+-	else if(statement.op == OP_DIVS)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			uint64 result = 0;
+-			if(src2cst->m_valueLow != 0)
+-			{
+-				uint32 quotient = static_cast<int32>(src1cst->m_valueLow) / static_cast<int32>(src2cst->m_valueLow);
+-				uint32 remainder = static_cast<int32>(src1cst->m_valueLow) % static_cast<int32>(src2cst->m_valueLow);
+-				result = static_cast<uint64>(quotient) | (static_cast<uint64>(remainder) << 32);
+-			}
+-			else
+-			{
+-				result = ~0ULL;
+-			}
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeConstant64(result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_CMP)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			bool result = false;
+-			switch(statement.jmpCondition)
+-			{
+-			case CONDITION_EQ:
+-				result = static_cast<int32>(src1cst->m_valueLow) == static_cast<int32>(src2cst->m_valueLow);
+-				break;
+-			case CONDITION_NE:
+-				result = static_cast<int32>(src1cst->m_valueLow) != static_cast<int32>(src2cst->m_valueLow);
+-				break;
+-			case CONDITION_BL:
+-				result = src1cst->m_valueLow < src2cst->m_valueLow;
+-				break;
+-			case CONDITION_BE:
+-				result = src1cst->m_valueLow <= src2cst->m_valueLow;
+-				break;
+-			case CONDITION_AB:
+-				result = src1cst->m_valueLow > src2cst->m_valueLow;
+-				break;
+-			case CONDITION_AE:
+-				result = src1cst->m_valueLow >= src2cst->m_valueLow;
+-				break;
+-			case CONDITION_LT:
+-				result = static_cast<int32>(src1cst->m_valueLow) < static_cast<int32>(src2cst->m_valueLow);
+-				break;
+-			case CONDITION_LE:
+-				result = static_cast<int32>(src1cst->m_valueLow) <= static_cast<int32>(src2cst->m_valueLow);
+-				break;
+-			case CONDITION_GT:
+-				result = static_cast<int32>(src1cst->m_valueLow) > static_cast<int32>(src2cst->m_valueLow);
+-				break;
+-			case CONDITION_GE:
+-				result = static_cast<int32>(src1cst->m_valueLow) >= static_cast<int32>(src2cst->m_valueLow);
+-				break;
+-			default:
+-				assert(0);
+-				break;
+-			}
+-			changed = true;
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result ? 1 : 0));
+-			statement.src2.reset();
+-		}
+-	}
+-	else if(statement.op == OP_SELECT)
+-	{
+-		//Known condition (code generators only take a variable condition)
+-		if(src1cst)
+-		{
+-			statement.op = OP_MOV;
+-			statement.src1 = (src1cst->m_valueLow != 0) ? statement.src2 : statement.src3;
+-			statement.src2.reset();
+-			statement.src3.reset();
+-			changed = true;
+-		}
+-		//If true and false values are the same, we don't care about the test
+-		else if(src2cst && src3cst && (src2cst->m_valueLow == src3cst->m_valueLow))
+-		{
+-			uint32 value = src2cst->m_valueLow;
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, value));
+-			statement.src2.reset();
+-			statement.src3.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_CONDJMP)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			bool result = false;
+-			switch(statement.jmpCondition)
+-			{
+-			case CONDITION_NE:
+-				result = src1cst->m_valueLow != src2cst->m_valueLow;
+-				break;
+-			case CONDITION_EQ:
+-				result = src1cst->m_valueLow == src2cst->m_valueLow;
+-				break;
+-			case CONDITION_BL:
+-				result = static_cast<uint32>(src1cst->m_valueLow) < static_cast<uint32>(src2cst->m_valueLow);
+-				break;
+-			case CONDITION_LE:
+-				result = static_cast<int32>(src1cst->m_valueLow) <= static_cast<int32>(src2cst->m_valueLow);
+-				break;
+-			case CONDITION_GT:
+-				result = static_cast<int32>(src1cst->m_valueLow) > static_cast<int32>(src2cst->m_valueLow);
+-				break;
+-			case CONDITION_GE:
+-				result = static_cast<int32>(src1cst->m_valueLow) >= static_cast<int32>(src2cst->m_valueLow);
+-				break;
+-			default:
+-				assert(0);
+-				break;
+-			}
+-			changed = true;
+-			if(result)
+-			{
+-				statement.op = OP_JMP;
+-			}
+-			else
+-			{
+-				statement.op = OP_NOP;
+-			}
+-			statement.src1.reset();
+-			statement.src2.reset();
+-		}
+-	}
+-
+-	return changed;
+-}
+-
+-bool CJitter::FoldConstant64Operation(STATEMENT& statement)
+-{
+-	CSymbol* src1cst = dynamic_symbolref_cast(SYM_CONSTANT64, statement.src1);
+-	CSymbol* src2cst = dynamic_symbolref_cast(SYM_CONSTANT64, statement.src2);
+-
+-	//Nothing we can do
+-	if(src1cst == NULL && src2cst == NULL) return false;
+-
+-	bool changed = false;
+-
+-	if(statement.op == OP_EXTLOW64)
+-	{
+-		if(src1cst)
+-		{
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, src1cst->m_valueLow));
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_EXTHIGH64)
+-	{
+-		if(src1cst)
+-		{
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, src1cst->m_valueHigh));
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_ADD64)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			uint64 cst1 = src1cst->GetConstant64();
+-			uint64 cst2 = src2cst->GetConstant64();
+-			uint64 result = cst1 + cst2;
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeConstant64(result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		else if(src2cst && (src2cst->m_valueLow == 0) && (src2cst->m_valueHigh == 0))
+-		{
+-			statement.op = OP_MOV;
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_SUB64)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			uint64 cst1 = src1cst->GetConstant64();
+-			uint64 cst2 = src2cst->GetConstant64();
+-			uint64 result = cst1 - cst2;
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeConstant64(result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_AND64)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			uint64 cst1 = src1cst->GetConstant64();
+-			uint64 cst2 = src2cst->GetConstant64();
+-			uint64 result = cst1 & cst2;
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeConstant64(result));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		else if(
+-		    (src1cst && (src1cst->m_valueLow == 0) && (src1cst->m_valueHigh == 0)) ||
+-		    (src2cst && (src2cst->m_valueLow == 0) && (src2cst->m_valueHigh == 0)))
+-		{
+-			//ANDing anything with 0 gives 0
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeConstant64(0));
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(statement.op == OP_CMP64)
+-	{
+-		if(src1cst && src2cst)
+-		{
+-			bool result = false;
+-			switch(statement.jmpCondition)
+-			{
+-			case CONDITION_EQ:
+-				result = src1cst->GetConstant64() == src2cst->GetConstant64();
+-				break;
+-			case CONDITION_NE:
+-				result = src1cst->GetConstant64() != src2cst->GetConstant64();
+-				break;
+-			case CONDITION_BL:
+-				result = src1cst->GetConstant64() < src2cst->GetConstant64();
+-				break;
+-			case CONDITION_AB:
+-				result = src1cst->GetConstant64() > src2cst->GetConstant64();
+-				break;
+-			case CONDITION_LT:
+-				result = static_cast<int64>(src1cst->GetConstant64()) < static_cast<int64>(src2cst->GetConstant64());
+-				break;
+-			case CONDITION_LE:
+-				result = static_cast<int64>(src1cst->GetConstant64()) <= static_cast<int64>(src2cst->GetConstant64());
+-				break;
+-			case CONDITION_GT:
+-				result = static_cast<int64>(src1cst->GetConstant64()) > static_cast<int64>(src2cst->GetConstant64());
+-				break;
+-			default:
+-				assert(0);
+-				break;
+-			}
+-			changed = true;
+-			statement.op = OP_MOV;
+-			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result ? 1 : 0));
+-			statement.src2.reset();
+-		}
+-	}
+-
+-	assert(!(src1cst && src2cst && !changed));
+-
+-	return changed;
+-}
+-
+-bool CJitter::FoldConstant6432Operation(STATEMENT& statement)
+-{
+-	CSymbol* src1cst = dynamic_symbolref_cast(SYM_CONSTANT64, statement.src1);
+-	CSymbol* src2cst = dynamic_symbolref_cast(SYM_CONSTANT, statement.src2);
+-
+-	//Nothing we can do
+-	if(src1cst == NULL && src2cst == NULL) return false;
+-
+-	bool changed = false;
+-
+-	if(
+-	    statement.op == OP_SLL64 ||
+-	    statement.op == OP_SRL64 ||
+-	    statement.op == OP_SRA64)
+-	{
+-		if(src2cst && ((src2cst->m_valueLow & 0x3F) == 0))
+-		{
+-			statement.op = OP_MOV;
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-		else if(src1cst && (src1cst->m_valueLow == 0) && (src1cst->m_valueHigh == 0))
+-		{
+-			statement.op = OP_MOV;
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-
+-	return changed;
+-}
+-
+-bool CJitter::FoldConstant12832Operation(STATEMENT& statement)
+-{
+-	auto src2cst = dynamic_symbolref_cast(SYM_CONSTANT, statement.src2);
+-
+-	//Nothing we can do
+-	if(src2cst == nullptr) return false;
+-
+-	bool changed = false;
+-
+-	if(
+-	    statement.op == OP_MD_SLLH ||
+-	    statement.op == OP_MD_SRLH ||
+-	    statement.op == OP_MD_SRAH)
+-	{
+-		if(src2cst && ((src2cst->m_valueLow & 0xF) == 0))
+-		{
+-			statement.op = OP_MOV;
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-	else if(
+-	    statement.op == OP_MD_SLLW ||
+-	    statement.op == OP_MD_SRLW ||
+-	    statement.op == OP_MD_SRAW)
+-	{
+-		if(src2cst && ((src2cst->m_valueLow & 0x1F) == 0))
+-		{
+-			statement.op = OP_MOV;
+-			statement.src2.reset();
+-			changed = true;
+-		}
+-	}
+-
+-	return changed;
+-}
+-
+-bool CJitter::ConstantFolding(StatementList& statements)
+-{
+-	bool changed = false;
+-	for(auto& statement : statements)
+-	{
+-		changed |= FoldConstantOperation(statement);
+-		changed |= FoldConstant64Operation(statement);
+-		changed |= FoldConstant6432Operation(statement);
+-		changed |= FoldConstant12832Operation(statement);
+-	}
+-	return changed;
+-}
+-
+-void CJitter::FixFlowControl(StatementList& statements)
+-{
+-	//Resolve GOTO instructions
+-	for(auto& statement : statements)
+-	{
+-		if(statement.op == OP_GOTO)
+-		{
+-			LabelMapType::const_iterator labelIterator = m_labels.find(statement.jmpBlock);
+-			assert(labelIterator != m_labels.end());
+-			if(labelIterator == m_labels.end()) continue;
+-
+-			statement.op = OP_JMP;
+-			statement.jmpBlock = labelIterator->second;
+-		}
+-	}
+-
+-	//Remove any excess flow control instructions
+-	for(StatementList::iterator statementIterator(statements.begin());
+-	    statementIterator != statements.end(); ++statementIterator)
+-	{
+-		const STATEMENT& statement(*statementIterator);
+-
+-		if(statement.op == OP_JMP || statement.op == OP_CONDJMP)
+-		{
+-			++statementIterator;
+-			statements.erase(statementIterator, statements.end());
+-			break;
+-		}
+-	}
+-}
+-
+-void CJitter::MergeBasicBlocks(BASIC_BLOCK& dstBlock, const BASIC_BLOCK& srcBlock)
+-{
+-	auto& dstSymbolTable = dstBlock.symbolTable;
+-
+-	for(auto statement : srcBlock.statements)
+-	{
+-		statement.VisitOperands(
+-		    [&dstSymbolTable](SymbolRefPtr& symbolRef, bool) {
+-			    auto symbol = symbolRef->GetSymbol();
+-			    symbolRef = std::make_shared<CSymbolRef>(dstSymbolTable.MakeSymbol(symbol));
+-		    });
+-		dstBlock.statements.push_back(statement);
+-	}
+-
+-	dstBlock.optimized = false;
+-}
+-
+-CJitter::BASIC_BLOCK CJitter::ConcatBlocks(const BasicBlockList& blocks)
+-{
+-	BASIC_BLOCK result;
+-	for(const auto& basicBlock : blocks)
+-	{
+-		//First, add a mark label statement
+-		STATEMENT labelStatement;
+-		labelStatement.op = OP_LABEL;
+-		labelStatement.jmpBlock = basicBlock.id;
+-		result.statements.push_back(labelStatement);
+-
+-		MergeBasicBlocks(result, basicBlock);
+-	}
+-	return result;
+-}
+-
+-bool CJitter::PruneBlocks()
+-{
+-	bool changed = true;
+-	int deletedBlocks = 0;
+-
+-	while(changed)
+-	{
+-		changed = false;
+-
+-		auto toDeleteIterator = m_basicBlocks.cend();
+-		for(auto outerBlockIterator(m_basicBlocks.cbegin());
+-		    outerBlockIterator != m_basicBlocks.cend(); outerBlockIterator++)
+-		{
+-			//First block is always referenced
+-			if(outerBlockIterator == m_basicBlocks.begin()) continue;
+-
+-			auto candidateBlockIterator = outerBlockIterator;
+-			bool referenced = false;
+-
+-			//Check if there's a reference to this block in here
+-			for(auto innerBlockIterator(m_basicBlocks.cbegin());
+-			    innerBlockIterator != m_basicBlocks.cend(); innerBlockIterator++)
+-			{
+-				const auto& block(*innerBlockIterator);
+-				bool referencesNext = false;
+-
+-				if(block.statements.empty())
+-				{
+-					//Empty blocks references next one
+-					referencesNext = true;
+-				}
+-				else
+-				{
+-					//Check if this block references the next one or if it jumps to another one
+-					auto lastInstruction(block.statements.end());
+-					lastInstruction--;
+-					const auto& statement(*lastInstruction);
+-
+-					//It jumps to a block, so check if it references the one we're looking for
+-					if(statement.op == OP_JMP || statement.op == OP_CONDJMP)
+-					{
+-						if(statement.jmpBlock == candidateBlockIterator->id)
+-						{
+-							referenced = true;
+-							break;
+-						}
+-					}
+-
+-					//Otherwise, it references the next one if it's not a jump
+-					if(statement.op != OP_JMP)
+-					{
+-						referencesNext = true;
+-					}
+-				}
+-
+-				if(referencesNext)
+-				{
+-					auto nextBlockIterator(innerBlockIterator);
+-					nextBlockIterator++;
+-					if(nextBlockIterator != m_basicBlocks.end())
+-					{
+-						if(nextBlockIterator->id == candidateBlockIterator->id)
+-						{
+-							referenced = true;
+-							break;
+-						}
+-					}
+-				}
+-			}
+-
+-			if(!referenced)
+-			{
+-				toDeleteIterator = candidateBlockIterator;
+-				break;
+-			}
+-		}
+-		if(toDeleteIterator == m_basicBlocks.end()) continue;
+-
+-		m_basicBlocks.erase(toDeleteIterator);
+-		deletedBlocks++;
+-		changed = true;
+-	}
+-
+-	HarmonizeBlocks();
+-	return deletedBlocks != 0;
+-}
+-
+-void CJitter::HarmonizeBlocks()
+-{
+-	//Remove any jumps that jump to the next block
+-	for(BasicBlockList::iterator blockIterator(m_basicBlocks.begin());
+-	    blockIterator != m_basicBlocks.end(); ++blockIterator)
+-	{
+-		BasicBlockList::iterator nextBlockIterator(blockIterator);
+-		++nextBlockIterator;
+-		if(nextBlockIterator == m_basicBlocks.end()) continue;
+-
+-		auto& basicBlock(*blockIterator);
+-		if(basicBlock.statements.size() == 0) continue;
+-
+-		StatementList::iterator lastStatementIterator(basicBlock.statements.end());
+-		--lastStatementIterator;
+-		const STATEMENT& statement(*lastStatementIterator);
+-		if(statement.op != OP_JMP) continue;
+-		if(statement.jmpBlock != nextBlockIterator->id) continue;
+-
+-		//Remove the jump
+-		basicBlock.statements.erase(lastStatementIterator);
+-	}
+-
+-	//Flag any block that have a reference from a jump
+-	for(BasicBlockList::iterator outerBlockIterator(m_basicBlocks.begin());
+-	    outerBlockIterator != m_basicBlocks.end(); ++outerBlockIterator)
+-	{
+-		auto& outerBlock(*outerBlockIterator);
+-		outerBlock.hasJumpRef = false;
+-
+-		for(const auto& block : m_basicBlocks)
+-		{
+-			if(block.statements.size() == 0) continue;
+-
+-			//Check if this block references the next one or if it jumps to another one
+-			StatementList::const_iterator lastInstruction(block.statements.end());
+-			--lastInstruction;
+-			const STATEMENT& statement(*lastInstruction);
+-
+-			//It jumps to a block, so check if it references the one we're looking for
+-			if(statement.op == OP_JMP || statement.op == OP_CONDJMP)
+-			{
+-				if(statement.jmpBlock == outerBlockIterator->id)
+-				{
+-					outerBlock.hasJumpRef = true;
+-					break;
+-				}
+-			}
+-		}
+-	}
+-}
+-
+-bool CJitter::MergeBlocks()
+-{
+-	int deletedBlocks = 0;
+-	bool changed = true;
+-	while(changed)
+-	{
+-		changed = false;
+-		for(BasicBlockList::iterator blockIterator(m_basicBlocks.begin());
+-		    m_basicBlocks.end() != blockIterator; ++blockIterator)
+-		{
+-			BasicBlockList::iterator nextBlockIterator(blockIterator);
+-			++nextBlockIterator;
+-			if(nextBlockIterator == m_basicBlocks.end()) continue;
+-
+-			auto& basicBlock(*blockIterator);
+-			auto& nextBlock(*nextBlockIterator);
+-
+-			if(nextBlock.hasJumpRef) continue;
+-
+-			//Check if the last statement is a jump
+-			if(!basicBlock.statements.empty())
+-			{
+-				auto lastStatementIterator(basicBlock.statements.end());
+-				--lastStatementIterator;
+-				const auto& statement(*lastStatementIterator);
+-				if(statement.op == OP_CONDJMP) continue;
+-				if(statement.op == OP_JMP) continue;
+-			}
+-
+-			//Blocks can be merged
+-			MergeBasicBlocks(basicBlock, nextBlock);
+-
+-			m_basicBlocks.erase(nextBlockIterator);
+-
+-			++deletedBlocks;
+-			changed = true;
+-			break;
+-		}
+-	}
+-	return deletedBlocks != 0;
+-}
+-
+-bool CJitter::ConstantPropagation(StatementList& statements)
+-{
+-	bool changed = false;
+-
+-	for(StatementList::iterator outerStatementIterator(statements.begin());
+-	    statements.end() != outerStatementIterator; ++outerStatementIterator)
+-	{
+-		STATEMENT& outerStatement(*outerStatementIterator);
+-
+-		if(outerStatement.op != OP_MOV) continue;
+-
+-		CSymbol* constant = dynamic_symbolref_cast(SYM_CONSTANT, outerStatement.src1);
+-		if(constant == NULL)
+-		{
+-			constant = dynamic_symbolref_cast(SYM_CONSTANT64, outerStatement.src1);
+-		}
+-		if(!constant) continue;
+-
+-		//Find anything that uses this operand and replace it with the constant
+-		for(StatementList::iterator innerStatementIterator(outerStatementIterator);
+-		    statements.end() != innerStatementIterator; ++innerStatementIterator)
+-		{
+-			if(outerStatementIterator == innerStatementIterator) continue;
+-
+-			auto& innerStatement(*innerStatementIterator);
+-
+-			innerStatement.VisitSources(
+-			    [&](SymbolRefPtr& symbol, bool) {
+-				    if(symbol->Equals(outerStatement.dst.get()))
+-				    {
+-					    symbol = outerStatement.src1;
+-					    changed = true;
+-				    }
+-			    });
+-		}
+-	}
+-	return changed;
+-}
+-
+-bool CJitter::ReorderAdd(StatementList& statements)
+-{
+-	bool changed = false;
+-
+-	for(auto statementIterator(statements.begin());
+-	    statements.end() != statementIterator; ++statementIterator)
+-	{
+-		auto& statement(*statementIterator);
+-
+-		//We're only interested by additions
+-		if(statement.op != OP_ADD) continue;
+-
+-		//Do some more checks
+-		auto addDst = statement.dst.get();
+-		assert(addDst);
+-
+-		auto addSrc2Cst = dynamic_symbolref_cast(SYM_CONSTANT, statement.src2);
+-
+-		//Don't mess with relatives
+-		if(addDst->GetSymbol()->IsRelative() || !addSrc2Cst)
+-		{
+-			continue;
+-		}
+-
+-		//Check for OP_SLL that uses the result of this operation and propagate the shift
+-		auto nextStatementIterator = std::next(statementIterator);
+-		auto& nextStatement(*nextStatementIterator);
+-		if(nextStatement.op == OP_SLL && nextStatement.src1->Equals(addDst))
+-		{
+-			auto shiftSrc2Cst = dynamic_symbolref_cast(SYM_CONSTANT, nextStatement.src2);
+-			if(shiftSrc2Cst)
+-			{
+-				uint32 result = addSrc2Cst->m_valueLow << shiftSrc2Cst->m_valueLow;
+-
+-				std::swap(statement, nextStatement);
+-				std::swap(statement.src1, nextStatement.src1);
+-				std::swap(statement.dst, nextStatement.dst);
+-				nextStatement.src2 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
+-				changed = true;
+-			}
+-		}
+-	}
+-	return changed;
+-}
+-
+-bool CJitter::CopyPropagation(StatementList& statements)
+-{
+-	bool changed = false;
+-
+-	struct USAGEINFO
+-	{
+-		uint32 count = 0;
+-		StatementList::iterator lastUse;
+-	};
+-	std::map<SymbolPtr, USAGEINFO> usageInfos;
+-
+-	for(auto statementIterator(statements.begin());
+-	    statements.end() != statementIterator; ++statementIterator)
+-	{
+-		auto& statement(*statementIterator);
+-
+-		statement.VisitSources(
+-		    [&](const SymbolRefPtr& symbolRef, bool) {
+-			    auto symbol = symbolRef->GetSymbol();
+-			    if(symbol->IsRelative()) return;
+-			    if(symbol->IsConstant()) return;
+-			    auto& usageInfo = usageInfos[symbol];
+-			    usageInfo.count++;
+-			    usageInfo.lastUse = statementIterator;
+-		    });
+-	}
+-
+-	for(auto outerStatementIterator(statements.begin());
+-	    statements.end() != outerStatementIterator; ++outerStatementIterator)
+-	{
+-		auto& outerStatement(*outerStatementIterator);
+-
+-		//Some operations we can't propagate
+-		if(outerStatement.op == OP_RETVAL) continue;
+-
+-		CSymbolRef* outerDstSymbol = outerStatement.dst.get();
+-		if(outerDstSymbol == NULL) continue;
+-
+-		//Don't mess with relatives
+-		if(outerDstSymbol->GetSymbol()->IsRelative())
+-		{
+-			continue;
+-		}
+-
+-		auto usageInfoIterator = usageInfos.find(outerDstSymbol->GetSymbol());
+-		if(usageInfoIterator == std::end(usageInfos))
+-		{
+-			continue;
+-		}
+-
+-		const auto& usageInfo = usageInfoIterator->second;
+-		if(usageInfo.count != 1)
+-		{
+-			continue;
+-		}
+-
+-		auto& innerStatement(*usageInfo.lastUse);
+-		if(!innerStatement.src1->Equals(outerDstSymbol))
+-		{
+-			//Possibly excluding interesting optimization possibilities
+-			continue;
+-		}
+-
+-		//Substitute a OP_MOV statement that use outerDstSymbol with its definition (outerStatement)
+-		//Example:
+-		//outerDstSymbol -> t0
+-		//Before:
+-		// - t0 = r0 + r1   //outerStatement
+-		// - t1 = t0        //innerStatement
+-		//After:
+-		// - t0 = r0 + r1   //outerStatement
+-		// - t1 = r0 + r1   //innerStatement
+-		//After substitution, t0 will not be used anymore making outerStatement eligible for removal
+-		if(innerStatement.op == OP_MOV)
+-		{
+-			if(outerStatement.op == OP_GUESTLOAD)
+-			{
+-				//Don't move a guest load across other memory accesses or calls
+-				bool canMove = true;
+-				for(auto it = std::next(outerStatementIterator); it != usageInfo.lastUse; ++it)
+-				{
+-					if((it->op == OP_GUESTLOAD) || (it->op == OP_GUESTSTORE) || (it->op == OP_CALL) ||
+-					   (it->op == OP_PARAM) || (it->op == OP_PARAM_RET))
+-					{
+-						canMove = false;
+-						break;
+-					}
+-				}
+-				if(!canMove) continue;
+-			}
+-			innerStatement.op = outerStatement.op;
+-			innerStatement.src1 = outerStatement.src1;
+-			innerStatement.src2 = outerStatement.src2;
+-			innerStatement.src3 = outerStatement.src3;
+-			innerStatement.jmpCondition = outerStatement.jmpCondition;
+-			innerStatement.memInfo = outerStatement.memInfo;
+-			changed = true;
+-		}
+-		//Substitute src operand of a statement if our defining statement (outerStatement) is a OP_MOV
+-		//Example:
+-		//outerDstSymbol -> t0
+-		//Before:
+-		// - t0 = r0
+-		// - r1 = t0 & r2
+-		//After:
+-		// - t0 = r0
+-		// - r1 = r0 & r2
+-		//After substitution, t0 will not be used anymore making outerStatement eligible for removal
+-		else if(outerStatement.op == OP_MOV)
+-		{
+-			auto replacementSym = outerStatement.src1;
+-			innerStatement.VisitSources(
+-			    [&](SymbolRefPtr& symbol, bool) {
+-				    if(symbol->Equals(outerDstSymbol))
+-				    {
+-					    symbol = replacementSym;
+-					    changed = true;
+-				    }
+-			    });
+-			assert(changed);
+-		}
+-		//Find all the add/sub constant and add them together
+-		//Example
+-		//outerDstSymbol -> t0
+-		//Before:
+-		// - t0 = r0 + 10   //outerStatement
+-		// - t1 = t0 + 20   //innerStatement
+-		//After:
+-		// - t0 = r0 + 10   //outerStatement
+-		// - t1 = r0 + 30   //innerStatement
+-		//After substitution, t0 will not be used anymore making outerStatement eligible for removal
+-		else if(
+-		    (outerStatement.op == innerStatement.op) &&
+-		    ((innerStatement.op == OP_ADD) || (innerStatement.op == OP_ADDREF)))
+-		{
+-			auto innerSrc2cst = dynamic_symbolref_cast(SYM_CONSTANT, innerStatement.src2);
+-			auto outerSrc2cst = dynamic_symbolref_cast(SYM_CONSTANT, outerStatement.src2);
+-			if(innerSrc2cst && outerSrc2cst)
+-			{
+-				uint32 result = innerSrc2cst->m_valueLow + outerSrc2cst->m_valueLow;
+-				innerStatement.src1 = outerStatement.src1;
+-				innerStatement.src2 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
+-				changed = true;
+-			}
+-		}
+-	}
+-
+-	return changed;
+-}
+-
+-bool CJitter::CommonExpressionElimination(VERSIONED_STATEMENT_LIST& versionedStatementList)
+-{
+-	bool changed = false;
+-	std::vector<StatementList::const_iterator> tempDefs;
+-	std::unordered_map<SymbolPtr, SymbolPtr> tempReplaceMap;
+-	tempDefs.reserve(versionedStatementList.statements.size());
+-
+-	for(auto statementIterator(versionedStatementList.statements.begin());
+-	    versionedStatementList.statements.end() != statementIterator; ++statementIterator)
+-	{
+-		auto& statement(*statementIterator);
+-
+-		//If this is a statement defining a temporary
+-		//(guest loads can't be merged: memory might have changed in between)
+-		if(
+-		    (statement.op != OP_RETVAL) &&
+-		    (statement.op != OP_GUESTLOAD) &&
+-		    (statement.dst) &&
+-		    (statement.dst->GetSymbol()->IsTemporary()))
+-		{
+-			const auto& newTemp = statement.dst->GetSymbol();
+-
+-			bool found = false;
+-			//Check if our temporary already has a similar definition
+-			for(const auto& tempDef : tempDefs)
+-			{
+-				const auto& tempDefStatement = *tempDef;
+-				assert(tempDefStatement.dst);
+-				const auto& temp = tempDefStatement.dst;
+-				if(statement.op != tempDefStatement.op) continue;
+-				if(statement.jmpCondition != tempDefStatement.jmpCondition) continue;
+-				if(statement.src1 && !statement.src1->Equals(tempDefStatement.src1.get())) continue;
+-				if(statement.src2 && !statement.src2->Equals(tempDefStatement.src2.get())) continue;
+-				if(statement.src3 && !statement.src3->Equals(tempDefStatement.src3.get())) continue;
+-				auto [_, inserted] = tempReplaceMap.insert(std::make_pair(newTemp, temp->GetSymbol()));
+-				assert(inserted);
+-				found = true;
+-				//We assume the first replacement we find is gonna be the best
+-				break;
+-			}
+-
+-			//We haven't found a replacement for our definition, assume it's new
+-			if(!found)
+-			{
+-				tempDefs.push_back(statementIterator);
+-			}
+-		}
+-
+-		if(tempReplaceMap.empty())
+-		{
+-			continue;
+-		}
+-
+-		statement.VisitSources(
+-		    [&](SymbolRefPtr& innerSymbolRef, bool) {
+-			    if(!innerSymbolRef->GetSymbol()->IsTemporary()) return;
+-			    if(auto tempReplaceIterator = tempReplaceMap.find(innerSymbolRef->GetSymbol()); tempReplaceIterator != std::end(tempReplaceMap))
+-			    {
+-				    innerSymbolRef = MakeSymbolRef(tempReplaceIterator->second);
+-				    changed = true;
+-			    }
+-		    });
+-	}
+-
+-	return changed;
+-}
+-
+-bool CJitter::ClampingElimination(StatementList& statements)
+-{
+-	bool changed = false;
+-
+-	std::map<uint32, uint32> temporaryValues;
+-
+-	for(auto statementIterator(statements.begin());
+-	    statements.end() != statementIterator; ++statementIterator)
+-	{
+-		auto& statement = *statementIterator;
+-
+-		auto dstSymbol = dynamic_symbolref_cast(SYM_TEMPORARY128, statement.dst);
+-
+-		if((statement.op == OP_MD_EXPAND_W) &&
+-		   dstSymbol &&
+-		   statement.src1->GetSymbol()->IsConstant())
+-		{
+-			auto src1Symbol = dynamic_symbolref_cast(SYM_CONSTANT, statement.src1);
+-			temporaryValues.insert(
+-			    std::make_pair(dstSymbol->m_valueLow, src1Symbol->m_valueLow));
+-		}
+-		else if(dstSymbol)
+-		{
+-			//Make sure that our temporary value doesn't get modified
+-			assert(temporaryValues.find(dstSymbol->m_valueLow) == std::end(temporaryValues));
+-		}
+-
+-		if((statement.op == OP_MD_CLAMP_S) &&
+-		   statement.src1->GetSymbol()->IsTemporary())
+-		{
+-			auto src1Symbol = dynamic_symbolref_cast(SYM_TEMPORARY128, statement.src1);
+-			auto tempCstValue = temporaryValues.find(src1Symbol->m_valueLow);
+-			if(tempCstValue != std::end(temporaryValues))
+-			{
+-				if((tempCstValue->second & 0x7F800000) != 0x7F800000)
+-				{
+-					//No clamping needed here
+-					statement.op = OP_MOV;
+-					changed = true;
+-				}
+-			}
+-		}
+-	}
+-
+-	return changed;
+-}
+-
+-static bool IsStoreThroughReference(OPERATION op)
+-{
+-	switch(op)
+-	{
+-	case OP_MD_STOREATREF_MASKED:
+-	case OP_STORE16ATREF:
+-	case OP_STORE8ATREF:
+-	case OP_STOREATREF:
+-		return true;
+-	default:
+-		return false;
+-	}
+-}
+-
+-bool CJitter::MergeCmpSelectOps(StatementList& statements)
+-{
+-	bool changed = false;
+-
+-	//Move a CMP down to the SELECT using its result when the statements in
+-	//between neither read the predicate nor change the compared values (e.g.
+-	//a branch computes its target between the two). Then they can merge.
+-	for(auto selectIterator(statements.begin()); selectIterator != statements.end(); ++selectIterator)
+-	{
+-		const auto& select = *selectIterator;
+-		if(select.op != OP_SELECT) continue;
+-		if(selectIterator == statements.begin()) continue;
+-		auto prevIterator = std::prev(selectIterator);
+-		if(prevIterator->op == OP_CMP) continue;
+-		auto predicate = select.src1->GetSymbol();
+-		if(!predicate->IsTemporary()) continue;
+-
+-		auto cmpIterator = statements.end();
+-		bool blocked = false;
+-		for(auto it = prevIterator;; --it)
+-		{
+-			const auto& candidate = *it;
+-			if((candidate.op == OP_CMP) && candidate.dst && candidate.dst->GetSymbol()->Equals(predicate.get()))
+-			{
+-				cmpIterator = it;
+-				break;
+-			}
+-			if((candidate.op == OP_CALL) || (candidate.op == OP_PARAM) || (candidate.op == OP_PARAM_RET) ||
+-			   (candidate.op == OP_LABEL) || (candidate.op == OP_GUESTLOAD) || (candidate.op == OP_GUESTSTORE) ||
+-			   IsStoreThroughReference(candidate.op))
+-			{
+-				blocked = true;
+-				break;
+-			}
+-			if(it == statements.begin()) break;
+-		}
+-		if(blocked || (cmpIterator == statements.end())) continue;
+-
+-		const auto& cmp = *cmpIterator;
+-		bool safe = true;
+-		for(auto it = std::next(cmpIterator); it != selectIterator; ++it)
+-		{
+-			const auto& between = *it;
+-			between.VisitSources([&](const SymbolRefPtr& src, bool) {
+-				if(src->GetSymbol()->Equals(predicate.get())) safe = false;
+-			});
+-			if(between.dst)
+-			{
+-				auto dstSymbol = between.dst->GetSymbol();
+-				if(dstSymbol->Equals(predicate.get())) safe = false;
+-				cmp.VisitSources([&](const SymbolRefPtr& src, bool) {
+-					auto srcSymbol = src->GetSymbol();
+-					if(srcSymbol->Equals(dstSymbol.get()) || srcSymbol->Aliases(dstSymbol.get())) safe = false;
+-				});
+-			}
+-			if(!safe) break;
+-		}
+-		if(!safe) continue;
+-
+-		statements.splice(selectIterator, statements, cmpIterator);
+-		changed = true;
+-	}
+-
+-	for(auto statementIterator(statements.begin());
+-	    statements.end() != statementIterator; ++statementIterator)
+-	{
+-		auto& statement = *statementIterator;
+-		auto nextStatementIterator = statementIterator;
+-		nextStatementIterator++;
+-
+-		if(nextStatementIterator == std::end(statements)) continue;
+-		auto& nextStatement = *nextStatementIterator;
+-
+-		if(nextStatement.op != OP_SELECT) continue;
+-		if(statement.op != OP_CMP) continue;
+-
+-		auto predicateSymbol = statement.dst;
+-
+-		if(!nextStatement.src1->Equals(predicateSymbol.get())) continue;
+-
+-		auto innerStatementIterator = nextStatementIterator;
+-		innerStatementIterator++;
+-
+-		//Make sure predicate isn't used later
+-		bool used = false;
+-		for(; innerStatementIterator != statements.end(); ++innerStatementIterator)
+-		{
+-			const auto& innerStatement = *innerStatementIterator;
+-			innerStatement.VisitSources([&](const SymbolRefPtr& src, bool isDst) { used |= src->Equals(predicateSymbol.get()); });
+-			if(used) break;
+-		}
+-
+-		if(used) continue;
+-
+-		nextStatement.op = OP_CMPSELECT_P2;
+-		nextStatement.jmpCondition = statement.jmpCondition;
+-		nextStatement.src1 = nextStatement.src2;
+-		nextStatement.src2 = nextStatement.src3;
+-		nextStatement.src3.reset();
+-
+-		statement.op = OP_CMPSELECT_P1;
+-		statement.jmpCondition = Jitter::CONDITION_NEVER;
+-		statement.dst.reset();
+-
+-		changed = true;
+-	}
+-
+-	return changed;
+-}
+-
+-bool CJitter::DeadcodeElimination(VERSIONED_STATEMENT_LIST& versionedStatementList)
+-{
+-	bool changed = false;
+-
+-	typedef std::list<StatementList::iterator> ToDeleteList;
+-	ToDeleteList toDelete;
+-
+-	for(auto outerStatementIterator(versionedStatementList.statements.begin());
+-	    versionedStatementList.statements.end() != outerStatementIterator; ++outerStatementIterator)
+-	{
+-		auto& outerStatement(*outerStatementIterator);
+-		const auto& symbolRef(outerStatement.dst);
+-
+-		//Guest loads might have side effects (I/O registers): keep the ones writing to
+-		//relatives. One writing to an unused temporary was moved by copy propagation.
+-		if((outerStatement.op == OP_GUESTLOAD) && !outerStatement.dst->GetSymbol()->IsTemporary()) continue;
+-
+-		CSymbol* candidate = nullptr;
+-		if(symbolRef && symbolRef->GetSymbol()->IsTemporary())
+-		{
+-			candidate = symbolRef->GetSymbol().get();
+-		}
+-		else if(auto relativeSymbol = dynamic_symbolref_cast(SYM_RELATIVE, symbolRef))
+-		{
+-			assert(symbolRef->IsVersioned());
+-			if(symbolRef->GetVersion() != versionedStatementList.relativeVersions.GetRelativeVersion(relativeSymbol->m_valueLow))
+-			{
+-				candidate = relativeSymbol;
+-			}
+-		}
+-
+-		if(!candidate) continue;
+-
+-		//Look for any possible use of this symbol
+-		bool used = false;
+-		for(auto innerStatementIterator(outerStatementIterator);
+-		    versionedStatementList.statements.end() != innerStatementIterator; ++innerStatementIterator)
+-		{
+-			if(outerStatementIterator == innerStatementIterator) continue;
+-
+-			const auto& innerStatement(*innerStatementIterator);
+-
+-			innerStatement.VisitSources(
+-			    [&](const SymbolRefPtr& innerSymbolRef, bool) {
+-				    if(innerSymbolRef->Equals(symbolRef.get()))
+-				    {
+-					    used = true;
+-					    return;
+-				    }
+-
+-				    auto symbol(innerSymbolRef->GetSymbol());
+-				    if(!symbol->Equals(candidate) && symbol->Aliases(candidate))
+-				    {
+-					    used = true;
+-					    return;
+-				    }
+-			    });
+-
+-			if(used) break;
+-		}
+-
+-		if(!used)
+-		{
+-			//Kill it!
+-			toDelete.push_back(outerStatementIterator);
+-		}
+-	}
+-
+-	for(ToDeleteList::const_iterator deleteIterator(toDelete.begin());
+-	    toDelete.end() != deleteIterator; ++deleteIterator)
+-	{
+-		versionedStatementList.statements.erase(*deleteIterator);
+-		changed = true;
+-	}
+-
+-	return changed;
+-}
+-
+-//Loop register promotion. A loop is a chain of blocks, entered only at its
+-//header (by falling through, or the back jump ending the chain), with side
+-//exits (conditional jumps out). Context symbols the chain uses most get a
+-//register for the whole loop: loaded once in a preheader block, stored on
+-//the way out through each exit (stub blocks), never in the loop itself.
+-//Only symbols guest memory handlers can't touch, and only chains without
+-//calls or external jumps, so nothing else can read the context meanwhile.
+-void CJitter::PromoteLoopRegisters()
+-{
+-	static const bool disabled = (getenv("JITTER_NO_LOOP_PROMOTION") != nullptr); //for A/B testing
+-	if(disabled) return;
+-
+-	unsigned int gprCount = m_codeGen->GetAvailableRegisterCount();
+-	const unsigned int keepForTemporaries = 3;
+-	if(gprCount <= keepForTemporaries) return;
+-	unsigned int maxPromoted = std::min<unsigned int>(gprCount - keepForTemporaries, 4);
+-
+-	for(auto tailIterator = m_basicBlocks.begin(); tailIterator != m_basicBlocks.end(); ++tailIterator)
+-	{
+-		auto& tail = *tailIterator;
+-		if(tail.statements.empty()) continue;
+-		const auto& backJump = tail.statements.back();
+-		if(backJump.op != OP_JMP) continue;
+-		uint32 headerId = backJump.jmpBlock;
+-
+-		auto headerIterator = m_basicBlocks.begin();
+-		for(; headerIterator != tailIterator; ++headerIterator)
+-		{
+-			if(headerIterator->id == headerId) break;
+-		}
+-		if((headerIterator == tailIterator) && (tail.id != headerId)) continue;
+-		if(headerIterator == m_basicBlocks.begin()) continue;
+-
+-		auto chainEnd = std::next(tailIterator);
+-		std::set<uint32> chainIds;
+-		for(auto it = headerIterator; it != chainEnd; ++it) chainIds.insert(it->id);
+-
+-		//Single entry: nothing but the back jump targets the chain
+-		bool ok = true;
+-		for(const auto& block : m_basicBlocks)
+-		{
+-			for(const auto& statement : block.statements)
+-			{
+-				if((statement.op != OP_JMP) && (statement.op != OP_CONDJMP)) continue;
+-				if(chainIds.count(statement.jmpBlock) == 0) continue;
+-				if(&statement != &backJump) ok = false;
+-			}
+-		}
+-		if(!ok) continue;
+-
+-		//No calls or external jumps; jumps only as side exits or the back jump
+-		std::map<uint32, unsigned int> useCounts;
+-		std::vector<CSymbol*> otherRelatives;
+-		for(auto it = headerIterator; ok && (it != chainEnd); ++it)
+-		{
+-			for(const auto& statement : it->statements)
+-			{
+-				switch(statement.op)
+-				{
+-				case OP_CALL:
+-				case OP_PARAM:
+-				case OP_PARAM_RET:
+-				case OP_RETVAL:
+-				case OP_EXTERNJMP:
+-				case OP_EXTERNJMP_DYN:
+-				case OP_GOTO:
+-				case OP_LABEL:
+-					ok = false;
+-					break;
+-				case OP_JMP:
+-					if(&statement != &backJump) ok = false;
+-					break;
+-				default:
+-					break;
+-				}
+-				statement.VisitOperands([&](const SymbolRefPtr& symbolRef, bool) {
+-					auto symbol = symbolRef->GetSymbol().get();
+-					if((symbol->m_type == SYM_RELATIVE) && IsGuestMemorySafeSymbol(symbol))
+-					{
+-						useCounts[symbol->m_valueLow]++;
+-					}
+-					else if(symbol->IsRelative() || (symbol->m_type == SYM_REL_REFERENCE))
+-					{
+-						otherRelatives.push_back(symbol);
+-					}
+-				});
+-			}
+-		}
+-		if(!ok) continue;
+-
+-		//Candidates not overlapped by other accesses (64/128-bit, references...)
+-		std::vector<std::pair<unsigned int, uint32>> candidates;
+-		for(const auto& useCount : useCounts)
+-		{
+-			CSymbol candidate(SYM_RELATIVE, useCount.first, 0);
+-			bool aliased = false;
+-			for(auto* other : otherRelatives)
+-			{
+-				if((other->m_type == SYM_REL_REFERENCE) || candidate.Aliases(other)) aliased = true;
+-			}
+-			if(!aliased) candidates.push_back(std::make_pair(useCount.second, useCount.first));
+-		}
+-		if(candidates.empty()) continue;
+-		std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
+-			return (a.first != b.first) ? (a.first > b.first) : (a.second < b.second);
+-		});
+-		if(candidates.size() > maxPromoted) candidates.resize(maxPromoted);
+-
+-		//Highest register ids, so the block allocator keeps the low ones
+-		std::map<uint32, unsigned int> promoted; //offset -> register id
+-		uint32 reservedMask = 0;
+-		for(unsigned int i = 0; i < candidates.size(); i++)
+-		{
+-			unsigned int registerId = gprCount - 1 - i;
+-			promoted[candidates[i].second] = registerId;
+-			reservedMask |= (1 << registerId);
+-		}
+-
+-		//Rewrite the chain; remember what it writes
+-		std::set<uint32> defined;
+-		for(auto it = headerIterator; it != chainEnd; ++it)
+-		{
+-			auto& block = *it;
+-			block.reservedRegisters |= reservedMask;
+-			for(auto& statement : block.statements)
+-			{
+-				if(statement.dst)
+-				{
+-					auto dstSymbol = statement.dst->GetSymbol();
+-					if((dstSymbol->m_type == SYM_RELATIVE) && promoted.count(dstSymbol->m_valueLow)) defined.insert(dstSymbol->m_valueLow);
+-				}
+-				statement.VisitOperands([&](SymbolRefPtr& symbolRef, bool) {
+-					auto symbol = symbolRef->GetSymbol();
+-					if(symbol->m_type != SYM_RELATIVE) return;
+-					auto promotedIterator = promoted.find(symbol->m_valueLow);
+-					if(promotedIterator == promoted.end()) return;
+-					symbolRef = MakeSymbolRef(MakeSymbol(&block, SYM_REGISTER, promotedIterator->second, 0));
+-				});
+-			}
+-		}
+-
+-		//Preheader: load everything once
+-		{
+-			BASIC_BLOCK preheader;
+-			preheader.id = m_nextBlockId++;
+-			preheader.optimized = true;
+-			preheader.reservedRegisters = reservedMask;
+-			for(const auto& promotedPair : promoted)
+-			{
+-				STATEMENT statement;
+-				statement.op = OP_MOV;
+-				statement.dst = MakeSymbolRef(MakeSymbol(&preheader, SYM_REGISTER, promotedPair.second, 0));
+-				statement.src1 = MakeSymbolRef(MakeSymbol(&preheader, SYM_RELATIVE, promotedPair.first, 0));
+-				preheader.statements.push_back(statement);
+-			}
+-			m_basicBlocks.insert(headerIterator, std::move(preheader));
+-		}
+-
+-		//Exits: side exits go through stubs that store what the loop wrote. The
+-		//stubs follow the tail, which ends with the back jump (no fall through).
+-		auto stubPosition = chainEnd;
+-		for(auto it = headerIterator; it != chainEnd; ++it)
+-		{
+-			for(auto& statement : it->statements)
+-			{
+-				if(statement.op != OP_CONDJMP) continue;
+-				if(chainIds.count(statement.jmpBlock) != 0) continue;
+-				BASIC_BLOCK stub;
+-				stub.id = m_nextBlockId++;
+-				stub.optimized = true;
+-				stub.hasJumpRef = true;
+-				stub.reservedRegisters = reservedMask;
+-				for(auto offset : defined)
+-				{
+-					STATEMENT store;
+-					store.op = OP_MOV;
+-					store.dst = MakeSymbolRef(MakeSymbol(&stub, SYM_RELATIVE, offset, 0));
+-					store.src1 = MakeSymbolRef(MakeSymbol(&stub, SYM_REGISTER, promoted[offset], 0));
+-					stub.statements.push_back(store);
+-				}
+-				STATEMENT jump;
+-				jump.op = OP_JMP;
+-				jump.jmpBlock = statement.jmpBlock;
+-				stub.statements.push_back(jump);
+-				statement.jmpBlock = stub.id;
+-				m_basicBlocks.insert(stubPosition, std::move(stub));
+-			}
+-		}
+-		//One loop per function (blocks loop on themselves)
+-		return;
+-	}
+-}
+-
+-//"t = op(...); ...; rel = t" -> "rel = op(...); ...": the operation writes the
+-//context symbol directly (later uses of t read rel), which saves a copy once
+-//registers are allocated. Only when nothing in between touches rel and
+-//nothing can observe the context (calls, guest memory ops, jumps).
+-void CJitter::CoalesceIntoRelatives(BASIC_BLOCK& basicBlock)
+-{
+-	static const bool disabled = (getenv("JITTER_NO_COALESCE_REL") != nullptr); //for A/B testing
+-	if(disabled) return;
+-	auto& statements = basicBlock.statements;
+-	auto isSimpleOp = [](OPERATION op) {
+-		switch(op)
+-		{
+-		case OP_ADD:
+-		case OP_SUB:
+-		case OP_AND:
+-		case OP_OR:
+-		case OP_XOR:
+-		case OP_NOT:
+-		case OP_SRA:
+-		case OP_SRL:
+-		case OP_SLL:
+-		case OP_CMP:
+-		case OP_SELECT:
+-		case OP_CMPSELECT_P2:
+-		case OP_LZC:
+-			return true;
+-		default:
+-			return false;
+-		}
+-	};
+-	auto isBarrier = [](const STATEMENT& statement) {
+-		switch(statement.op)
+-		{
+-		case OP_CALL:
+-		case OP_PARAM:
+-		case OP_PARAM_RET:
+-		case OP_RETVAL:
+-		case OP_LABEL:
+-		case OP_JMP:
+-		case OP_CONDJMP:
+-		case OP_GOTO:
+-		case OP_EXTERNJMP:
+-		case OP_EXTERNJMP_DYN:
+-		case OP_GUESTLOAD:
+-		case OP_GUESTSTORE:
+-		case OP_STOREATREF:
+-		case OP_STORE8ATREF:
+-		case OP_STORE16ATREF:
+-		case OP_MD_STOREATREF_MASKED:
+-			return true;
+-		default:
+-			return false;
+-		}
+-	};
+-	auto touches = [](const STATEMENT& statement, CSymbol* symbol) {
+-		bool result = false;
+-		statement.VisitOperands([&](const SymbolRefPtr& symbolRef, bool) {
+-			auto other = symbolRef->GetSymbol().get();
+-			if(other->Equals(symbol) || other->Aliases(symbol)) result = true;
+-		});
+-		return result;
+-	};
+-
+-	for(auto copyIterator = statements.begin(); copyIterator != statements.end();)
+-	{
+-		auto& copy = *copyIterator;
+-		if((copy.op != OP_MOV) || !copy.dst || !copy.src1)
+-		{
+-			++copyIterator;
+-			continue;
+-		}
+-		auto rel = copy.dst->GetSymbol();
+-		auto tmp = copy.src1->GetSymbol();
+-		if((rel->m_type != SYM_RELATIVE) || (tmp->m_type != SYM_TEMPORARY))
+-		{
+-			++copyIterator;
+-			continue;
+-		}
+-
+-		//The single definition of tmp, before the copy, with nothing in between that
+-		//touches rel or could observe the context
+-		auto defIterator = statements.end();
+-		bool ok = true;
+-		for(auto it = copyIterator; it != statements.begin();)
+-		{
+-			--it;
+-			const auto& statement = *it;
+-			if(statement.dst && statement.dst->GetSymbol()->Equals(tmp.get()))
+-			{
+-				defIterator = it;
+-				break;
+-			}
+-			if(isBarrier(statement) || touches(statement, rel.get()))
+-			{
+-				ok = false;
+-				break;
+-			}
+-		}
+-		if(!ok || (defIterator == statements.end()) || !isSimpleOp(defIterator->op))
+-		{
+-			++copyIterator;
+-			continue;
+-		}
+-		//No other definition of tmp in the block
+-		unsigned int defCount = 0;
+-		for(const auto& statement : statements)
+-		{
+-			if(statement.dst && statement.dst->GetSymbol()->Equals(tmp.get())) defCount++;
+-		}
+-		if(defCount != 1)
+-		{
+-			++copyIterator;
+-			continue;
+-		}
+-		//Uses of tmp after the copy must come before rel changes again
+-		bool relChanged = false;
+-		for(auto it = std::next(copyIterator); it != statements.end(); ++it)
+-		{
+-			const auto& statement = *it;
+-			bool usesTmp = false;
+-			statement.VisitSources([&](const SymbolRefPtr& src, bool) {
+-				if(src->GetSymbol()->Equals(tmp.get())) usesTmp = true;
+-			});
+-			if(usesTmp && relChanged)
+-			{
+-				ok = false;
+-				break;
+-			}
+-			if(statement.dst)
+-			{
+-				auto dstSymbol = statement.dst->GetSymbol();
+-				if(dstSymbol->Equals(rel.get()) || dstSymbol->Aliases(rel.get())) relChanged = true;
+-			}
+-			if(isBarrier(statement)) relChanged = true;
+-		}
+-		if(!ok)
+-		{
+-			++copyIterator;
+-			continue;
+-		}
+-
+-		defIterator->dst = MakeSymbolRef(rel);
+-		for(auto it = std::next(defIterator); it != statements.end(); ++it)
+-		{
+-			it->VisitSources([&](SymbolRefPtr& src, bool) {
+-				if(src->GetSymbol()->Equals(tmp.get())) src = MakeSymbolRef(rel);
+-			});
+-		}
+-		copyIterator = statements.erase(copyIterator);
+-	}
+-}
+-
+-void CJitter::CoalesceTemporaries(BASIC_BLOCK& basicBlock)
+-{
+-	typedef std::vector<CSymbol*> EncounteredTempList;
+-	EncounteredTempList encounteredTemps;
+-
+-	for(auto outerStatementIterator(basicBlock.statements.begin());
+-	    basicBlock.statements.end() != outerStatementIterator; ++outerStatementIterator)
+-	{
+-		auto& outerStatement(*outerStatementIterator);
+-
+-		if(!outerStatement.dst) continue;
+-		if(!outerStatement.dst->GetSymbol()->IsTemporary()) continue;
+-
+-		auto tempSymbol = outerStatement.dst->GetSymbol().get();
+-		CSymbol* candidate = nullptr;
+-
+-		//Check for a possible replacement
+-		for(auto* encounteredTemp : encounteredTemps)
+-		{
+-			if(encounteredTemp->m_type != tempSymbol->m_type) continue;
+-
+-			//Look for any possible use of this symbol
+-			bool used = false;
+-
+-			for(auto innerStatementIterator(outerStatementIterator);
+-			    basicBlock.statements.end() != innerStatementIterator; ++innerStatementIterator)
+-			{
+-				if(outerStatementIterator == innerStatementIterator) continue;
+-
+-				const auto& innerStatement(*innerStatementIterator);
+-				innerStatement.VisitOperands(
+-				    [&](const SymbolRefPtr& symbolRef, bool) {
+-					    auto symbol = symbolRef->GetSymbol();
+-					    if(symbol->Equals(encounteredTemp))
+-					    {
+-						    used = true;
+-					    }
+-				    });
+-
+-				if(used) break;
+-			}
+-
+-			if(!used)
+-			{
+-				candidate = encounteredTemp;
+-				break;
+-			}
+-		}
+-
+-		if(candidate == nullptr)
+-		{
+-			encounteredTemps.push_back(tempSymbol);
+-		}
+-		else
+-		{
+-			auto candidatePtr = MakeSymbol(candidate->m_type, candidate->m_valueLow);
+-
+-			outerStatement.dst = MakeSymbolRef(candidatePtr);
+-
+-			//Replace all occurences of this temp with the candidate
+-			for(auto innerStatementIterator(outerStatementIterator);
+-			    basicBlock.statements.end() != innerStatementIterator; ++innerStatementIterator)
+-			{
+-				if(outerStatementIterator == innerStatementIterator) continue;
+-
+-				auto& innerStatement(*innerStatementIterator);
+-
+-				if(innerStatement.dst)
+-				{
+-					auto symbol(innerStatement.dst->GetSymbol());
+-					if(symbol->Equals(tempSymbol))
+-					{
+-						innerStatement.dst = MakeSymbolRef(candidatePtr);
+-					}
+-				}
+-				if(innerStatement.src1)
+-				{
+-					auto symbol(innerStatement.src1->GetSymbol());
+-					if(symbol->Equals(tempSymbol))
+-					{
+-						innerStatement.src1 = MakeSymbolRef(candidatePtr);
+-					}
+-				}
+-				if(innerStatement.src2)
+-				{
+-					auto symbol(innerStatement.src2->GetSymbol());
+-					if(symbol->Equals(tempSymbol))
+-					{
+-						innerStatement.src2 = MakeSymbolRef(candidatePtr);
+-					}
+-				}
+-				if(innerStatement.src3)
+-				{
+-					auto symbol(innerStatement.src3->GetSymbol());
+-					if(symbol->Equals(tempSymbol))
+-					{
+-						innerStatement.src3 = MakeSymbolRef(candidatePtr);
+-					}
+-				}
+-			}
+-		}
+-	}
+-}
+-
+-void CJitter::RemoveSelfAssignments(BASIC_BLOCK& basicBlock)
+-{
+-	for(StatementList::iterator outerStatementIterator(basicBlock.statements.begin());
+-	    basicBlock.statements.end() != outerStatementIterator;)
+-	{
+-		STATEMENT& outerStatement(*outerStatementIterator);
+-
+-		if(outerStatement.op == OP_MOV && outerStatement.dst->Equals(outerStatement.src1.get()))
+-		{
+-			outerStatementIterator = basicBlock.statements.erase(outerStatementIterator);
+-		}
+-		else
+-		{
+-			++outerStatementIterator;
+-		}
+-	}
+-}
+-
+-void CJitter::PruneSymbols(BASIC_BLOCK& basicBlock) const
+-{
+-	auto& symbolTable(basicBlock.symbolTable);
+-
+-	SymbolUseCountMap symbolUseCount;
+-	for(const auto& statement : basicBlock.statements)
+-	{
+-		statement.VisitOperands(
+-		    [&](const SymbolRefPtr& symbolRef, bool) {
+-			    const auto& symbol = symbolRef->GetSymbol();
+-			    symbolUseCount[symbol.get()]++;
+-		    });
+-	}
+-
+-	for(auto symbolIterator(std::begin(symbolTable.GetSymbols()));
+-	    symbolIterator != std::end(symbolTable.GetSymbols());)
+-	{
+-		const auto& symbol(*symbolIterator);
+-		if(symbolUseCount.find(symbol.get()) == std::end(symbolUseCount))
+-		{
+-			symbolIterator = symbolTable.RemoveSymbol(symbolIterator);
+-		}
+-		else
+-		{
+-			symbolIterator++;
+-		}
+-	}
+-}
+-
+-unsigned int CJitter::AllocateStack(BASIC_BLOCK& basicBlock)
+-{
+-	unsigned int stackAlloc = 0;
+-	for(const auto& symbol : basicBlock.symbolTable.GetSymbols())
+-	{
+-		if((symbol->m_type == SYM_TEMPORARY) || (symbol->m_type == SYM_FP_TEMPORARY32))
+-		{
+-			symbol->m_stackLocation = stackAlloc;
+-			stackAlloc += 4;
+-		}
+-		else if(symbol->m_type == SYM_TMP_REFERENCE)
+-		{
+-			size_t symbolSize = sizeof(void*);
+-			size_t symbolMask = symbolSize - 1;
+-			if((stackAlloc & symbolMask) != 0)
+-			{
+-				stackAlloc += (symbolSize - (stackAlloc & symbolMask));
+-			}
+-			assert((stackAlloc & symbolMask) == 0);
+-			symbol->m_stackLocation = stackAlloc;
+-			stackAlloc += symbolSize;
+-		}
+-		else if(symbol->m_type == SYM_TEMPORARY64)
+-		{
+-			if((stackAlloc & 7) != 0)
+-			{
+-				stackAlloc += (8 - (stackAlloc & 7));
+-			}
+-			assert((stackAlloc & 7) == 0);
+-			symbol->m_stackLocation = stackAlloc;
+-			stackAlloc += 8;
+-		}
+-		else if(symbol->m_type == SYM_TEMPORARY128)
+-		{
+-			if((stackAlloc & 15) != 0)
+-			{
+-				stackAlloc += (16 - (stackAlloc & 15));
+-			}
+-			assert((stackAlloc & 15) == 0);
+-			symbol->m_stackLocation = stackAlloc;
+-			stackAlloc += 16;
+-		}
+-		else if(symbol->m_type == SYM_TEMPORARY256)
+-		{
+-			if((stackAlloc & 31) != 0)
+-			{
+-				stackAlloc += (32 - (stackAlloc & 31));
+-			}
+-			assert((stackAlloc & 31) == 0);
+-			symbol->m_stackLocation = stackAlloc;
+-			stackAlloc += 32;
+-		}
+-	}
+-	return stackAlloc;
+-}
+-
+-void CJitter::NormalizeStatements(BASIC_BLOCK& basicBlock)
+-{
+-	//Reorganize the commutative statements
+-	//1. Always have registers as the first operand
+-	//2. Always have constants as the last operand
+-
+-	for(auto& statement : basicBlock.statements)
+-	{
+-		bool isCommutative = false;
+-		bool conditionSwapRequired = false;
+-
+-		switch(statement.op)
+-		{
+-		case OP_ADD:
+-		case OP_ADD64:
+-		case OP_AND:
+-		case OP_AND64:
+-		case OP_OR:
+-		case OP_XOR:
+-		case OP_MUL:
+-		case OP_MULS:
+-		case OP_MD_AND:
+-		case OP_MD_OR:
+-		case OP_MD_XOR:
+-		case OP_MD_ADD_B:
+-		case OP_MD_ADD_H:
+-		case OP_MD_ADD_W:
+-		case OP_MD_ADDSS_H:
+-		case OP_MD_ADDSS_W:
+-		case OP_MD_ADDUS_B:
+-		case OP_MD_ADDUS_W:
+-		case OP_MD_CMPEQ_B:
+-		case OP_MD_CMPEQ_H:
+-		case OP_MD_CMPEQ_W:
+-		case OP_MD_MIN_H:
+-		case OP_MD_MIN_W:
+-		case OP_MD_MAX_H:
+-		case OP_MD_MAX_W:
+-		case OP_MD_ADD_S:
+-		case OP_MD_MUL_S:
+-		case OP_MD_MIN_S:
+-		case OP_MD_MAX_S:
+-			isCommutative = true;
+-			break;
+-		case OP_CMP:
+-		case OP_CMP64:
+-		case OP_CONDJMP:
+-			isCommutative = true;
+-			conditionSwapRequired = true;
+-			break;
+-		default:
+-			isCommutative = false;
+-			break;
+-		}
+-
+-		if(!isCommutative) continue;
+-
+-		bool swapped = false;
+-
+-		//Check if constant operand is at the beginning and swap if it is the case
+-		{
+-			bool src1cst = statement.src1->GetSymbol()->IsConstant();
+-			bool src2cst = statement.src2->GetSymbol()->IsConstant();
+-
+-			if(src1cst && !src2cst)
+-			{
+-				std::swap(statement.src1, statement.src2);
+-				swapped = true;
+-			}
+-		}
+-
+-		//Check if register operand is at the end and swap if it is the case
+-		{
+-			bool dstreg = statement.dst && statement.dst->GetSymbol()->IsRegister();
+-			bool src1reg = statement.src1->GetSymbol()->IsRegister();
+-			bool src2reg = statement.src2->GetSymbol()->IsRegister();
+-
+-			if(!src1reg && src2reg)
+-			{
+-				std::swap(statement.src1, statement.src2);
+-				swapped = true;
+-			}
+-			else if(dstreg && src1reg && src2reg &&
+-			        statement.dst->GetSymbol()->Equals(statement.src2->GetSymbol().get()))
+-			{
+-				//If all operands are registers and dst is equal to src2, swap to make dst and src2 side by side
+-				std::swap(statement.src1, statement.src2);
+-				swapped = true;
+-			}
+-		}
+-
+-		if(swapped && conditionSwapRequired)
+-		{
+-			switch(statement.jmpCondition)
+-			{
+-			case CONDITION_EQ:
+-			case CONDITION_NE:
+-				break;
+-			case CONDITION_BL:
+-				statement.jmpCondition = CONDITION_AB;
+-				break;
+-			case CONDITION_BE:
+-				statement.jmpCondition = CONDITION_AE;
+-				break;
+-			case CONDITION_AB:
+-				statement.jmpCondition = CONDITION_BL;
+-				break;
+-			case CONDITION_AE:
+-				statement.jmpCondition = CONDITION_BE;
+-				break;
+-			case CONDITION_LT:
+-				statement.jmpCondition = CONDITION_GT;
+-				break;
+-			case CONDITION_LE:
+-				statement.jmpCondition = CONDITION_GE;
+-				break;
+-			case CONDITION_GT:
+-				statement.jmpCondition = CONDITION_LT;
+-				break;
+-			case CONDITION_GE:
+-				statement.jmpCondition = CONDITION_LE;
+-				break;
+-			default:
+-				assert(0);
+-				break;
+-			}
+-		}
+-	}
+-}
++#include <assert.h>
++#include <vector>
++#include <algorithm>
++#include "Jitter.h"
++#include <cstdlib>
++#include "BitManip.h"
++
++#ifdef _DEBUG
++//#define DUMP_STATEMENTS
++#endif
++
++#ifdef DUMP_STATEMENTS
++#include <iostream>
++#endif
++
++using namespace Jitter;
++
++unsigned int CJitter::CRelativeVersionManager::GetRelativeVersion(uint32 relativeId)
++{
++	RelativeVersionMap::const_iterator versionIterator(m_relativeVersions.find(relativeId));
++	if(versionIterator == m_relativeVersions.end()) return 0;
++	return versionIterator->second;
++}
++
++unsigned int CJitter::CRelativeVersionManager::IncrementRelativeVersion(uint32 relativeId)
++{
++	unsigned int nextVersion = GetRelativeVersion(relativeId) + 1;
++	m_relativeVersions[relativeId] = nextVersion;
++	return nextVersion;
++}
++
++CJitter::VERSIONED_STATEMENT_LIST CJitter::GenerateVersionedStatementList(const StatementList& statements)
++{
++	VERSIONED_STATEMENT_LIST result;
++
++	struct ReplaceUse
++	{
++		void operator()(SymbolRefPtr& symbolRef, CRelativeVersionManager& relativeVersions) const
++		{
++			if(CSymbol* symbol = dynamic_symbolref_cast(SYM_RELATIVE, symbolRef))
++			{
++				unsigned int currentVersion = relativeVersions.GetRelativeVersion(symbol->m_valueLow);
++				symbolRef = MakeSymbolRefPtr(symbolRef->GetSymbol(), currentVersion);
++			}
++			else if(CSymbol* symbol = dynamic_symbolref_cast(SYM_REL_REFERENCE, symbolRef))
++			{
++				unsigned int currentVersion = relativeVersions.GetRelativeVersion(symbol->m_valueLow);
++				symbolRef = MakeSymbolRefPtr(symbolRef->GetSymbol(), currentVersion);
++			}
++			else if(CSymbol* symbol = dynamic_symbolref_cast(SYM_RELATIVE64, symbolRef))
++			{
++				//Since this symbol can be aliased, use the sum of the versions of all
++				//of its parts.
++				unsigned int currentVersion =
++				    relativeVersions.GetRelativeVersion(symbol->m_valueLow + 0x0) +
++				    relativeVersions.GetRelativeVersion(symbol->m_valueLow + 0x4);
++				symbolRef = MakeSymbolRefPtr(symbolRef->GetSymbol(), currentVersion);
++			}
++			else if(CSymbol* symbol = dynamic_symbolref_cast(SYM_FP_RELATIVE32, symbolRef))
++			{
++				unsigned int currentVersion = relativeVersions.GetRelativeVersion(symbol->m_valueLow);
++				symbolRef = MakeSymbolRefPtr(symbolRef->GetSymbol(), currentVersion);
++			}
++			else if(CSymbol* symbol = dynamic_symbolref_cast(SYM_RELATIVE128, symbolRef))
++			{
++				//Since this symbol can be aliased, use the sum of the versions of all
++				//of its parts.
++				unsigned int currentVersion =
++				    relativeVersions.GetRelativeVersion(symbol->m_valueLow + 0x0) +
++				    relativeVersions.GetRelativeVersion(symbol->m_valueLow + 0x4) +
++				    relativeVersions.GetRelativeVersion(symbol->m_valueLow + 0x8) +
++				    relativeVersions.GetRelativeVersion(symbol->m_valueLow + 0xC);
++				symbolRef = MakeSymbolRefPtr(symbolRef->GetSymbol(), currentVersion);
++			}
++		}
++	};
++
++	for(auto newStatement : statements)
++	{
++		ReplaceUse()(newStatement.src1, result.relativeVersions);
++		ReplaceUse()(newStatement.src2, result.relativeVersions);
++		ReplaceUse()(newStatement.src3, result.relativeVersions);
++
++		if(auto dst = dynamic_symbolref_cast(SYM_RELATIVE, newStatement.dst))
++		{
++			unsigned int nextVersion = result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow);
++			newStatement.dst = MakeSymbolRefPtr(newStatement.dst->GetSymbol(), nextVersion);
++		}
++		//Increment relative versions to prevent some optimization problems
++		else if(auto dst = dynamic_symbolref_cast(SYM_REL_REFERENCE, newStatement.dst))
++		{
++			result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow);
++		}
++		else if(auto dst = dynamic_symbolref_cast(SYM_FP_RELATIVE32, newStatement.dst))
++		{
++			result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow);
++		}
++		else if(auto dst = dynamic_symbolref_cast(SYM_RELATIVE64, newStatement.dst))
++		{
++			result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow + 0);
++			result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow + 4);
++		}
++		else if(auto dst = dynamic_symbolref_cast(SYM_RELATIVE128, newStatement.dst))
++		{
++			uint8 mask = 0xF;
++			if(newStatement.op == OP_MD_MOV_MASKED)
++			{
++				mask = static_cast<uint8>(newStatement.jmpCondition);
++			}
++
++			result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow + 0);
++			if(mask & 0x02) result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow + 4);
++			if(mask & 0x04) result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow + 8);
++			if(mask & 0x08) result.relativeVersions.IncrementRelativeVersion(dst->m_valueLow + 12);
++		}
++
++		result.statements.push_back(newStatement);
++	}
++
++	return result;
++}
++
++StatementList CJitter::CollapseVersionedStatementList(const VERSIONED_STATEMENT_LIST& statements)
++{
++	StatementList result;
++	for(auto newStatement : statements.statements)
++	{
++		newStatement.VisitOperands(
++		    [](SymbolRefPtr& symbolRef, bool) {
++			    if(symbolRef->IsVersioned())
++			    {
++				    symbolRef = MakeSymbolRefPtr(symbolRef->GetSymbol());
++			    }
++		    });
++
++		result.push_back(newStatement);
++	}
++	return result;
++}
++
++void CJitter::Compile()
++{
++	auto nowUs = []() {
++		return static_cast<uint64>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
++	};
++	uint64 startUs = nowUs();
++	{
++		uint64 statementCount = 0;
++		for(const auto& basicBlock : m_basicBlocks) statementCount += basicBlock.statements.size();
++		g_compileStats.statements.fetch_add(statementCount, std::memory_order_relaxed);
++	}
++
++	while(1)
++	{
++		for(auto& basicBlock : m_basicBlocks)
++		{
++			if(!basicBlock.optimized)
++			{
++				m_currentBlock = &basicBlock;
++
++				//DumpStatementList(m_currentBlock->statements);
++
++				//These don't need to be run more than once
++				ClampingElimination(basicBlock.statements);
++				if(m_codeGenSupportsCmpSelect)
++				{
++					MergeCmpSelectOps(basicBlock.statements);
++				}
++
++				auto versionedStatements = GenerateVersionedStatementList(basicBlock.statements);
++
++				while(1)
++				{
++					bool dirty = false;
++					dirty |= ConstantPropagation(versionedStatements.statements);
++					dirty |= ConstantFolding(versionedStatements.statements);
++					dirty |= ReorderAdd(versionedStatements.statements);
++					dirty |= CopyPropagation(versionedStatements.statements);
++					dirty |= DeadcodeElimination(versionedStatements);
++					dirty |= CommonExpressionElimination(versionedStatements);
++
++					if(!dirty) break;
++				}
++
++				basicBlock.statements = CollapseVersionedStatementList(versionedStatements);
++				FixFlowControl(basicBlock.statements);
++				basicBlock.optimized = true;
++			}
++		}
++
++		bool dirty = false;
++		dirty |= PruneBlocks();
++		dirty |= MergeBlocks();
++
++		if(!dirty) break;
++	}
++
++	PromoteLoopRegisters();
++
++	uint64 optimizedUs = nowUs();
++	g_compileStats.optimizeUs.fetch_add(optimizedUs - startUs, std::memory_order_relaxed);
++
++	unsigned int stackSize = 0;
++
++	//Allocate registers
++	for(auto& basicBlock : m_basicBlocks)
++	{
++		m_currentBlock = &basicBlock;
++
++		CoalesceIntoRelatives(basicBlock);
++		CoalesceTemporaries(basicBlock);
++		RemoveSelfAssignments(basicBlock);
++		PruneSymbols(basicBlock);
++
++		AllocateRegisters(basicBlock);
++		unsigned int blockStackSize = AllocateStack(basicBlock);
++		stackSize = std::max<unsigned int>(stackSize, blockStackSize);
++
++		NormalizeStatements(basicBlock);
++	}
++
++	uint64 allocatedUs = nowUs();
++	g_compileStats.allocateUs.fetch_add(allocatedUs - optimizedUs, std::memory_order_relaxed);
++
++	auto result = ConcatBlocks(m_basicBlocks);
++
++#ifdef DUMP_STATEMENTS
++	DumpStatementList(result.statements);
++	std::cout << std::endl;
++#endif
++
++	m_codeGen->GenerateCode(result.statements, stackSize);
++	g_compileStats.generateUs.fetch_add(nowUs() - allocatedUs, std::memory_order_relaxed);
++
++	m_labels.clear();
++}
++
++void CJitter::InsertStatement(const STATEMENT& statement)
++{
++	m_currentBlock->statements.push_back(statement);
++}
++
++SymbolPtr CJitter::MakeSymbol(SYM_TYPE type, uint32 value)
++{
++	return MakeSymbol(m_currentBlock, type, value, 0);
++}
++
++SymbolPtr CJitter::MakeConstantPtr(uintptr_t value)
++{
++#if(UINTPTR_MAX == UINT32_MAX)
++	uint32 valueLo = static_cast<uint32>(value);
++	return MakeSymbol(m_currentBlock, SYM_CONSTANTPTR, valueLo, 0);
++#elif(UINTPTR_MAX == UINT64_MAX)
++	uint32 valueLo = static_cast<uint32>(value);
++	uint32 valueHi = static_cast<uint32>(value >> 32);
++	return MakeSymbol(m_currentBlock, SYM_CONSTANTPTR, valueLo, valueHi);
++#else
++	static_assert(false, "Unsupported pointer size.");
++#endif
++}
++
++SymbolPtr CJitter::MakeConstant64(uint64 value)
++{
++	uint32 valueLo = static_cast<uint32>(value);
++	uint32 valueHi = static_cast<uint32>(value >> 32);
++	return MakeSymbol(m_currentBlock, SYM_CONSTANT64, valueLo, valueHi);
++}
++
++SymbolPtr CJitter::MakeSymbol(BASIC_BLOCK* basicBlock, SYM_TYPE type, uint32 valueLo, uint32 valueHi)
++{
++	CSymbolTable& currentSymbolTable(basicBlock->symbolTable);
++	return currentSymbolTable.MakeSymbol(type, valueLo, valueHi);
++}
++
++SymbolRefPtr CJitter::MakeSymbolRef(const SymbolPtr& symbol)
++{
++	return MakeSymbolRefPtr(symbol);
++}
++
++int CJitter::GetSymbolSize(const SymbolRefPtr& symbolRef)
++{
++	return symbolRef->GetSymbol().get()->GetSize();
++}
++
++bool CJitter::FoldConstantOperation(STATEMENT& statement)
++{
++	auto src1cst = dynamic_symbolref_cast(SYM_CONSTANT, statement.src1);
++	auto src2cst = dynamic_symbolref_cast(SYM_CONSTANT, statement.src2);
++	auto src3cst = dynamic_symbolref_cast(SYM_CONSTANT, statement.src3);
++
++	//Nothing we can do
++	if(!src1cst && !src2cst && !src3cst) return false;
++
++	bool changed = false;
++
++	if(statement.op == OP_ADD)
++	{
++		if(src1cst && src2cst)
++		{
++			//Adding 2 constants
++			uint32 result = src1cst->m_valueLow + src2cst->m_valueLow;
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
++			statement.src2.reset();
++			changed = true;
++		}
++		else if(src1cst && src1cst->m_valueLow == 0)
++		{
++			statement.op = OP_MOV;
++			statement.src1 = statement.src2;
++			statement.src2.reset();
++			changed = true;
++		}
++		else if(src2cst && src2cst->m_valueLow == 0)
++		{
++			statement.op = OP_MOV;
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_SUB)
++	{
++		if(src1cst && src2cst)
++		{
++			//2 constants
++			uint32 result = src1cst->m_valueLow - src2cst->m_valueLow;
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
++			statement.src2.reset();
++			changed = true;
++		}
++		else if(src2cst && src2cst->m_valueLow == 0)
++		{
++			statement.op = OP_MOV;
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_AND)
++	{
++		if(src1cst && src2cst)
++		{
++			//2 constants
++			uint32 result = src1cst->m_valueLow & src2cst->m_valueLow;
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
++			statement.src2.reset();
++			changed = true;
++		}
++		else if(
++		    (src1cst && src1cst->m_valueLow == 0) ||
++		    (src2cst && src2cst->m_valueLow == 0))
++		{
++			//Anding with zero
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, 0));
++			statement.src2.reset();
++			changed = true;
++		}
++		else if(src2cst && src2cst->m_valueLow == ~0)
++		{
++			//Anding with ~0
++			statement.op = OP_MOV;
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_OR)
++	{
++		if(src1cst && src2cst)
++		{
++			uint32 result = src1cst->m_valueLow | src2cst->m_valueLow;
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
++			statement.src2.reset();
++			changed = true;
++		}
++		else if(src1cst && src1cst->m_valueLow == 0)
++		{
++			//Oring with zero
++			statement.op = OP_MOV;
++			std::swap(statement.src1, statement.src2);
++			statement.src2.reset();
++			changed = true;
++		}
++		else if(src2cst && src2cst->m_valueLow == 0)
++		{
++			//Oring with zero
++			statement.op = OP_MOV;
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_XOR)
++	{
++		if(src1cst && src2cst)
++		{
++			uint32 result = src1cst->m_valueLow ^ src2cst->m_valueLow;
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
++			statement.src2.reset();
++			changed = true;
++		}
++		else if(src1cst && src1cst->m_valueLow == 0)
++		{
++			//Xoring with zero
++			statement.op = OP_MOV;
++			std::swap(statement.src1, statement.src2);
++			statement.src2.reset();
++			changed = true;
++		}
++		else if(src2cst && src2cst->m_valueLow == 0)
++		{
++			//Xoring with zero
++			statement.op = OP_MOV;
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_NOT)
++	{
++		if(src1cst)
++		{
++			uint32 result = ~src1cst->m_valueLow;
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_SRA)
++	{
++		if(src1cst && src2cst)
++		{
++			uint32 result = static_cast<int32>(src1cst->m_valueLow) >> static_cast<int32>(src2cst->m_valueLow & 0x1F);
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
++			statement.src2.reset();
++			changed = true;
++		}
++		else if(src2cst && ((src2cst->m_valueLow & 0x1F) == 0))
++		{
++			statement.op = OP_MOV;
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_SRL)
++	{
++		if(src1cst && src2cst)
++		{
++			uint32 result = src1cst->m_valueLow >> (src2cst->m_valueLow & 0x1F);
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
++			statement.src2.reset();
++			changed = true;
++		}
++		else if(src2cst && ((src2cst->m_valueLow & 0x1F) == 0))
++		{
++			statement.op = OP_MOV;
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_SLL)
++	{
++		if(src1cst && src2cst)
++		{
++			uint32 result = src1cst->m_valueLow << (src2cst->m_valueLow & 0x1F);
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
++			statement.src2.reset();
++			changed = true;
++		}
++		else if(src2cst && ((src2cst->m_valueLow & 0x1F) == 0))
++		{
++			statement.op = OP_MOV;
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_LZC)
++	{
++		if(src1cst)
++		{
++			uint32 result = src1cst->m_valueLow;
++			if(result & 0x80000000) result = ~result;
++			if(result == 0)
++			{
++				result = 0x1F;
++			}
++			else
++			{
++				result = __builtin_clz(result) - 1;
++			}
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_MERGETO64)
++	{
++		if(src1cst && src2cst)
++		{
++			uint64 result = static_cast<uint64>(src1cst->m_valueLow) | (static_cast<uint64>(src2cst->m_valueLow) << 32);
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeConstant64(result));
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_MUL)
++	{
++		if(src1cst && src2cst)
++		{
++			uint64 result = static_cast<uint64>(src1cst->m_valueLow) * static_cast<uint64>(src2cst->m_valueLow);
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeConstant64(result));
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_MULS)
++	{
++		if(src1cst && src2cst)
++		{
++			int64 result = static_cast<int64>(static_cast<int32>(src1cst->m_valueLow)) * static_cast<int64>(static_cast<int32>(src2cst->m_valueLow));
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeConstant64(static_cast<uint64>(result)));
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_DIV)
++	{
++		if(src1cst && src2cst)
++		{
++			uint64 result = 0;
++			if(src2cst->m_valueLow != 0)
++			{
++				uint32 quotient = src1cst->m_valueLow / src2cst->m_valueLow;
++				uint32 remainder = src1cst->m_valueLow % src2cst->m_valueLow;
++				result = static_cast<uint64>(quotient) | (static_cast<uint64>(remainder) << 32);
++			}
++			else
++			{
++				result = ~0ULL;
++			}
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeConstant64(result));
++			statement.src2.reset();
++			changed = true;
++		}
++		//else if(src2cst && IsPowerOfTwo(src2cst->m_valueLow))
++		//{
++		//	statement.op = OP_SRL;
++		//	src2cst->m_valueLow = GetPowerOf2(src2cst->m_valueLow);
++		//}
++	}
++	else if(statement.op == OP_DIVS)
++	{
++		if(src1cst && src2cst)
++		{
++			uint64 result = 0;
++			if(src2cst->m_valueLow != 0)
++			{
++				uint32 quotient = static_cast<int32>(src1cst->m_valueLow) / static_cast<int32>(src2cst->m_valueLow);
++				uint32 remainder = static_cast<int32>(src1cst->m_valueLow) % static_cast<int32>(src2cst->m_valueLow);
++				result = static_cast<uint64>(quotient) | (static_cast<uint64>(remainder) << 32);
++			}
++			else
++			{
++				result = ~0ULL;
++			}
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeConstant64(result));
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_CMP)
++	{
++		if(src1cst && src2cst)
++		{
++			bool result = false;
++			switch(statement.jmpCondition)
++			{
++			case CONDITION_EQ:
++				result = static_cast<int32>(src1cst->m_valueLow) == static_cast<int32>(src2cst->m_valueLow);
++				break;
++			case CONDITION_NE:
++				result = static_cast<int32>(src1cst->m_valueLow) != static_cast<int32>(src2cst->m_valueLow);
++				break;
++			case CONDITION_BL:
++				result = src1cst->m_valueLow < src2cst->m_valueLow;
++				break;
++			case CONDITION_BE:
++				result = src1cst->m_valueLow <= src2cst->m_valueLow;
++				break;
++			case CONDITION_AB:
++				result = src1cst->m_valueLow > src2cst->m_valueLow;
++				break;
++			case CONDITION_AE:
++				result = src1cst->m_valueLow >= src2cst->m_valueLow;
++				break;
++			case CONDITION_LT:
++				result = static_cast<int32>(src1cst->m_valueLow) < static_cast<int32>(src2cst->m_valueLow);
++				break;
++			case CONDITION_LE:
++				result = static_cast<int32>(src1cst->m_valueLow) <= static_cast<int32>(src2cst->m_valueLow);
++				break;
++			case CONDITION_GT:
++				result = static_cast<int32>(src1cst->m_valueLow) > static_cast<int32>(src2cst->m_valueLow);
++				break;
++			case CONDITION_GE:
++				result = static_cast<int32>(src1cst->m_valueLow) >= static_cast<int32>(src2cst->m_valueLow);
++				break;
++			default:
++				assert(0);
++				break;
++			}
++			changed = true;
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result ? 1 : 0));
++			statement.src2.reset();
++		}
++	}
++	else if(statement.op == OP_SELECT)
++	{
++		//Known condition (code generators only take a variable condition)
++		if(src1cst)
++		{
++			statement.op = OP_MOV;
++			statement.src1 = (src1cst->m_valueLow != 0) ? statement.src2 : statement.src3;
++			statement.src2.reset();
++			statement.src3.reset();
++			changed = true;
++		}
++		//If true and false values are the same, we don't care about the test
++		else if(src2cst && src3cst && (src2cst->m_valueLow == src3cst->m_valueLow))
++		{
++			uint32 value = src2cst->m_valueLow;
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, value));
++			statement.src2.reset();
++			statement.src3.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_CONDJMP)
++	{
++		if(src1cst && src2cst)
++		{
++			bool result = false;
++			switch(statement.jmpCondition)
++			{
++			case CONDITION_NE:
++				result = src1cst->m_valueLow != src2cst->m_valueLow;
++				break;
++			case CONDITION_EQ:
++				result = src1cst->m_valueLow == src2cst->m_valueLow;
++				break;
++			case CONDITION_BL:
++				result = static_cast<uint32>(src1cst->m_valueLow) < static_cast<uint32>(src2cst->m_valueLow);
++				break;
++			case CONDITION_LE:
++				result = static_cast<int32>(src1cst->m_valueLow) <= static_cast<int32>(src2cst->m_valueLow);
++				break;
++			case CONDITION_GT:
++				result = static_cast<int32>(src1cst->m_valueLow) > static_cast<int32>(src2cst->m_valueLow);
++				break;
++			case CONDITION_GE:
++				result = static_cast<int32>(src1cst->m_valueLow) >= static_cast<int32>(src2cst->m_valueLow);
++				break;
++			default:
++				assert(0);
++				break;
++			}
++			changed = true;
++			if(result)
++			{
++				statement.op = OP_JMP;
++			}
++			else
++			{
++				statement.op = OP_NOP;
++			}
++			statement.src1.reset();
++			statement.src2.reset();
++		}
++	}
++
++	return changed;
++}
++
++bool CJitter::FoldConstant64Operation(STATEMENT& statement)
++{
++	CSymbol* src1cst = dynamic_symbolref_cast(SYM_CONSTANT64, statement.src1);
++	CSymbol* src2cst = dynamic_symbolref_cast(SYM_CONSTANT64, statement.src2);
++
++	//Nothing we can do
++	if(src1cst == NULL && src2cst == NULL) return false;
++
++	bool changed = false;
++
++	if(statement.op == OP_EXTLOW64)
++	{
++		if(src1cst)
++		{
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, src1cst->m_valueLow));
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_EXTHIGH64)
++	{
++		if(src1cst)
++		{
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, src1cst->m_valueHigh));
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_ADD64)
++	{
++		if(src1cst && src2cst)
++		{
++			uint64 cst1 = src1cst->GetConstant64();
++			uint64 cst2 = src2cst->GetConstant64();
++			uint64 result = cst1 + cst2;
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeConstant64(result));
++			statement.src2.reset();
++			changed = true;
++		}
++		else if(src2cst && (src2cst->m_valueLow == 0) && (src2cst->m_valueHigh == 0))
++		{
++			statement.op = OP_MOV;
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_SUB64)
++	{
++		if(src1cst && src2cst)
++		{
++			uint64 cst1 = src1cst->GetConstant64();
++			uint64 cst2 = src2cst->GetConstant64();
++			uint64 result = cst1 - cst2;
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeConstant64(result));
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_AND64)
++	{
++		if(src1cst && src2cst)
++		{
++			uint64 cst1 = src1cst->GetConstant64();
++			uint64 cst2 = src2cst->GetConstant64();
++			uint64 result = cst1 & cst2;
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeConstant64(result));
++			statement.src2.reset();
++			changed = true;
++		}
++		else if(
++		    (src1cst && (src1cst->m_valueLow == 0) && (src1cst->m_valueHigh == 0)) ||
++		    (src2cst && (src2cst->m_valueLow == 0) && (src2cst->m_valueHigh == 0)))
++		{
++			//ANDing anything with 0 gives 0
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeConstant64(0));
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(statement.op == OP_CMP64)
++	{
++		if(src1cst && src2cst)
++		{
++			bool result = false;
++			switch(statement.jmpCondition)
++			{
++			case CONDITION_EQ:
++				result = src1cst->GetConstant64() == src2cst->GetConstant64();
++				break;
++			case CONDITION_NE:
++				result = src1cst->GetConstant64() != src2cst->GetConstant64();
++				break;
++			case CONDITION_BL:
++				result = src1cst->GetConstant64() < src2cst->GetConstant64();
++				break;
++			case CONDITION_AB:
++				result = src1cst->GetConstant64() > src2cst->GetConstant64();
++				break;
++			case CONDITION_LT:
++				result = static_cast<int64>(src1cst->GetConstant64()) < static_cast<int64>(src2cst->GetConstant64());
++				break;
++			case CONDITION_LE:
++				result = static_cast<int64>(src1cst->GetConstant64()) <= static_cast<int64>(src2cst->GetConstant64());
++				break;
++			case CONDITION_GT:
++				result = static_cast<int64>(src1cst->GetConstant64()) > static_cast<int64>(src2cst->GetConstant64());
++				break;
++			default:
++				assert(0);
++				break;
++			}
++			changed = true;
++			statement.op = OP_MOV;
++			statement.src1 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result ? 1 : 0));
++			statement.src2.reset();
++		}
++	}
++
++	assert(!(src1cst && src2cst && !changed));
++
++	return changed;
++}
++
++bool CJitter::FoldConstant6432Operation(STATEMENT& statement)
++{
++	CSymbol* src1cst = dynamic_symbolref_cast(SYM_CONSTANT64, statement.src1);
++	CSymbol* src2cst = dynamic_symbolref_cast(SYM_CONSTANT, statement.src2);
++
++	//Nothing we can do
++	if(src1cst == NULL && src2cst == NULL) return false;
++
++	bool changed = false;
++
++	if(
++	    statement.op == OP_SLL64 ||
++	    statement.op == OP_SRL64 ||
++	    statement.op == OP_SRA64)
++	{
++		if(src2cst && ((src2cst->m_valueLow & 0x3F) == 0))
++		{
++			statement.op = OP_MOV;
++			statement.src2.reset();
++			changed = true;
++		}
++		else if(src1cst && (src1cst->m_valueLow == 0) && (src1cst->m_valueHigh == 0))
++		{
++			statement.op = OP_MOV;
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++
++	return changed;
++}
++
++bool CJitter::FoldConstant12832Operation(STATEMENT& statement)
++{
++	auto src2cst = dynamic_symbolref_cast(SYM_CONSTANT, statement.src2);
++
++	//Nothing we can do
++	if(src2cst == nullptr) return false;
++
++	bool changed = false;
++
++	if(
++	    statement.op == OP_MD_SLLH ||
++	    statement.op == OP_MD_SRLH ||
++	    statement.op == OP_MD_SRAH)
++	{
++		if(src2cst && ((src2cst->m_valueLow & 0xF) == 0))
++		{
++			statement.op = OP_MOV;
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++	else if(
++	    statement.op == OP_MD_SLLW ||
++	    statement.op == OP_MD_SRLW ||
++	    statement.op == OP_MD_SRAW)
++	{
++		if(src2cst && ((src2cst->m_valueLow & 0x1F) == 0))
++		{
++			statement.op = OP_MOV;
++			statement.src2.reset();
++			changed = true;
++		}
++	}
++
++	return changed;
++}
++
++bool CJitter::ConstantFolding(StatementList& statements)
++{
++	bool changed = false;
++	for(auto& statement : statements)
++	{
++		changed |= FoldConstantOperation(statement);
++		changed |= FoldConstant64Operation(statement);
++		changed |= FoldConstant6432Operation(statement);
++		changed |= FoldConstant12832Operation(statement);
++	}
++	return changed;
++}
++
++void CJitter::FixFlowControl(StatementList& statements)
++{
++	//Resolve GOTO instructions
++	for(auto& statement : statements)
++	{
++		if(statement.op == OP_GOTO)
++		{
++			LabelMapType::const_iterator labelIterator = m_labels.find(statement.jmpBlock);
++			assert(labelIterator != m_labels.end());
++			if(labelIterator == m_labels.end()) continue;
++
++			statement.op = OP_JMP;
++			statement.jmpBlock = labelIterator->second;
++		}
++	}
++
++	//Remove any excess flow control instructions
++	for(StatementList::iterator statementIterator(statements.begin());
++	    statementIterator != statements.end(); ++statementIterator)
++	{
++		const STATEMENT& statement(*statementIterator);
++
++		if(statement.op == OP_JMP || statement.op == OP_CONDJMP)
++		{
++			++statementIterator;
++			statements.erase(statementIterator, statements.end());
++			break;
++		}
++	}
++}
++
++void CJitter::MergeBasicBlocks(BASIC_BLOCK& dstBlock, const BASIC_BLOCK& srcBlock)
++{
++	auto& dstSymbolTable = dstBlock.symbolTable;
++
++	for(auto statement : srcBlock.statements)
++	{
++		statement.VisitOperands(
++		    [&dstSymbolTable](SymbolRefPtr& symbolRef, bool) {
++			    auto symbol = symbolRef->GetSymbol();
++			    symbolRef = MakeSymbolRefPtr(dstSymbolTable.MakeSymbol(symbol));
++		    });
++		dstBlock.statements.push_back(statement);
++	}
++
++	dstBlock.optimized = false;
++}
++
++CJitter::BASIC_BLOCK CJitter::ConcatBlocks(const BasicBlockList& blocks)
++{
++	BASIC_BLOCK result;
++	for(const auto& basicBlock : blocks)
++	{
++		//First, add a mark label statement
++		STATEMENT labelStatement;
++		labelStatement.op = OP_LABEL;
++		labelStatement.jmpBlock = basicBlock.id;
++		result.statements.push_back(labelStatement);
++
++		MergeBasicBlocks(result, basicBlock);
++	}
++	return result;
++}
++
++bool CJitter::PruneBlocks()
++{
++	bool changed = true;
++	int deletedBlocks = 0;
++
++	while(changed)
++	{
++		changed = false;
++
++		auto toDeleteIterator = m_basicBlocks.cend();
++		for(auto outerBlockIterator(m_basicBlocks.cbegin());
++		    outerBlockIterator != m_basicBlocks.cend(); outerBlockIterator++)
++		{
++			//First block is always referenced
++			if(outerBlockIterator == m_basicBlocks.begin()) continue;
++
++			auto candidateBlockIterator = outerBlockIterator;
++			bool referenced = false;
++
++			//Check if there's a reference to this block in here
++			for(auto innerBlockIterator(m_basicBlocks.cbegin());
++			    innerBlockIterator != m_basicBlocks.cend(); innerBlockIterator++)
++			{
++				const auto& block(*innerBlockIterator);
++				bool referencesNext = false;
++
++				if(block.statements.empty())
++				{
++					//Empty blocks references next one
++					referencesNext = true;
++				}
++				else
++				{
++					//Check if this block references the next one or if it jumps to another one
++					auto lastInstruction(block.statements.end());
++					lastInstruction--;
++					const auto& statement(*lastInstruction);
++
++					//It jumps to a block, so check if it references the one we're looking for
++					if(statement.op == OP_JMP || statement.op == OP_CONDJMP)
++					{
++						if(statement.jmpBlock == candidateBlockIterator->id)
++						{
++							referenced = true;
++							break;
++						}
++					}
++
++					//Otherwise, it references the next one if it's not a jump
++					if(statement.op != OP_JMP)
++					{
++						referencesNext = true;
++					}
++				}
++
++				if(referencesNext)
++				{
++					auto nextBlockIterator(innerBlockIterator);
++					nextBlockIterator++;
++					if(nextBlockIterator != m_basicBlocks.end())
++					{
++						if(nextBlockIterator->id == candidateBlockIterator->id)
++						{
++							referenced = true;
++							break;
++						}
++					}
++				}
++			}
++
++			if(!referenced)
++			{
++				toDeleteIterator = candidateBlockIterator;
++				break;
++			}
++		}
++		if(toDeleteIterator == m_basicBlocks.end()) continue;
++
++		m_basicBlocks.erase(toDeleteIterator);
++		deletedBlocks++;
++		changed = true;
++	}
++
++	HarmonizeBlocks();
++	return deletedBlocks != 0;
++}
++
++void CJitter::HarmonizeBlocks()
++{
++	//Remove any jumps that jump to the next block
++	for(BasicBlockList::iterator blockIterator(m_basicBlocks.begin());
++	    blockIterator != m_basicBlocks.end(); ++blockIterator)
++	{
++		BasicBlockList::iterator nextBlockIterator(blockIterator);
++		++nextBlockIterator;
++		if(nextBlockIterator == m_basicBlocks.end()) continue;
++
++		auto& basicBlock(*blockIterator);
++		if(basicBlock.statements.size() == 0) continue;
++
++		StatementList::iterator lastStatementIterator(basicBlock.statements.end());
++		--lastStatementIterator;
++		const STATEMENT& statement(*lastStatementIterator);
++		if(statement.op != OP_JMP) continue;
++		if(statement.jmpBlock != nextBlockIterator->id) continue;
++
++		//Remove the jump
++		basicBlock.statements.erase(lastStatementIterator);
++	}
++
++	//Flag any block that have a reference from a jump
++	for(BasicBlockList::iterator outerBlockIterator(m_basicBlocks.begin());
++	    outerBlockIterator != m_basicBlocks.end(); ++outerBlockIterator)
++	{
++		auto& outerBlock(*outerBlockIterator);
++		outerBlock.hasJumpRef = false;
++
++		for(const auto& block : m_basicBlocks)
++		{
++			if(block.statements.size() == 0) continue;
++
++			//Check if this block references the next one or if it jumps to another one
++			StatementList::const_iterator lastInstruction(block.statements.end());
++			--lastInstruction;
++			const STATEMENT& statement(*lastInstruction);
++
++			//It jumps to a block, so check if it references the one we're looking for
++			if(statement.op == OP_JMP || statement.op == OP_CONDJMP)
++			{
++				if(statement.jmpBlock == outerBlockIterator->id)
++				{
++					outerBlock.hasJumpRef = true;
++					break;
++				}
++			}
++		}
++	}
++}
++
++bool CJitter::MergeBlocks()
++{
++	int deletedBlocks = 0;
++	bool changed = true;
++	while(changed)
++	{
++		changed = false;
++		for(BasicBlockList::iterator blockIterator(m_basicBlocks.begin());
++		    m_basicBlocks.end() != blockIterator; ++blockIterator)
++		{
++			BasicBlockList::iterator nextBlockIterator(blockIterator);
++			++nextBlockIterator;
++			if(nextBlockIterator == m_basicBlocks.end()) continue;
++
++			auto& basicBlock(*blockIterator);
++			auto& nextBlock(*nextBlockIterator);
++
++			if(nextBlock.hasJumpRef) continue;
++
++			//Check if the last statement is a jump
++			if(!basicBlock.statements.empty())
++			{
++				auto lastStatementIterator(basicBlock.statements.end());
++				--lastStatementIterator;
++				const auto& statement(*lastStatementIterator);
++				if(statement.op == OP_CONDJMP) continue;
++				if(statement.op == OP_JMP) continue;
++			}
++
++			//Blocks can be merged
++			MergeBasicBlocks(basicBlock, nextBlock);
++
++			m_basicBlocks.erase(nextBlockIterator);
++
++			++deletedBlocks;
++			changed = true;
++			break;
++		}
++	}
++	return deletedBlocks != 0;
++}
++
++bool CJitter::ConstantPropagation(StatementList& statements)
++{
++	bool changed = false;
++
++	for(StatementList::iterator outerStatementIterator(statements.begin());
++	    statements.end() != outerStatementIterator; ++outerStatementIterator)
++	{
++		STATEMENT& outerStatement(*outerStatementIterator);
++
++		if(outerStatement.op != OP_MOV) continue;
++
++		CSymbol* constant = dynamic_symbolref_cast(SYM_CONSTANT, outerStatement.src1);
++		if(constant == NULL)
++		{
++			constant = dynamic_symbolref_cast(SYM_CONSTANT64, outerStatement.src1);
++		}
++		if(!constant) continue;
++
++		//Find anything that uses this operand and replace it with the constant
++		for(StatementList::iterator innerStatementIterator(outerStatementIterator);
++		    statements.end() != innerStatementIterator; ++innerStatementIterator)
++		{
++			if(outerStatementIterator == innerStatementIterator) continue;
++
++			auto& innerStatement(*innerStatementIterator);
++
++			innerStatement.VisitSources(
++			    [&](SymbolRefPtr& symbol, bool) {
++				    if(symbol->Equals(outerStatement.dst.get()))
++				    {
++					    symbol = outerStatement.src1;
++					    changed = true;
++				    }
++			    });
++		}
++	}
++	return changed;
++}
++
++bool CJitter::ReorderAdd(StatementList& statements)
++{
++	bool changed = false;
++
++	for(auto statementIterator(statements.begin());
++	    statements.end() != statementIterator; ++statementIterator)
++	{
++		auto& statement(*statementIterator);
++
++		//We're only interested by additions
++		if(statement.op != OP_ADD) continue;
++
++		//Do some more checks
++		auto addDst = statement.dst.get();
++		assert(addDst);
++
++		auto addSrc2Cst = dynamic_symbolref_cast(SYM_CONSTANT, statement.src2);
++
++		//Don't mess with relatives
++		if(addDst->GetSymbol()->IsRelative() || !addSrc2Cst)
++		{
++			continue;
++		}
++
++		//Check for OP_SLL that uses the result of this operation and propagate the shift
++		auto nextStatementIterator = std::next(statementIterator);
++		auto& nextStatement(*nextStatementIterator);
++		if(nextStatement.op == OP_SLL && nextStatement.src1->Equals(addDst))
++		{
++			auto shiftSrc2Cst = dynamic_symbolref_cast(SYM_CONSTANT, nextStatement.src2);
++			if(shiftSrc2Cst)
++			{
++				uint32 result = addSrc2Cst->m_valueLow << shiftSrc2Cst->m_valueLow;
++
++				std::swap(statement, nextStatement);
++				std::swap(statement.src1, nextStatement.src1);
++				std::swap(statement.dst, nextStatement.dst);
++				nextStatement.src2 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
++				changed = true;
++			}
++		}
++	}
++	return changed;
++}
++
++bool CJitter::CopyPropagation(StatementList& statements)
++{
++	bool changed = false;
++
++	struct USAGEINFO
++	{
++		uint32 count = 0;
++		StatementList::iterator lastUse;
++	};
++	std::map<SymbolPtr, USAGEINFO> usageInfos;
++
++	for(auto statementIterator(statements.begin());
++	    statements.end() != statementIterator; ++statementIterator)
++	{
++		auto& statement(*statementIterator);
++
++		statement.VisitSources(
++		    [&](const SymbolRefPtr& symbolRef, bool) {
++			    auto symbol = symbolRef->GetSymbol();
++			    if(symbol->IsRelative()) return;
++			    if(symbol->IsConstant()) return;
++			    auto& usageInfo = usageInfos[symbol];
++			    usageInfo.count++;
++			    usageInfo.lastUse = statementIterator;
++		    });
++	}
++
++	for(auto outerStatementIterator(statements.begin());
++	    statements.end() != outerStatementIterator; ++outerStatementIterator)
++	{
++		auto& outerStatement(*outerStatementIterator);
++
++		//Some operations we can't propagate
++		if(outerStatement.op == OP_RETVAL) continue;
++
++		CSymbolRef* outerDstSymbol = outerStatement.dst.get();
++		if(outerDstSymbol == NULL) continue;
++
++		//Don't mess with relatives
++		if(outerDstSymbol->GetSymbol()->IsRelative())
++		{
++			continue;
++		}
++
++		auto usageInfoIterator = usageInfos.find(outerDstSymbol->GetSymbol());
++		if(usageInfoIterator == std::end(usageInfos))
++		{
++			continue;
++		}
++
++		const auto& usageInfo = usageInfoIterator->second;
++		if(usageInfo.count != 1)
++		{
++			continue;
++		}
++
++		auto& innerStatement(*usageInfo.lastUse);
++		if(!innerStatement.src1->Equals(outerDstSymbol))
++		{
++			//Possibly excluding interesting optimization possibilities
++			continue;
++		}
++
++		//Substitute a OP_MOV statement that use outerDstSymbol with its definition (outerStatement)
++		//Example:
++		//outerDstSymbol -> t0
++		//Before:
++		// - t0 = r0 + r1   //outerStatement
++		// - t1 = t0        //innerStatement
++		//After:
++		// - t0 = r0 + r1   //outerStatement
++		// - t1 = r0 + r1   //innerStatement
++		//After substitution, t0 will not be used anymore making outerStatement eligible for removal
++		if(innerStatement.op == OP_MOV)
++		{
++			if(outerStatement.op == OP_GUESTLOAD)
++			{
++				//Don't move a guest load across other memory accesses or calls
++				bool canMove = true;
++				for(auto it = std::next(outerStatementIterator); it != usageInfo.lastUse; ++it)
++				{
++					if((it->op == OP_GUESTLOAD) || (it->op == OP_GUESTSTORE) || (it->op == OP_CALL) ||
++					   (it->op == OP_PARAM) || (it->op == OP_PARAM_RET))
++					{
++						canMove = false;
++						break;
++					}
++				}
++				if(!canMove) continue;
++			}
++			innerStatement.op = outerStatement.op;
++			innerStatement.src1 = outerStatement.src1;
++			innerStatement.src2 = outerStatement.src2;
++			innerStatement.src3 = outerStatement.src3;
++			innerStatement.jmpCondition = outerStatement.jmpCondition;
++			innerStatement.memInfo = outerStatement.memInfo;
++			changed = true;
++		}
++		//Substitute src operand of a statement if our defining statement (outerStatement) is a OP_MOV
++		//Example:
++		//outerDstSymbol -> t0
++		//Before:
++		// - t0 = r0
++		// - r1 = t0 & r2
++		//After:
++		// - t0 = r0
++		// - r1 = r0 & r2
++		//After substitution, t0 will not be used anymore making outerStatement eligible for removal
++		else if(outerStatement.op == OP_MOV)
++		{
++			auto replacementSym = outerStatement.src1;
++			innerStatement.VisitSources(
++			    [&](SymbolRefPtr& symbol, bool) {
++				    if(symbol->Equals(outerDstSymbol))
++				    {
++					    symbol = replacementSym;
++					    changed = true;
++				    }
++			    });
++			assert(changed);
++		}
++		//Find all the add/sub constant and add them together
++		//Example
++		//outerDstSymbol -> t0
++		//Before:
++		// - t0 = r0 + 10   //outerStatement
++		// - t1 = t0 + 20   //innerStatement
++		//After:
++		// - t0 = r0 + 10   //outerStatement
++		// - t1 = r0 + 30   //innerStatement
++		//After substitution, t0 will not be used anymore making outerStatement eligible for removal
++		else if(
++		    (outerStatement.op == innerStatement.op) &&
++		    ((innerStatement.op == OP_ADD) || (innerStatement.op == OP_ADDREF)))
++		{
++			auto innerSrc2cst = dynamic_symbolref_cast(SYM_CONSTANT, innerStatement.src2);
++			auto outerSrc2cst = dynamic_symbolref_cast(SYM_CONSTANT, outerStatement.src2);
++			if(innerSrc2cst && outerSrc2cst)
++			{
++				uint32 result = innerSrc2cst->m_valueLow + outerSrc2cst->m_valueLow;
++				innerStatement.src1 = outerStatement.src1;
++				innerStatement.src2 = MakeSymbolRef(MakeSymbol(SYM_CONSTANT, result));
++				changed = true;
++			}
++		}
++	}
++
++	return changed;
++}
++
++bool CJitter::CommonExpressionElimination(VERSIONED_STATEMENT_LIST& versionedStatementList)
++{
++	bool changed = false;
++	std::vector<StatementList::const_iterator> tempDefs;
++	std::unordered_map<SymbolPtr, SymbolPtr> tempReplaceMap;
++	tempDefs.reserve(versionedStatementList.statements.size());
++
++	for(auto statementIterator(versionedStatementList.statements.begin());
++	    versionedStatementList.statements.end() != statementIterator; ++statementIterator)
++	{
++		auto& statement(*statementIterator);
++
++		//If this is a statement defining a temporary
++		//(guest loads can't be merged: memory might have changed in between)
++		if(
++		    (statement.op != OP_RETVAL) &&
++		    (statement.op != OP_GUESTLOAD) &&
++		    (statement.dst) &&
++		    (statement.dst->GetSymbol()->IsTemporary()))
++		{
++			const auto& newTemp = statement.dst->GetSymbol();
++
++			bool found = false;
++			//Check if our temporary already has a similar definition
++			for(const auto& tempDef : tempDefs)
++			{
++				const auto& tempDefStatement = *tempDef;
++				assert(tempDefStatement.dst);
++				const auto& temp = tempDefStatement.dst;
++				if(statement.op != tempDefStatement.op) continue;
++				if(statement.jmpCondition != tempDefStatement.jmpCondition) continue;
++				if(statement.src1 && !statement.src1->Equals(tempDefStatement.src1.get())) continue;
++				if(statement.src2 && !statement.src2->Equals(tempDefStatement.src2.get())) continue;
++				if(statement.src3 && !statement.src3->Equals(tempDefStatement.src3.get())) continue;
++				auto [_, inserted] = tempReplaceMap.insert(std::make_pair(newTemp, temp->GetSymbol()));
++				assert(inserted);
++				found = true;
++				//We assume the first replacement we find is gonna be the best
++				break;
++			}
++
++			//We haven't found a replacement for our definition, assume it's new
++			if(!found)
++			{
++				tempDefs.push_back(statementIterator);
++			}
++		}
++
++		if(tempReplaceMap.empty())
++		{
++			continue;
++		}
++
++		statement.VisitSources(
++		    [&](SymbolRefPtr& innerSymbolRef, bool) {
++			    if(!innerSymbolRef->GetSymbol()->IsTemporary()) return;
++			    if(auto tempReplaceIterator = tempReplaceMap.find(innerSymbolRef->GetSymbol()); tempReplaceIterator != std::end(tempReplaceMap))
++			    {
++				    innerSymbolRef = MakeSymbolRef(tempReplaceIterator->second);
++				    changed = true;
++			    }
++		    });
++	}
++
++	return changed;
++}
++
++bool CJitter::ClampingElimination(StatementList& statements)
++{
++	bool changed = false;
++
++	std::map<uint32, uint32> temporaryValues;
++
++	for(auto statementIterator(statements.begin());
++	    statements.end() != statementIterator; ++statementIterator)
++	{
++		auto& statement = *statementIterator;
++
++		auto dstSymbol = dynamic_symbolref_cast(SYM_TEMPORARY128, statement.dst);
++
++		if((statement.op == OP_MD_EXPAND_W) &&
++		   dstSymbol &&
++		   statement.src1->GetSymbol()->IsConstant())
++		{
++			auto src1Symbol = dynamic_symbolref_cast(SYM_CONSTANT, statement.src1);
++			temporaryValues.insert(
++			    std::make_pair(dstSymbol->m_valueLow, src1Symbol->m_valueLow));
++		}
++		else if(dstSymbol)
++		{
++			//Make sure that our temporary value doesn't get modified
++			assert(temporaryValues.find(dstSymbol->m_valueLow) == std::end(temporaryValues));
++		}
++
++		if((statement.op == OP_MD_CLAMP_S) &&
++		   statement.src1->GetSymbol()->IsTemporary())
++		{
++			auto src1Symbol = dynamic_symbolref_cast(SYM_TEMPORARY128, statement.src1);
++			auto tempCstValue = temporaryValues.find(src1Symbol->m_valueLow);
++			if(tempCstValue != std::end(temporaryValues))
++			{
++				if((tempCstValue->second & 0x7F800000) != 0x7F800000)
++				{
++					//No clamping needed here
++					statement.op = OP_MOV;
++					changed = true;
++				}
++			}
++		}
++	}
++
++	return changed;
++}
++
++static bool IsStoreThroughReference(OPERATION op)
++{
++	switch(op)
++	{
++	case OP_MD_STOREATREF_MASKED:
++	case OP_STORE16ATREF:
++	case OP_STORE8ATREF:
++	case OP_STOREATREF:
++		return true;
++	default:
++		return false;
++	}
++}
++
++bool CJitter::MergeCmpSelectOps(StatementList& statements)
++{
++	bool changed = false;
++
++	//Move a CMP down to the SELECT using its result when the statements in
++	//between neither read the predicate nor change the compared values (e.g.
++	//a branch computes its target between the two). Then they can merge.
++	for(auto selectIterator(statements.begin()); selectIterator != statements.end(); ++selectIterator)
++	{
++		const auto& select = *selectIterator;
++		if(select.op != OP_SELECT) continue;
++		if(selectIterator == statements.begin()) continue;
++		auto prevIterator = std::prev(selectIterator);
++		if(prevIterator->op == OP_CMP) continue;
++		auto predicate = select.src1->GetSymbol();
++		if(!predicate->IsTemporary()) continue;
++
++		auto cmpIterator = statements.end();
++		bool blocked = false;
++		for(auto it = prevIterator;; --it)
++		{
++			const auto& candidate = *it;
++			if((candidate.op == OP_CMP) && candidate.dst && candidate.dst->GetSymbol()->Equals(predicate.get()))
++			{
++				cmpIterator = it;
++				break;
++			}
++			if((candidate.op == OP_CALL) || (candidate.op == OP_PARAM) || (candidate.op == OP_PARAM_RET) ||
++			   (candidate.op == OP_LABEL) || (candidate.op == OP_GUESTLOAD) || (candidate.op == OP_GUESTSTORE) ||
++			   IsStoreThroughReference(candidate.op))
++			{
++				blocked = true;
++				break;
++			}
++			if(it == statements.begin()) break;
++		}
++		if(blocked || (cmpIterator == statements.end())) continue;
++
++		const auto& cmp = *cmpIterator;
++		bool safe = true;
++		for(auto it = std::next(cmpIterator); it != selectIterator; ++it)
++		{
++			const auto& between = *it;
++			between.VisitSources([&](const SymbolRefPtr& src, bool) {
++				if(src->GetSymbol()->Equals(predicate.get())) safe = false;
++			});
++			if(between.dst)
++			{
++				auto dstSymbol = between.dst->GetSymbol();
++				if(dstSymbol->Equals(predicate.get())) safe = false;
++				cmp.VisitSources([&](const SymbolRefPtr& src, bool) {
++					auto srcSymbol = src->GetSymbol();
++					if(srcSymbol->Equals(dstSymbol.get()) || srcSymbol->Aliases(dstSymbol.get())) safe = false;
++				});
++			}
++			if(!safe) break;
++		}
++		if(!safe) continue;
++
++		statements.splice(selectIterator, statements, cmpIterator);
++		changed = true;
++	}
++
++	for(auto statementIterator(statements.begin());
++	    statements.end() != statementIterator; ++statementIterator)
++	{
++		auto& statement = *statementIterator;
++		auto nextStatementIterator = statementIterator;
++		nextStatementIterator++;
++
++		if(nextStatementIterator == std::end(statements)) continue;
++		auto& nextStatement = *nextStatementIterator;
++
++		if(nextStatement.op != OP_SELECT) continue;
++		if(statement.op != OP_CMP) continue;
++
++		auto predicateSymbol = statement.dst;
++
++		if(!nextStatement.src1->Equals(predicateSymbol.get())) continue;
++
++		auto innerStatementIterator = nextStatementIterator;
++		innerStatementIterator++;
++
++		//Make sure predicate isn't used later
++		bool used = false;
++		for(; innerStatementIterator != statements.end(); ++innerStatementIterator)
++		{
++			const auto& innerStatement = *innerStatementIterator;
++			innerStatement.VisitSources([&](const SymbolRefPtr& src, bool isDst) { used |= src->Equals(predicateSymbol.get()); });
++			if(used) break;
++		}
++
++		if(used) continue;
++
++		nextStatement.op = OP_CMPSELECT_P2;
++		nextStatement.jmpCondition = statement.jmpCondition;
++		nextStatement.src1 = nextStatement.src2;
++		nextStatement.src2 = nextStatement.src3;
++		nextStatement.src3.reset();
++
++		statement.op = OP_CMPSELECT_P1;
++		statement.jmpCondition = Jitter::CONDITION_NEVER;
++		statement.dst.reset();
++
++		changed = true;
++	}
++
++	return changed;
++}
++
++bool CJitter::DeadcodeElimination(VERSIONED_STATEMENT_LIST& versionedStatementList)
++{
++	bool changed = false;
++
++	typedef std::list<StatementList::iterator> ToDeleteList;
++	ToDeleteList toDelete;
++
++	for(auto outerStatementIterator(versionedStatementList.statements.begin());
++	    versionedStatementList.statements.end() != outerStatementIterator; ++outerStatementIterator)
++	{
++		auto& outerStatement(*outerStatementIterator);
++		const auto& symbolRef(outerStatement.dst);
++
++		//Guest loads might have side effects (I/O registers): keep the ones writing to
++		//relatives. One writing to an unused temporary was moved by copy propagation.
++		if((outerStatement.op == OP_GUESTLOAD) && !outerStatement.dst->GetSymbol()->IsTemporary()) continue;
++
++		CSymbol* candidate = nullptr;
++		if(symbolRef && symbolRef->GetSymbol()->IsTemporary())
++		{
++			candidate = symbolRef->GetSymbol().get();
++		}
++		else if(auto relativeSymbol = dynamic_symbolref_cast(SYM_RELATIVE, symbolRef))
++		{
++			assert(symbolRef->IsVersioned());
++			if(symbolRef->GetVersion() != versionedStatementList.relativeVersions.GetRelativeVersion(relativeSymbol->m_valueLow))
++			{
++				candidate = relativeSymbol;
++			}
++		}
++
++		if(!candidate) continue;
++
++		//Look for any possible use of this symbol
++		bool used = false;
++		for(auto innerStatementIterator(outerStatementIterator);
++		    versionedStatementList.statements.end() != innerStatementIterator; ++innerStatementIterator)
++		{
++			if(outerStatementIterator == innerStatementIterator) continue;
++
++			const auto& innerStatement(*innerStatementIterator);
++
++			innerStatement.VisitSources(
++			    [&](const SymbolRefPtr& innerSymbolRef, bool) {
++				    if(innerSymbolRef->Equals(symbolRef.get()))
++				    {
++					    used = true;
++					    return;
++				    }
++
++				    auto symbol(innerSymbolRef->GetSymbol());
++				    if(!symbol->Equals(candidate) && symbol->Aliases(candidate))
++				    {
++					    used = true;
++					    return;
++				    }
++			    });
++
++			if(used) break;
++		}
++
++		if(!used)
++		{
++			//Kill it!
++			toDelete.push_back(outerStatementIterator);
++		}
++	}
++
++	for(ToDeleteList::const_iterator deleteIterator(toDelete.begin());
++	    toDelete.end() != deleteIterator; ++deleteIterator)
++	{
++		versionedStatementList.statements.erase(*deleteIterator);
++		changed = true;
++	}
++
++	return changed;
++}
++
++//Loop register promotion. A loop is a chain of blocks, entered only at its
++//header (by falling through, or the back jump ending the chain), with side
++//exits (conditional jumps out). Context symbols the chain uses most get a
++//register for the whole loop: loaded once in a preheader block, stored on
++//the way out through each exit (stub blocks), never in the loop itself.
++//Only symbols guest memory handlers can't touch, and only chains without
++//calls or external jumps, so nothing else can read the context meanwhile.
++void CJitter::PromoteLoopRegisters()
++{
++	static const bool disabled = (getenv("JITTER_NO_LOOP_PROMOTION") != nullptr); //for A/B testing
++	if(disabled) return;
++
++	unsigned int gprCount = m_codeGen->GetAvailableRegisterCount();
++	const unsigned int keepForTemporaries = 3;
++	if(gprCount <= keepForTemporaries) return;
++	unsigned int maxPromoted = std::min<unsigned int>(gprCount - keepForTemporaries, 4);
++
++	for(auto tailIterator = m_basicBlocks.begin(); tailIterator != m_basicBlocks.end(); ++tailIterator)
++	{
++		auto& tail = *tailIterator;
++		if(tail.statements.empty()) continue;
++		const auto& backJump = tail.statements.back();
++		if(backJump.op != OP_JMP) continue;
++		uint32 headerId = backJump.jmpBlock;
++
++		auto headerIterator = m_basicBlocks.begin();
++		for(; headerIterator != tailIterator; ++headerIterator)
++		{
++			if(headerIterator->id == headerId) break;
++		}
++		if((headerIterator == tailIterator) && (tail.id != headerId)) continue;
++		if(headerIterator == m_basicBlocks.begin()) continue;
++
++		auto chainEnd = std::next(tailIterator);
++		std::set<uint32> chainIds;
++		for(auto it = headerIterator; it != chainEnd; ++it) chainIds.insert(it->id);
++
++		//Single entry: nothing but the back jump targets the chain
++		bool ok = true;
++		for(const auto& block : m_basicBlocks)
++		{
++			for(const auto& statement : block.statements)
++			{
++				if((statement.op != OP_JMP) && (statement.op != OP_CONDJMP)) continue;
++				if(chainIds.count(statement.jmpBlock) == 0) continue;
++				if(&statement != &backJump) ok = false;
++			}
++		}
++		if(!ok) continue;
++
++		//No calls or external jumps; jumps only as side exits or the back jump
++		std::map<uint32, unsigned int> useCounts;
++		std::vector<CSymbol*> otherRelatives;
++		for(auto it = headerIterator; ok && (it != chainEnd); ++it)
++		{
++			for(const auto& statement : it->statements)
++			{
++				switch(statement.op)
++				{
++				case OP_CALL:
++				case OP_PARAM:
++				case OP_PARAM_RET:
++				case OP_RETVAL:
++				case OP_EXTERNJMP:
++				case OP_EXTERNJMP_DYN:
++				case OP_GOTO:
++				case OP_LABEL:
++					ok = false;
++					break;
++				case OP_JMP:
++					if(&statement != &backJump) ok = false;
++					break;
++				default:
++					break;
++				}
++				statement.VisitOperands([&](const SymbolRefPtr& symbolRef, bool) {
++					auto symbol = symbolRef->GetSymbol().get();
++					if((symbol->m_type == SYM_RELATIVE) && IsGuestMemorySafeSymbol(symbol))
++					{
++						useCounts[symbol->m_valueLow]++;
++					}
++					else if(symbol->IsRelative() || (symbol->m_type == SYM_REL_REFERENCE))
++					{
++						otherRelatives.push_back(symbol);
++					}
++				});
++			}
++		}
++		if(!ok) continue;
++
++		//Candidates not overlapped by other accesses (64/128-bit, references...)
++		std::vector<std::pair<unsigned int, uint32>> candidates;
++		for(const auto& useCount : useCounts)
++		{
++			CSymbol candidate(SYM_RELATIVE, useCount.first, 0);
++			bool aliased = false;
++			for(auto* other : otherRelatives)
++			{
++				if((other->m_type == SYM_REL_REFERENCE) || candidate.Aliases(other)) aliased = true;
++			}
++			if(!aliased) candidates.push_back(std::make_pair(useCount.second, useCount.first));
++		}
++		if(candidates.empty()) continue;
++		std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
++			return (a.first != b.first) ? (a.first > b.first) : (a.second < b.second);
++		});
++		if(candidates.size() > maxPromoted) candidates.resize(maxPromoted);
++
++		//Highest register ids, so the block allocator keeps the low ones
++		std::map<uint32, unsigned int> promoted; //offset -> register id
++		uint32 reservedMask = 0;
++		for(unsigned int i = 0; i < candidates.size(); i++)
++		{
++			unsigned int registerId = gprCount - 1 - i;
++			promoted[candidates[i].second] = registerId;
++			reservedMask |= (1 << registerId);
++		}
++
++		//Rewrite the chain; remember what it writes
++		std::set<uint32> defined;
++		for(auto it = headerIterator; it != chainEnd; ++it)
++		{
++			auto& block = *it;
++			block.reservedRegisters |= reservedMask;
++			for(auto& statement : block.statements)
++			{
++				if(statement.dst)
++				{
++					auto dstSymbol = statement.dst->GetSymbol();
++					if((dstSymbol->m_type == SYM_RELATIVE) && promoted.count(dstSymbol->m_valueLow)) defined.insert(dstSymbol->m_valueLow);
++				}
++				statement.VisitOperands([&](SymbolRefPtr& symbolRef, bool) {
++					auto symbol = symbolRef->GetSymbol();
++					if(symbol->m_type != SYM_RELATIVE) return;
++					auto promotedIterator = promoted.find(symbol->m_valueLow);
++					if(promotedIterator == promoted.end()) return;
++					symbolRef = MakeSymbolRef(MakeSymbol(&block, SYM_REGISTER, promotedIterator->second, 0));
++				});
++			}
++		}
++
++		//Preheader: load everything once
++		{
++			BASIC_BLOCK preheader;
++			preheader.id = m_nextBlockId++;
++			preheader.optimized = true;
++			preheader.reservedRegisters = reservedMask;
++			for(const auto& promotedPair : promoted)
++			{
++				STATEMENT statement;
++				statement.op = OP_MOV;
++				statement.dst = MakeSymbolRef(MakeSymbol(&preheader, SYM_REGISTER, promotedPair.second, 0));
++				statement.src1 = MakeSymbolRef(MakeSymbol(&preheader, SYM_RELATIVE, promotedPair.first, 0));
++				preheader.statements.push_back(statement);
++			}
++			m_basicBlocks.insert(headerIterator, std::move(preheader));
++		}
++
++		//Exits: side exits go through stubs that store what the loop wrote. The
++		//stubs follow the tail, which ends with the back jump (no fall through).
++		auto stubPosition = chainEnd;
++		for(auto it = headerIterator; it != chainEnd; ++it)
++		{
++			for(auto& statement : it->statements)
++			{
++				if(statement.op != OP_CONDJMP) continue;
++				if(chainIds.count(statement.jmpBlock) != 0) continue;
++				BASIC_BLOCK stub;
++				stub.id = m_nextBlockId++;
++				stub.optimized = true;
++				stub.hasJumpRef = true;
++				stub.reservedRegisters = reservedMask;
++				for(auto offset : defined)
++				{
++					STATEMENT store;
++					store.op = OP_MOV;
++					store.dst = MakeSymbolRef(MakeSymbol(&stub, SYM_RELATIVE, offset, 0));
++					store.src1 = MakeSymbolRef(MakeSymbol(&stub, SYM_REGISTER, promoted[offset], 0));
++					stub.statements.push_back(store);
++				}
++				STATEMENT jump;
++				jump.op = OP_JMP;
++				jump.jmpBlock = statement.jmpBlock;
++				stub.statements.push_back(jump);
++				statement.jmpBlock = stub.id;
++				m_basicBlocks.insert(stubPosition, std::move(stub));
++			}
++		}
++		//One loop per function (blocks loop on themselves)
++		return;
++	}
++}
++
++//"t = op(...); ...; rel = t" -> "rel = op(...); ...": the operation writes the
++//context symbol directly (later uses of t read rel), which saves a copy once
++//registers are allocated. Only when nothing in between touches rel and
++//nothing can observe the context (calls, guest memory ops, jumps).
++void CJitter::CoalesceIntoRelatives(BASIC_BLOCK& basicBlock)
++{
++	static const bool disabled = (getenv("JITTER_NO_COALESCE_REL") != nullptr); //for A/B testing
++	if(disabled) return;
++	auto& statements = basicBlock.statements;
++	auto isSimpleOp = [](OPERATION op) {
++		switch(op)
++		{
++		case OP_ADD:
++		case OP_SUB:
++		case OP_AND:
++		case OP_OR:
++		case OP_XOR:
++		case OP_NOT:
++		case OP_SRA:
++		case OP_SRL:
++		case OP_SLL:
++		case OP_CMP:
++		case OP_SELECT:
++		case OP_CMPSELECT_P2:
++		case OP_LZC:
++			return true;
++		default:
++			return false;
++		}
++	};
++	auto isBarrier = [](const STATEMENT& statement) {
++		switch(statement.op)
++		{
++		case OP_CALL:
++		case OP_PARAM:
++		case OP_PARAM_RET:
++		case OP_RETVAL:
++		case OP_LABEL:
++		case OP_JMP:
++		case OP_CONDJMP:
++		case OP_GOTO:
++		case OP_EXTERNJMP:
++		case OP_EXTERNJMP_DYN:
++		case OP_GUESTLOAD:
++		case OP_GUESTSTORE:
++		case OP_STOREATREF:
++		case OP_STORE8ATREF:
++		case OP_STORE16ATREF:
++		case OP_MD_STOREATREF_MASKED:
++			return true;
++		default:
++			return false;
++		}
++	};
++	auto touches = [](const STATEMENT& statement, CSymbol* symbol) {
++		bool result = false;
++		statement.VisitOperands([&](const SymbolRefPtr& symbolRef, bool) {
++			auto other = symbolRef->GetSymbol().get();
++			if(other->Equals(symbol) || other->Aliases(symbol)) result = true;
++		});
++		return result;
++	};
++
++	for(auto copyIterator = statements.begin(); copyIterator != statements.end();)
++	{
++		auto& copy = *copyIterator;
++		if((copy.op != OP_MOV) || !copy.dst || !copy.src1)
++		{
++			++copyIterator;
++			continue;
++		}
++		auto rel = copy.dst->GetSymbol();
++		auto tmp = copy.src1->GetSymbol();
++		if((rel->m_type != SYM_RELATIVE) || (tmp->m_type != SYM_TEMPORARY))
++		{
++			++copyIterator;
++			continue;
++		}
++
++		//The single definition of tmp, before the copy, with nothing in between that
++		//touches rel or could observe the context
++		auto defIterator = statements.end();
++		bool ok = true;
++		for(auto it = copyIterator; it != statements.begin();)
++		{
++			--it;
++			const auto& statement = *it;
++			if(statement.dst && statement.dst->GetSymbol()->Equals(tmp.get()))
++			{
++				defIterator = it;
++				break;
++			}
++			if(isBarrier(statement) || touches(statement, rel.get()))
++			{
++				ok = false;
++				break;
++			}
++		}
++		if(!ok || (defIterator == statements.end()) || !isSimpleOp(defIterator->op))
++		{
++			++copyIterator;
++			continue;
++		}
++		//No other definition of tmp in the block
++		unsigned int defCount = 0;
++		for(const auto& statement : statements)
++		{
++			if(statement.dst && statement.dst->GetSymbol()->Equals(tmp.get())) defCount++;
++		}
++		if(defCount != 1)
++		{
++			++copyIterator;
++			continue;
++		}
++		//Uses of tmp after the copy must come before rel changes again
++		bool relChanged = false;
++		for(auto it = std::next(copyIterator); it != statements.end(); ++it)
++		{
++			const auto& statement = *it;
++			bool usesTmp = false;
++			statement.VisitSources([&](const SymbolRefPtr& src, bool) {
++				if(src->GetSymbol()->Equals(tmp.get())) usesTmp = true;
++			});
++			if(usesTmp && relChanged)
++			{
++				ok = false;
++				break;
++			}
++			if(statement.dst)
++			{
++				auto dstSymbol = statement.dst->GetSymbol();
++				if(dstSymbol->Equals(rel.get()) || dstSymbol->Aliases(rel.get())) relChanged = true;
++			}
++			if(isBarrier(statement)) relChanged = true;
++		}
++		if(!ok)
++		{
++			++copyIterator;
++			continue;
++		}
++
++		defIterator->dst = MakeSymbolRef(rel);
++		for(auto it = std::next(defIterator); it != statements.end(); ++it)
++		{
++			it->VisitSources([&](SymbolRefPtr& src, bool) {
++				if(src->GetSymbol()->Equals(tmp.get())) src = MakeSymbolRef(rel);
++			});
++		}
++		copyIterator = statements.erase(copyIterator);
++	}
++}
++
++void CJitter::CoalesceTemporaries(BASIC_BLOCK& basicBlock)
++{
++	typedef std::vector<CSymbol*> EncounteredTempList;
++	EncounteredTempList encounteredTemps;
++
++	for(auto outerStatementIterator(basicBlock.statements.begin());
++	    basicBlock.statements.end() != outerStatementIterator; ++outerStatementIterator)
++	{
++		auto& outerStatement(*outerStatementIterator);
++
++		if(!outerStatement.dst) continue;
++		if(!outerStatement.dst->GetSymbol()->IsTemporary()) continue;
++
++		auto tempSymbol = outerStatement.dst->GetSymbol().get();
++		CSymbol* candidate = nullptr;
++
++		//Check for a possible replacement
++		for(auto* encounteredTemp : encounteredTemps)
++		{
++			if(encounteredTemp->m_type != tempSymbol->m_type) continue;
++
++			//Look for any possible use of this symbol
++			bool used = false;
++
++			for(auto innerStatementIterator(outerStatementIterator);
++			    basicBlock.statements.end() != innerStatementIterator; ++innerStatementIterator)
++			{
++				if(outerStatementIterator == innerStatementIterator) continue;
++
++				const auto& innerStatement(*innerStatementIterator);
++				innerStatement.VisitOperands(
++				    [&](const SymbolRefPtr& symbolRef, bool) {
++					    auto symbol = symbolRef->GetSymbol();
++					    if(symbol->Equals(encounteredTemp))
++					    {
++						    used = true;
++					    }
++				    });
++
++				if(used) break;
++			}
++
++			if(!used)
++			{
++				candidate = encounteredTemp;
++				break;
++			}
++		}
++
++		if(candidate == nullptr)
++		{
++			encounteredTemps.push_back(tempSymbol);
++		}
++		else
++		{
++			auto candidatePtr = MakeSymbol(candidate->m_type, candidate->m_valueLow);
++
++			outerStatement.dst = MakeSymbolRef(candidatePtr);
++
++			//Replace all occurences of this temp with the candidate
++			for(auto innerStatementIterator(outerStatementIterator);
++			    basicBlock.statements.end() != innerStatementIterator; ++innerStatementIterator)
++			{
++				if(outerStatementIterator == innerStatementIterator) continue;
++
++				auto& innerStatement(*innerStatementIterator);
++
++				if(innerStatement.dst)
++				{
++					auto symbol(innerStatement.dst->GetSymbol());
++					if(symbol->Equals(tempSymbol))
++					{
++						innerStatement.dst = MakeSymbolRef(candidatePtr);
++					}
++				}
++				if(innerStatement.src1)
++				{
++					auto symbol(innerStatement.src1->GetSymbol());
++					if(symbol->Equals(tempSymbol))
++					{
++						innerStatement.src1 = MakeSymbolRef(candidatePtr);
++					}
++				}
++				if(innerStatement.src2)
++				{
++					auto symbol(innerStatement.src2->GetSymbol());
++					if(symbol->Equals(tempSymbol))
++					{
++						innerStatement.src2 = MakeSymbolRef(candidatePtr);
++					}
++				}
++				if(innerStatement.src3)
++				{
++					auto symbol(innerStatement.src3->GetSymbol());
++					if(symbol->Equals(tempSymbol))
++					{
++						innerStatement.src3 = MakeSymbolRef(candidatePtr);
++					}
++				}
++			}
++		}
++	}
++}
++
++void CJitter::RemoveSelfAssignments(BASIC_BLOCK& basicBlock)
++{
++	for(StatementList::iterator outerStatementIterator(basicBlock.statements.begin());
++	    basicBlock.statements.end() != outerStatementIterator;)
++	{
++		STATEMENT& outerStatement(*outerStatementIterator);
++
++		if(outerStatement.op == OP_MOV && outerStatement.dst->Equals(outerStatement.src1.get()))
++		{
++			outerStatementIterator = basicBlock.statements.erase(outerStatementIterator);
++		}
++		else
++		{
++			++outerStatementIterator;
++		}
++	}
++}
++
++void CJitter::PruneSymbols(BASIC_BLOCK& basicBlock) const
++{
++	auto& symbolTable(basicBlock.symbolTable);
++
++	SymbolUseCountMap symbolUseCount;
++	for(const auto& statement : basicBlock.statements)
++	{
++		statement.VisitOperands(
++		    [&](const SymbolRefPtr& symbolRef, bool) {
++			    const auto& symbol = symbolRef->GetSymbol();
++			    symbolUseCount[symbol.get()]++;
++		    });
++	}
++
++	for(auto symbolIterator(std::begin(symbolTable.GetSymbols()));
++	    symbolIterator != std::end(symbolTable.GetSymbols());)
++	{
++		const auto& symbol(*symbolIterator);
++		if(symbolUseCount.find(symbol.get()) == std::end(symbolUseCount))
++		{
++			symbolIterator = symbolTable.RemoveSymbol(symbolIterator);
++		}
++		else
++		{
++			symbolIterator++;
++		}
++	}
++}
++
++unsigned int CJitter::AllocateStack(BASIC_BLOCK& basicBlock)
++{
++	unsigned int stackAlloc = 0;
++	for(const auto& symbol : basicBlock.symbolTable.GetSymbols())
++	{
++		if((symbol->m_type == SYM_TEMPORARY) || (symbol->m_type == SYM_FP_TEMPORARY32))
++		{
++			symbol->m_stackLocation = stackAlloc;
++			stackAlloc += 4;
++		}
++		else if(symbol->m_type == SYM_TMP_REFERENCE)
++		{
++			size_t symbolSize = sizeof(void*);
++			size_t symbolMask = symbolSize - 1;
++			if((stackAlloc & symbolMask) != 0)
++			{
++				stackAlloc += (symbolSize - (stackAlloc & symbolMask));
++			}
++			assert((stackAlloc & symbolMask) == 0);
++			symbol->m_stackLocation = stackAlloc;
++			stackAlloc += symbolSize;
++		}
++		else if(symbol->m_type == SYM_TEMPORARY64)
++		{
++			if((stackAlloc & 7) != 0)
++			{
++				stackAlloc += (8 - (stackAlloc & 7));
++			}
++			assert((stackAlloc & 7) == 0);
++			symbol->m_stackLocation = stackAlloc;
++			stackAlloc += 8;
++		}
++		else if(symbol->m_type == SYM_TEMPORARY128)
++		{
++			if((stackAlloc & 15) != 0)
++			{
++				stackAlloc += (16 - (stackAlloc & 15));
++			}
++			assert((stackAlloc & 15) == 0);
++			symbol->m_stackLocation = stackAlloc;
++			stackAlloc += 16;
++		}
++		else if(symbol->m_type == SYM_TEMPORARY256)
++		{
++			if((stackAlloc & 31) != 0)
++			{
++				stackAlloc += (32 - (stackAlloc & 31));
++			}
++			assert((stackAlloc & 31) == 0);
++			symbol->m_stackLocation = stackAlloc;
++			stackAlloc += 32;
++		}
++	}
++	return stackAlloc;
++}
++
++void CJitter::NormalizeStatements(BASIC_BLOCK& basicBlock)
++{
++	//Reorganize the commutative statements
++	//1. Always have registers as the first operand
++	//2. Always have constants as the last operand
++
++	for(auto& statement : basicBlock.statements)
++	{
++		bool isCommutative = false;
++		bool conditionSwapRequired = false;
++
++		switch(statement.op)
++		{
++		case OP_ADD:
++		case OP_ADD64:
++		case OP_AND:
++		case OP_AND64:
++		case OP_OR:
++		case OP_XOR:
++		case OP_MUL:
++		case OP_MULS:
++		case OP_MD_AND:
++		case OP_MD_OR:
++		case OP_MD_XOR:
++		case OP_MD_ADD_B:
++		case OP_MD_ADD_H:
++		case OP_MD_ADD_W:
++		case OP_MD_ADDSS_H:
++		case OP_MD_ADDSS_W:
++		case OP_MD_ADDUS_B:
++		case OP_MD_ADDUS_W:
++		case OP_MD_CMPEQ_B:
++		case OP_MD_CMPEQ_H:
++		case OP_MD_CMPEQ_W:
++		case OP_MD_MIN_H:
++		case OP_MD_MIN_W:
++		case OP_MD_MAX_H:
++		case OP_MD_MAX_W:
++		case OP_MD_ADD_S:
++		case OP_MD_MUL_S:
++		case OP_MD_MIN_S:
++		case OP_MD_MAX_S:
++			isCommutative = true;
++			break;
++		case OP_CMP:
++		case OP_CMP64:
++		case OP_CONDJMP:
++			isCommutative = true;
++			conditionSwapRequired = true;
++			break;
++		default:
++			isCommutative = false;
++			break;
++		}
++
++		if(!isCommutative) continue;
++
++		bool swapped = false;
++
++		//Check if constant operand is at the beginning and swap if it is the case
++		{
++			bool src1cst = statement.src1->GetSymbol()->IsConstant();
++			bool src2cst = statement.src2->GetSymbol()->IsConstant();
++
++			if(src1cst && !src2cst)
++			{
++				std::swap(statement.src1, statement.src2);
++				swapped = true;
++			}
++		}
++
++		//Check if register operand is at the end and swap if it is the case
++		{
++			bool dstreg = statement.dst && statement.dst->GetSymbol()->IsRegister();
++			bool src1reg = statement.src1->GetSymbol()->IsRegister();
++			bool src2reg = statement.src2->GetSymbol()->IsRegister();
++
++			if(!src1reg && src2reg)
++			{
++				std::swap(statement.src1, statement.src2);
++				swapped = true;
++			}
++			else if(dstreg && src1reg && src2reg &&
++			        statement.dst->GetSymbol()->Equals(statement.src2->GetSymbol().get()))
++			{
++				//If all operands are registers and dst is equal to src2, swap to make dst and src2 side by side
++				std::swap(statement.src1, statement.src2);
++				swapped = true;
++			}
++		}
++
++		if(swapped && conditionSwapRequired)
++		{
++			switch(statement.jmpCondition)
++			{
++			case CONDITION_EQ:
++			case CONDITION_NE:
++				break;
++			case CONDITION_BL:
++				statement.jmpCondition = CONDITION_AB;
++				break;
++			case CONDITION_BE:
++				statement.jmpCondition = CONDITION_AE;
++				break;
++			case CONDITION_AB:
++				statement.jmpCondition = CONDITION_BL;
++				break;
++			case CONDITION_AE:
++				statement.jmpCondition = CONDITION_BE;
++				break;
++			case CONDITION_LT:
++				statement.jmpCondition = CONDITION_GT;
++				break;
++			case CONDITION_LE:
++				statement.jmpCondition = CONDITION_GE;
++				break;
++			case CONDITION_GT:
++				statement.jmpCondition = CONDITION_LT;
++				break;
++			case CONDITION_GE:
++				statement.jmpCondition = CONDITION_LE;
++				break;
++			default:
++				assert(0);
++				break;
++			}
++		}
++	}
++}
+diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
+--- a/src/Jitter_RegAlloc.cpp
++++ b/src/Jitter_RegAlloc.cpp
+@@ -1,464 +1,464 @@
+-#include "Jitter.h"
+-#include <iostream>
+-#include <set>
+-
+-#ifdef _DEBUG
+-//#define DUMP_STATEMENTS
+-#endif
+-
+-#ifdef DUMP_STATEMENTS
+-#include <iostream>
+-#endif
+-
+-using namespace Jitter;
+-
+-void CJitter::AllocateRegisters(BASIC_BLOCK& basicBlock)
+-{
+-	//Statements inserted before the statement at a given index (spills first, then loads,
+-	//since a register can be handed over from one symbol to another at the same point)
+-	InsertionMap spillStatements;
+-	InsertionMap loadStatements;
+-#ifdef DUMP_STATEMENTS
+-	DumpStatementList(basicBlock.statements);
+-	std::cout << std::endl;
+-#endif
+-
+-	//Register allocation is done per "range". A range is a sequence of instructions
+-	//that ends with a OP_CALL or with the block's end. We do allocation per range
+-	//because changes to relative symbols might need to be visible by functions
+-	//called by the block.
+-
+-	//Within a range, a symbol holds its register from its first to its last access:
+-	//it is loaded right before its first use and saved right after its last definition.
+-	//Nothing else reads the context during a range (calls end ranges), except the
+-	//guest memory handlers, which only see symbols declared safe for them.
+-
+-	//Keep in mind that a temporary can remain live across a OP_CALL.
+-
+-	auto allocRanges = ComputeAllocationRanges(basicBlock);
+-	for(const auto& allocRange : allocRanges)
+-	{
+-		bool isLastRange = (allocRange.second + 1) == basicBlock.statements.size();
+-
+-		SymbolRegAllocInfo symbolRegAllocs;
+-		ComputeLivenessForRange(basicBlock, allocRange, symbolRegAllocs);
+-
+-		MarkAliasedSymbols(basicBlock, allocRange, symbolRegAllocs);
+-
+-		RegisterOccupancy occupancy;
+-		//Registers holding promoted loop symbols are taken for the whole block
+-		for(unsigned int i = 0; i < 32; i++)
+-		{
+-			if(basicBlock.reservedRegisters & (1 << i))
+-			{
+-				occupancy[std::make_pair(SYM_REGISTER, i)].push_back(std::make_pair(0U, ~0U));
+-			}
+-		}
+-		AssociateSymbolsToRegisters(symbolRegAllocs, allocRange, occupancy);
+-		CommitRegisterAllocation(basicBlock, allocRange, isLastRange, symbolRegAllocs, spillStatements, loadStatements);
+-
+-		//Context symbols that can't stay in registers across guest memory ops get
+-		//registers between them
+-		AllocateGuestMemoryUnsafeSymbols(basicBlock, allocRange, occupancy, spillStatements, loadStatements);
+-	}
+-
+-	//Insert loads and spills
+-	{
+-		std::vector<StatementList::iterator> positions;
+-		positions.reserve(basicBlock.statements.size() + 1);
+-		for(auto it = basicBlock.statements.begin(); it != basicBlock.statements.end(); ++it)
+-		{
+-			positions.push_back(it);
+-		}
+-		positions.push_back(basicBlock.statements.end());
+-
+-		for(unsigned int index = 0; index < positions.size(); index++)
+-		{
+-			for(auto it = spillStatements.lower_bound(index); it != spillStatements.upper_bound(index); ++it)
+-			{
+-				basicBlock.statements.insert(positions[index], it->second);
+-			}
+-			for(auto it = loadStatements.lower_bound(index); it != loadStatements.upper_bound(index); ++it)
+-			{
+-				basicBlock.statements.insert(positions[index], it->second);
+-			}
+-		}
+-	}
+-
+-#ifdef DUMP_STATEMENTS
+-	DumpStatementList(basicBlock.statements);
+-	std::cout << std::endl;
+-#endif
+-}
+-
+-void CJitter::CommitRegisterAllocation(BASIC_BLOCK& basicBlock, const AllocationRange& allocRange, bool isLastRange,
+-                                       const SymbolRegAllocInfo& symbolRegAllocs, InsertionMap& spillStatements, InsertionMap& loadStatements)
+-{
+-	auto& symbolTable = basicBlock.symbolTable;
+-
+-	//Replace all references to symbols by references to allocated registers
+-	for(const auto& statementInfo : IndexedStatementList(basicBlock.statements))
+-	{
+-		auto& statement(statementInfo.statement);
+-		const auto& statementIdx(statementInfo.index);
+-		if(statementIdx < allocRange.first) continue;
+-		if(statementIdx > allocRange.second) break;
+-
+-		statement.VisitOperands(
+-		    [&](SymbolRefPtr& symbolRef, bool) {
+-			    auto symbolRegAllocIterator = symbolRegAllocs.find(symbolRef->GetSymbol());
+-			    if(symbolRegAllocIterator == std::end(symbolRegAllocs)) return;
+-			    const auto& symbolRegAlloc = symbolRegAllocIterator->second;
+-			    if(symbolRegAlloc.registerId == -1) return;
+-			    symbolRef = MakeSymbolRef(symbolTable.MakeSymbol(symbolRegAlloc.registerType, symbolRegAlloc.registerId));
+-		    });
+-	}
+-
+-	for(const auto& symbolRegAllocPair : symbolRegAllocs)
+-	{
+-		const auto& symbol = symbolRegAllocPair.first;
+-		const auto& symbolRegAlloc = symbolRegAllocPair.second;
+-
+-		//Check if it's actually allocated
+-		if(symbolRegAlloc.registerId == -1) continue;
+-
+-		//firstUse == -1 means it is written to but never used afterwards in this block
+-
+-		//If symbol is read and we use this symbol before we define it, so we need to load it first
+-		if((symbolRegAlloc.firstUse != -1) && (symbolRegAlloc.firstUse <= symbolRegAlloc.firstDef))
+-		{
+-			STATEMENT statement;
+-			statement.op = OP_MOV;
+-			statement.dst = std::make_shared<CSymbolRef>(
+-			    symbolTable.MakeSymbol(symbolRegAlloc.registerType, symbolRegAlloc.registerId));
+-			statement.src1 = std::make_shared<CSymbolRef>(symbol);
+-			loadStatements.insert(std::make_pair(symbolRegAlloc.firstUse, statement));
+-		}
+-
+-		//If symbol is defined, we need to save it after its last definition
+-		//Exception: Temporaries can be discarded if we're in the last range of the block
+-		bool deadTemporary = symbol->IsTemporary() && isLastRange;
+-		if(!deadTemporary && (symbolRegAlloc.firstDef != -1))
+-		{
+-			STATEMENT statement;
+-			statement.op = OP_MOV;
+-			statement.dst = std::make_shared<CSymbolRef>(symbol);
+-			statement.src1 = std::make_shared<CSymbolRef>(
+-			    symbolTable.MakeSymbol(symbolRegAlloc.registerType, symbolRegAlloc.registerId));
+-			spillStatements.insert(std::make_pair(symbolRegAlloc.lastDef + 1, statement));
+-		}
+-	}
+-}
+-
+-void CJitter::AllocateGuestMemoryUnsafeSymbols(BASIC_BLOCK& basicBlock, const AllocationRange& allocRange, RegisterOccupancy& occupancy,
+-                                               InsertionMap& spillStatements, InsertionMap& loadStatements)
+-{
+-	//Sub ranges: statements between guest memory ops (the op ends its sub range)
+-	std::vector<unsigned int> guestOpIndices;
+-	for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
+-	{
+-		const auto& statement(statementInfo.statement);
+-		const auto& statementIdx(statementInfo.index);
+-		if(statementIdx < allocRange.first) continue;
+-		if(statementIdx > allocRange.second) break;
+-		if((statement.op == OP_GUESTLOAD) || (statement.op == OP_GUESTSTORE))
+-		{
+-			guestOpIndices.push_back(statementIdx);
+-		}
+-	}
+-	if(guestOpIndices.empty()) return;
+-
+-	AllocationRangeArray subRanges;
+-	unsigned int subStart = allocRange.first;
+-	for(auto guestOpIndex : guestOpIndices)
+-	{
+-		if(guestOpIndex > subStart) subRanges.push_back(std::make_pair(subStart, guestOpIndex));
+-		subStart = guestOpIndex + 1;
+-	}
+-	if(subStart <= allocRange.second) subRanges.push_back(std::make_pair(subStart, allocRange.second));
+-
+-	for(const auto& subRange : subRanges)
+-	{
+-		SymbolRegAllocInfo symbolRegAllocs;
+-		ComputeLivenessForRange(basicBlock, subRange, symbolRegAllocs);
+-		MarkAliasedSymbols(basicBlock, subRange, symbolRegAllocs, false);
+-
+-		//Only unsafe symbols, not used by the guest memory op ending the sub range
+-		//(they are loaded after the previous op and saved before the next one)
+-		for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
+-		{
+-			const auto& statement(statementInfo.statement);
+-			if(statementInfo.index != subRange.second) continue;
+-			if((statement.op != OP_GUESTLOAD) && (statement.op != OP_GUESTSTORE)) break;
+-			statement.VisitOperands(
+-			    [&](const SymbolRefPtr& symbolRef, bool) {
+-				    auto symbolIterator = symbolRegAllocs.find(symbolRef->GetSymbol());
+-				    if(symbolIterator != std::end(symbolRegAllocs)) symbolIterator->second.aliased = true;
+-			    });
+-			break;
+-		}
+-		for(auto& symbolRegAllocPair : symbolRegAllocs)
+-		{
+-			if(IsGuestMemorySafeSymbol(symbolRegAllocPair.first.get()))
+-			{
+-				symbolRegAllocPair.second.aliased = true;
+-			}
+-		}
+-
+-		AssociateSymbolsToRegisters(symbolRegAllocs, subRange, occupancy);
+-		CommitRegisterAllocation(basicBlock, subRange, false, symbolRegAllocs, spillStatements, loadStatements);
+-	}
+-}
+-
+-void CJitter::AssociateSymbolsToRegisters(SymbolRegAllocInfo& symbolRegAllocs, const AllocationRange& allocRange, RegisterOccupancy& occupancy) const
+-{
+-	//Some notes:
+-	//- MD and FP registers are lumped together since MD registers are used for both
+-	//  MD and FP operations on all of our target platforms.
+-	//- A register can hold several symbols whose live intervals (first to last access)
+-	//  in the range don't overlap.
+-
+-	unsigned int gprCount = m_codeGen->GetAvailableRegisterCount();
+-	unsigned int mdCount = m_codeGen->GetAvailableMdRegisterCount();
+-
+-	auto getInterval =
+-	    [&](const SymbolPtr&, const SYMBOL_REGALLOCINFO& symbolRegAlloc) {
+-		    unsigned int start = std::min(symbolRegAlloc.firstUse, symbolRegAlloc.firstDef);
+-		    unsigned int end = 0;
+-		    if(symbolRegAlloc.lastUse != -1) end = std::max(end, symbolRegAlloc.lastUse);
+-		    if(symbolRegAlloc.lastDef != -1) end = std::max(end, symbolRegAlloc.lastDef);
+-		    assert((start >= allocRange.first) && (end <= allocRange.second) && (start <= end));
+-		    return std::make_pair(start, end);
+-	    };
+-
+-	//Best fit: prefer a register already holding other (non overlapping) intervals,
+-	//keeping free registers for symbols live across the whole range
+-	auto tryTakeRegister =
+-	    [&](SYM_TYPE poolType, unsigned int poolCount, const std::pair<unsigned int, unsigned int>& interval) -> int {
+-		    int bestRegister = -1;
+-		    size_t bestOccupancy = 0;
+-		    for(unsigned int i = 0; i < poolCount; i++)
+-		    {
+-			    const auto& intervals = occupancy[std::make_pair(poolType, i)];
+-			    bool overlaps = false;
+-			    for(const auto& other : intervals)
+-			    {
+-				    if((interval.first <= other.second) && (other.first <= interval.second))
+-				    {
+-					    overlaps = true;
+-					    break;
+-				    }
+-			    }
+-			    if(overlaps) continue;
+-			    if((bestRegister == -1) || (intervals.size() > bestOccupancy))
+-			    {
+-				    bestRegister = i;
+-				    bestOccupancy = intervals.size();
+-			    }
+-		    }
+-		    if(bestRegister != -1)
+-		    {
+-			    occupancy[std::make_pair(poolType, bestRegister)].push_back(interval);
+-		    }
+-		    return bestRegister;
+-	    };
+-
+-	bool fpInMdRegisters = m_codeGen->CanAllocateFpInMdRegisters();
+-	auto isRegisterAllocatable =
+-	    [fpInMdRegisters](SYM_TYPE symbolType) {
+-		    return (symbolType == SYM_RELATIVE) || (symbolType == SYM_TEMPORARY) ||
+-		           (symbolType == SYM_REL_REFERENCE) || (symbolType == SYM_TMP_REFERENCE) ||
+-		           (fpInMdRegisters && ((symbolType == SYM_FP_RELATIVE32) || (symbolType == SYM_FP_TEMPORARY32))) ||
+-		           (symbolType == SYM_RELATIVE128) || (symbolType == SYM_TEMPORARY128);
+-	    };
+-
+-	//Sort symbols by usage count
+-	std::list<SymbolRegAllocInfo::value_type*> sortedSymbols;
+-	for(auto& symbolRegAllocPair : symbolRegAllocs)
+-	{
+-		const auto& symbol(symbolRegAllocPair.first);
+-		const auto& symbolRegAlloc(symbolRegAllocPair.second);
+-		if(!isRegisterAllocatable(symbol->m_type)) continue;
+-		if(symbolRegAlloc.aliased) continue;
+-		sortedSymbols.push_back(&symbolRegAllocPair);
+-	}
+-	sortedSymbols.sort(
+-	    [](SymbolRegAllocInfo::value_type* symbolRegAllocPair1, SymbolRegAllocInfo::value_type* symbolRegAllocPair2) {
+-		    const auto& symbol1(symbolRegAllocPair1->first);
+-		    const auto& symbol2(symbolRegAllocPair2->first);
+-		    const auto& symbolRegAlloc1(symbolRegAllocPair1->second);
+-		    const auto& symbolRegAlloc2(symbolRegAllocPair2->second);
+-		    if(symbolRegAlloc1.useCount == symbolRegAlloc2.useCount)
+-		    {
+-			    if(symbol1->m_type == symbol2->m_type)
+-			    {
+-				    return symbol1->m_valueLow > symbol2->m_valueLow;
+-			    }
+-			    else
+-			    {
+-				    return symbol1->m_type > symbol2->m_type;
+-			    }
+-		    }
+-		    else
+-		    {
+-			    return symbolRegAlloc1.useCount > symbolRegAlloc2.useCount;
+-		    }
+-	    });
+-
+-	for(auto& symbolRegAllocPair : sortedSymbols)
+-	{
+-		const auto& symbol = symbolRegAllocPair->first;
+-		auto& symbolRegAlloc = symbolRegAllocPair->second;
+-
+-		//Find suitable register for this symbol
+-		auto poolType = SYM_REGISTER;
+-		auto registerSymbolType = SYM_REGISTER;
+-		if((symbol->m_type == SYM_RELATIVE) || (symbol->m_type == SYM_TEMPORARY))
+-		{
+-			registerSymbolType = SYM_REGISTER;
+-		}
+-		else if((symbol->m_type == SYM_REL_REFERENCE) || (symbol->m_type == SYM_TMP_REFERENCE))
+-		{
+-			registerSymbolType = SYM_REG_REFERENCE;
+-		}
+-		else if((symbol->m_type == SYM_FP_RELATIVE32) || (symbol->m_type == SYM_FP_TEMPORARY32))
+-		{
+-			poolType = SYM_REGISTER128;
+-			registerSymbolType = SYM_FP_REGISTER32;
+-		}
+-		else if((symbol->m_type == SYM_RELATIVE128) || (symbol->m_type == SYM_TEMPORARY128))
+-		{
+-			poolType = SYM_REGISTER128;
+-			registerSymbolType = SYM_REGISTER128;
+-		}
+-		int registerId = tryTakeRegister(poolType, (poolType == SYM_REGISTER) ? gprCount : mdCount,
+-		                                 getInterval(symbol, symbolRegAlloc));
+-		if(registerId != -1)
+-		{
+-			symbolRegAlloc.registerType = registerSymbolType;
+-			symbolRegAlloc.registerId = registerId;
+-		}
+-	}
+-}
+-
+-CJitter::AllocationRangeArray CJitter::ComputeAllocationRanges(const BASIC_BLOCK& basicBlock)
+-{
+-	AllocationRangeArray result;
+-	unsigned int currentStart = 0;
+-	for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
+-	{
+-		const auto& statement(statementInfo.statement);
+-		const auto& statementIdx(statementInfo.index);
+-		if(statement.op == OP_CALL)
+-		{
+-			//Gotta split here
+-			result.push_back(std::make_pair(currentStart, statementIdx));
+-			currentStart = statementIdx + 1;
+-		}
+-	}
+-	result.push_back(std::make_pair(currentStart, basicBlock.statements.size() - 1));
+-	return result;
+-}
+-
+-void CJitter::ComputeLivenessForRange(const BASIC_BLOCK& basicBlock, const AllocationRange& allocRange, SymbolRegAllocInfo& symbolRegAllocs) const
+-{
+-	for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
+-	{
+-		const auto& statement(statementInfo.statement);
+-		unsigned int statementIdx(statementInfo.index);
+-		if(statementIdx < allocRange.first) continue;
+-		if(statementIdx > allocRange.second) continue;
+-
+-		statement.VisitDestination(
+-		    [&](const SymbolRefPtr& symbolRef, bool) {
+-			    auto symbol(symbolRef->GetSymbol());
+-			    auto& symbolRegAlloc = symbolRegAllocs[symbol];
+-			    symbolRegAlloc.useCount++;
+-			    if(symbolRegAlloc.firstDef == -1)
+-			    {
+-				    symbolRegAlloc.firstDef = statementIdx;
+-			    }
+-			    if((symbolRegAlloc.lastDef == -1) || (statementIdx > symbolRegAlloc.lastDef))
+-			    {
+-				    symbolRegAlloc.lastDef = statementIdx;
+-			    }
+-		    });
+-
+-		//Parameters are read when the call is emitted: they are used up to the call
+-		bool isParam = (statement.op == OP_PARAM) || (statement.op == OP_PARAM_RET);
+-		unsigned int useIdx = isParam ? allocRange.second : statementIdx;
+-
+-		statement.VisitSources(
+-		    [&](const SymbolRefPtr& symbolRef, bool) {
+-			    auto symbol(symbolRef->GetSymbol());
+-			    auto& symbolRegAlloc = symbolRegAllocs[symbol];
+-			    symbolRegAlloc.useCount++;
+-			    if(symbolRegAlloc.firstUse == -1)
+-			    {
+-				    symbolRegAlloc.firstUse = statementIdx;
+-			    }
+-			    if((symbolRegAlloc.lastUse == -1) || (useIdx > symbolRegAlloc.lastUse))
+-			    {
+-				    symbolRegAlloc.lastUse = useIdx;
+-			    }
+-		    });
+-	}
+-}
+-
+-void CJitter::MarkAliasedSymbols(const BASIC_BLOCK& basicBlock, const AllocationRange& allocRange, SymbolRegAllocInfo& symbolRegAllocs, bool checkGuestMemoryOps) const
+-{
+-	bool hasGuestMemoryOp = false;
+-	for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
+-	{
+-		auto& statement(statementInfo.statement);
+-		const auto& statementIdx(statementInfo.index);
+-		if(statementIdx < allocRange.first) continue;
+-		if(statementIdx > allocRange.second) break;
+-		if(checkGuestMemoryOps && ((statement.op == OP_GUESTLOAD) || (statement.op == OP_GUESTSTORE)))
+-		{
+-			hasGuestMemoryOp = true;
+-			break;
+-		}
+-	}
+-
+-	if(hasGuestMemoryOp)
+-	{
+-		//Guest memory ops can call a handler that may read or write context
+-		//state: only symbols declared safe can stay in registers across them.
+-		for(auto& symbolRegAlloc : symbolRegAllocs)
+-		{
+-			if(!IsGuestMemorySafeSymbol(symbolRegAlloc.first.get()))
+-			{
+-				symbolRegAlloc.second.aliased = true;
+-			}
+-		}
+-	}
+-
+-	for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
+-	{
+-		auto& statement(statementInfo.statement);
+-		const auto& statementIdx(statementInfo.index);
+-		if(statementIdx < allocRange.first) continue;
+-		if(statementIdx > allocRange.second) break;
+-		if(statement.op == OP_PARAM_RET)
+-		{
+-			//This symbol will end up being written to by the callee, thus will be aliased
+-			auto& symbolRegAlloc = symbolRegAllocs[statement.src1->GetSymbol()];
+-			symbolRegAlloc.aliased = true;
+-		}
+-		for(auto& symbolRegAlloc : symbolRegAllocs)
+-		{
+-			if(symbolRegAlloc.second.aliased) continue;
+-			auto testedSymbol = symbolRegAlloc.first;
+-			statement.VisitOperands(
+-			    [&](const SymbolRefPtr& symbolRef, bool) {
+-				    auto symbol = symbolRef->GetSymbol();
+-				    if(symbol->Equals(testedSymbol.get())) return;
+-				    if(symbol->Aliases(testedSymbol.get()))
+-				    {
+-					    symbolRegAlloc.second.aliased = true;
+-				    }
+-			    });
+-		}
+-	}
+-}
++#include "Jitter.h"
++#include <iostream>
++#include <set>
++
++#ifdef _DEBUG
++//#define DUMP_STATEMENTS
++#endif
++
++#ifdef DUMP_STATEMENTS
++#include <iostream>
++#endif
++
++using namespace Jitter;
++
++void CJitter::AllocateRegisters(BASIC_BLOCK& basicBlock)
++{
++	//Statements inserted before the statement at a given index (spills first, then loads,
++	//since a register can be handed over from one symbol to another at the same point)
++	InsertionMap spillStatements;
++	InsertionMap loadStatements;
++#ifdef DUMP_STATEMENTS
++	DumpStatementList(basicBlock.statements);
++	std::cout << std::endl;
++#endif
++
++	//Register allocation is done per "range". A range is a sequence of instructions
++	//that ends with a OP_CALL or with the block's end. We do allocation per range
++	//because changes to relative symbols might need to be visible by functions
++	//called by the block.
++
++	//Within a range, a symbol holds its register from its first to its last access:
++	//it is loaded right before its first use and saved right after its last definition.
++	//Nothing else reads the context during a range (calls end ranges), except the
++	//guest memory handlers, which only see symbols declared safe for them.
++
++	//Keep in mind that a temporary can remain live across a OP_CALL.
++
++	auto allocRanges = ComputeAllocationRanges(basicBlock);
++	for(const auto& allocRange : allocRanges)
++	{
++		bool isLastRange = (allocRange.second + 1) == basicBlock.statements.size();
++
++		SymbolRegAllocInfo symbolRegAllocs;
++		ComputeLivenessForRange(basicBlock, allocRange, symbolRegAllocs);
++
++		MarkAliasedSymbols(basicBlock, allocRange, symbolRegAllocs);
++
++		RegisterOccupancy occupancy;
++		//Registers holding promoted loop symbols are taken for the whole block
++		for(unsigned int i = 0; i < 32; i++)
++		{
++			if(basicBlock.reservedRegisters & (1 << i))
++			{
++				occupancy[std::make_pair(SYM_REGISTER, i)].push_back(std::make_pair(0U, ~0U));
++			}
++		}
++		AssociateSymbolsToRegisters(symbolRegAllocs, allocRange, occupancy);
++		CommitRegisterAllocation(basicBlock, allocRange, isLastRange, symbolRegAllocs, spillStatements, loadStatements);
++
++		//Context symbols that can't stay in registers across guest memory ops get
++		//registers between them
++		AllocateGuestMemoryUnsafeSymbols(basicBlock, allocRange, occupancy, spillStatements, loadStatements);
++	}
++
++	//Insert loads and spills
++	{
++		std::vector<StatementList::iterator> positions;
++		positions.reserve(basicBlock.statements.size() + 1);
++		for(auto it = basicBlock.statements.begin(); it != basicBlock.statements.end(); ++it)
++		{
++			positions.push_back(it);
++		}
++		positions.push_back(basicBlock.statements.end());
++
++		for(unsigned int index = 0; index < positions.size(); index++)
++		{
++			for(auto it = spillStatements.lower_bound(index); it != spillStatements.upper_bound(index); ++it)
++			{
++				basicBlock.statements.insert(positions[index], it->second);
++			}
++			for(auto it = loadStatements.lower_bound(index); it != loadStatements.upper_bound(index); ++it)
++			{
++				basicBlock.statements.insert(positions[index], it->second);
++			}
++		}
++	}
++
++#ifdef DUMP_STATEMENTS
++	DumpStatementList(basicBlock.statements);
++	std::cout << std::endl;
++#endif
++}
++
++void CJitter::CommitRegisterAllocation(BASIC_BLOCK& basicBlock, const AllocationRange& allocRange, bool isLastRange,
++                                       const SymbolRegAllocInfo& symbolRegAllocs, InsertionMap& spillStatements, InsertionMap& loadStatements)
++{
++	auto& symbolTable = basicBlock.symbolTable;
++
++	//Replace all references to symbols by references to allocated registers
++	for(const auto& statementInfo : IndexedStatementList(basicBlock.statements))
++	{
++		auto& statement(statementInfo.statement);
++		const auto& statementIdx(statementInfo.index);
++		if(statementIdx < allocRange.first) continue;
++		if(statementIdx > allocRange.second) break;
++
++		statement.VisitOperands(
++		    [&](SymbolRefPtr& symbolRef, bool) {
++			    auto symbolRegAllocIterator = symbolRegAllocs.find(symbolRef->GetSymbol());
++			    if(symbolRegAllocIterator == std::end(symbolRegAllocs)) return;
++			    const auto& symbolRegAlloc = symbolRegAllocIterator->second;
++			    if(symbolRegAlloc.registerId == -1) return;
++			    symbolRef = MakeSymbolRef(symbolTable.MakeSymbol(symbolRegAlloc.registerType, symbolRegAlloc.registerId));
++		    });
++	}
++
++	for(const auto& symbolRegAllocPair : symbolRegAllocs)
++	{
++		const auto& symbol = symbolRegAllocPair.first;
++		const auto& symbolRegAlloc = symbolRegAllocPair.second;
++
++		//Check if it's actually allocated
++		if(symbolRegAlloc.registerId == -1) continue;
++
++		//firstUse == -1 means it is written to but never used afterwards in this block
++
++		//If symbol is read and we use this symbol before we define it, so we need to load it first
++		if((symbolRegAlloc.firstUse != -1) && (symbolRegAlloc.firstUse <= symbolRegAlloc.firstDef))
++		{
++			STATEMENT statement;
++			statement.op = OP_MOV;
++			statement.dst = MakeSymbolRefPtr(
++			    symbolTable.MakeSymbol(symbolRegAlloc.registerType, symbolRegAlloc.registerId));
++			statement.src1 = MakeSymbolRefPtr(symbol);
++			loadStatements.insert(std::make_pair(symbolRegAlloc.firstUse, statement));
++		}
++
++		//If symbol is defined, we need to save it after its last definition
++		//Exception: Temporaries can be discarded if we're in the last range of the block
++		bool deadTemporary = symbol->IsTemporary() && isLastRange;
++		if(!deadTemporary && (symbolRegAlloc.firstDef != -1))
++		{
++			STATEMENT statement;
++			statement.op = OP_MOV;
++			statement.dst = MakeSymbolRefPtr(symbol);
++			statement.src1 = MakeSymbolRefPtr(
++			    symbolTable.MakeSymbol(symbolRegAlloc.registerType, symbolRegAlloc.registerId));
++			spillStatements.insert(std::make_pair(symbolRegAlloc.lastDef + 1, statement));
++		}
++	}
++}
++
++void CJitter::AllocateGuestMemoryUnsafeSymbols(BASIC_BLOCK& basicBlock, const AllocationRange& allocRange, RegisterOccupancy& occupancy,
++                                               InsertionMap& spillStatements, InsertionMap& loadStatements)
++{
++	//Sub ranges: statements between guest memory ops (the op ends its sub range)
++	std::vector<unsigned int> guestOpIndices;
++	for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
++	{
++		const auto& statement(statementInfo.statement);
++		const auto& statementIdx(statementInfo.index);
++		if(statementIdx < allocRange.first) continue;
++		if(statementIdx > allocRange.second) break;
++		if((statement.op == OP_GUESTLOAD) || (statement.op == OP_GUESTSTORE))
++		{
++			guestOpIndices.push_back(statementIdx);
++		}
++	}
++	if(guestOpIndices.empty()) return;
++
++	AllocationRangeArray subRanges;
++	unsigned int subStart = allocRange.first;
++	for(auto guestOpIndex : guestOpIndices)
++	{
++		if(guestOpIndex > subStart) subRanges.push_back(std::make_pair(subStart, guestOpIndex));
++		subStart = guestOpIndex + 1;
++	}
++	if(subStart <= allocRange.second) subRanges.push_back(std::make_pair(subStart, allocRange.second));
++
++	for(const auto& subRange : subRanges)
++	{
++		SymbolRegAllocInfo symbolRegAllocs;
++		ComputeLivenessForRange(basicBlock, subRange, symbolRegAllocs);
++		MarkAliasedSymbols(basicBlock, subRange, symbolRegAllocs, false);
++
++		//Only unsafe symbols, not used by the guest memory op ending the sub range
++		//(they are loaded after the previous op and saved before the next one)
++		for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
++		{
++			const auto& statement(statementInfo.statement);
++			if(statementInfo.index != subRange.second) continue;
++			if((statement.op != OP_GUESTLOAD) && (statement.op != OP_GUESTSTORE)) break;
++			statement.VisitOperands(
++			    [&](const SymbolRefPtr& symbolRef, bool) {
++				    auto symbolIterator = symbolRegAllocs.find(symbolRef->GetSymbol());
++				    if(symbolIterator != std::end(symbolRegAllocs)) symbolIterator->second.aliased = true;
++			    });
++			break;
++		}
++		for(auto& symbolRegAllocPair : symbolRegAllocs)
++		{
++			if(IsGuestMemorySafeSymbol(symbolRegAllocPair.first.get()))
++			{
++				symbolRegAllocPair.second.aliased = true;
++			}
++		}
++
++		AssociateSymbolsToRegisters(symbolRegAllocs, subRange, occupancy);
++		CommitRegisterAllocation(basicBlock, subRange, false, symbolRegAllocs, spillStatements, loadStatements);
++	}
++}
++
++void CJitter::AssociateSymbolsToRegisters(SymbolRegAllocInfo& symbolRegAllocs, const AllocationRange& allocRange, RegisterOccupancy& occupancy) const
++{
++	//Some notes:
++	//- MD and FP registers are lumped together since MD registers are used for both
++	//  MD and FP operations on all of our target platforms.
++	//- A register can hold several symbols whose live intervals (first to last access)
++	//  in the range don't overlap.
++
++	unsigned int gprCount = m_codeGen->GetAvailableRegisterCount();
++	unsigned int mdCount = m_codeGen->GetAvailableMdRegisterCount();
++
++	auto getInterval =
++	    [&](const SymbolPtr&, const SYMBOL_REGALLOCINFO& symbolRegAlloc) {
++		    unsigned int start = std::min(symbolRegAlloc.firstUse, symbolRegAlloc.firstDef);
++		    unsigned int end = 0;
++		    if(symbolRegAlloc.lastUse != -1) end = std::max(end, symbolRegAlloc.lastUse);
++		    if(symbolRegAlloc.lastDef != -1) end = std::max(end, symbolRegAlloc.lastDef);
++		    assert((start >= allocRange.first) && (end <= allocRange.second) && (start <= end));
++		    return std::make_pair(start, end);
++	    };
++
++	//Best fit: prefer a register already holding other (non overlapping) intervals,
++	//keeping free registers for symbols live across the whole range
++	auto tryTakeRegister =
++	    [&](SYM_TYPE poolType, unsigned int poolCount, const std::pair<unsigned int, unsigned int>& interval) -> int {
++		    int bestRegister = -1;
++		    size_t bestOccupancy = 0;
++		    for(unsigned int i = 0; i < poolCount; i++)
++		    {
++			    const auto& intervals = occupancy[std::make_pair(poolType, i)];
++			    bool overlaps = false;
++			    for(const auto& other : intervals)
++			    {
++				    if((interval.first <= other.second) && (other.first <= interval.second))
++				    {
++					    overlaps = true;
++					    break;
++				    }
++			    }
++			    if(overlaps) continue;
++			    if((bestRegister == -1) || (intervals.size() > bestOccupancy))
++			    {
++				    bestRegister = i;
++				    bestOccupancy = intervals.size();
++			    }
++		    }
++		    if(bestRegister != -1)
++		    {
++			    occupancy[std::make_pair(poolType, bestRegister)].push_back(interval);
++		    }
++		    return bestRegister;
++	    };
++
++	bool fpInMdRegisters = m_codeGen->CanAllocateFpInMdRegisters();
++	auto isRegisterAllocatable =
++	    [fpInMdRegisters](SYM_TYPE symbolType) {
++		    return (symbolType == SYM_RELATIVE) || (symbolType == SYM_TEMPORARY) ||
++		           (symbolType == SYM_REL_REFERENCE) || (symbolType == SYM_TMP_REFERENCE) ||
++		           (fpInMdRegisters && ((symbolType == SYM_FP_RELATIVE32) || (symbolType == SYM_FP_TEMPORARY32))) ||
++		           (symbolType == SYM_RELATIVE128) || (symbolType == SYM_TEMPORARY128);
++	    };
++
++	//Sort symbols by usage count
++	std::list<SymbolRegAllocInfo::value_type*> sortedSymbols;
++	for(auto& symbolRegAllocPair : symbolRegAllocs)
++	{
++		const auto& symbol(symbolRegAllocPair.first);
++		const auto& symbolRegAlloc(symbolRegAllocPair.second);
++		if(!isRegisterAllocatable(symbol->m_type)) continue;
++		if(symbolRegAlloc.aliased) continue;
++		sortedSymbols.push_back(&symbolRegAllocPair);
++	}
++	sortedSymbols.sort(
++	    [](SymbolRegAllocInfo::value_type* symbolRegAllocPair1, SymbolRegAllocInfo::value_type* symbolRegAllocPair2) {
++		    const auto& symbol1(symbolRegAllocPair1->first);
++		    const auto& symbol2(symbolRegAllocPair2->first);
++		    const auto& symbolRegAlloc1(symbolRegAllocPair1->second);
++		    const auto& symbolRegAlloc2(symbolRegAllocPair2->second);
++		    if(symbolRegAlloc1.useCount == symbolRegAlloc2.useCount)
++		    {
++			    if(symbol1->m_type == symbol2->m_type)
++			    {
++				    return symbol1->m_valueLow > symbol2->m_valueLow;
++			    }
++			    else
++			    {
++				    return symbol1->m_type > symbol2->m_type;
++			    }
++		    }
++		    else
++		    {
++			    return symbolRegAlloc1.useCount > symbolRegAlloc2.useCount;
++		    }
++	    });
++
++	for(auto& symbolRegAllocPair : sortedSymbols)
++	{
++		const auto& symbol = symbolRegAllocPair->first;
++		auto& symbolRegAlloc = symbolRegAllocPair->second;
++
++		//Find suitable register for this symbol
++		auto poolType = SYM_REGISTER;
++		auto registerSymbolType = SYM_REGISTER;
++		if((symbol->m_type == SYM_RELATIVE) || (symbol->m_type == SYM_TEMPORARY))
++		{
++			registerSymbolType = SYM_REGISTER;
++		}
++		else if((symbol->m_type == SYM_REL_REFERENCE) || (symbol->m_type == SYM_TMP_REFERENCE))
++		{
++			registerSymbolType = SYM_REG_REFERENCE;
++		}
++		else if((symbol->m_type == SYM_FP_RELATIVE32) || (symbol->m_type == SYM_FP_TEMPORARY32))
++		{
++			poolType = SYM_REGISTER128;
++			registerSymbolType = SYM_FP_REGISTER32;
++		}
++		else if((symbol->m_type == SYM_RELATIVE128) || (symbol->m_type == SYM_TEMPORARY128))
++		{
++			poolType = SYM_REGISTER128;
++			registerSymbolType = SYM_REGISTER128;
++		}
++		int registerId = tryTakeRegister(poolType, (poolType == SYM_REGISTER) ? gprCount : mdCount,
++		                                 getInterval(symbol, symbolRegAlloc));
++		if(registerId != -1)
++		{
++			symbolRegAlloc.registerType = registerSymbolType;
++			symbolRegAlloc.registerId = registerId;
++		}
++	}
++}
++
++CJitter::AllocationRangeArray CJitter::ComputeAllocationRanges(const BASIC_BLOCK& basicBlock)
++{
++	AllocationRangeArray result;
++	unsigned int currentStart = 0;
++	for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
++	{
++		const auto& statement(statementInfo.statement);
++		const auto& statementIdx(statementInfo.index);
++		if(statement.op == OP_CALL)
++		{
++			//Gotta split here
++			result.push_back(std::make_pair(currentStart, statementIdx));
++			currentStart = statementIdx + 1;
++		}
++	}
++	result.push_back(std::make_pair(currentStart, basicBlock.statements.size() - 1));
++	return result;
++}
++
++void CJitter::ComputeLivenessForRange(const BASIC_BLOCK& basicBlock, const AllocationRange& allocRange, SymbolRegAllocInfo& symbolRegAllocs) const
++{
++	for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
++	{
++		const auto& statement(statementInfo.statement);
++		unsigned int statementIdx(statementInfo.index);
++		if(statementIdx < allocRange.first) continue;
++		if(statementIdx > allocRange.second) continue;
++
++		statement.VisitDestination(
++		    [&](const SymbolRefPtr& symbolRef, bool) {
++			    auto symbol(symbolRef->GetSymbol());
++			    auto& symbolRegAlloc = symbolRegAllocs[symbol];
++			    symbolRegAlloc.useCount++;
++			    if(symbolRegAlloc.firstDef == -1)
++			    {
++				    symbolRegAlloc.firstDef = statementIdx;
++			    }
++			    if((symbolRegAlloc.lastDef == -1) || (statementIdx > symbolRegAlloc.lastDef))
++			    {
++				    symbolRegAlloc.lastDef = statementIdx;
++			    }
++		    });
++
++		//Parameters are read when the call is emitted: they are used up to the call
++		bool isParam = (statement.op == OP_PARAM) || (statement.op == OP_PARAM_RET);
++		unsigned int useIdx = isParam ? allocRange.second : statementIdx;
++
++		statement.VisitSources(
++		    [&](const SymbolRefPtr& symbolRef, bool) {
++			    auto symbol(symbolRef->GetSymbol());
++			    auto& symbolRegAlloc = symbolRegAllocs[symbol];
++			    symbolRegAlloc.useCount++;
++			    if(symbolRegAlloc.firstUse == -1)
++			    {
++				    symbolRegAlloc.firstUse = statementIdx;
++			    }
++			    if((symbolRegAlloc.lastUse == -1) || (useIdx > symbolRegAlloc.lastUse))
++			    {
++				    symbolRegAlloc.lastUse = useIdx;
++			    }
++		    });
++	}
++}
++
++void CJitter::MarkAliasedSymbols(const BASIC_BLOCK& basicBlock, const AllocationRange& allocRange, SymbolRegAllocInfo& symbolRegAllocs, bool checkGuestMemoryOps) const
++{
++	bool hasGuestMemoryOp = false;
++	for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
++	{
++		auto& statement(statementInfo.statement);
++		const auto& statementIdx(statementInfo.index);
++		if(statementIdx < allocRange.first) continue;
++		if(statementIdx > allocRange.second) break;
++		if(checkGuestMemoryOps && ((statement.op == OP_GUESTLOAD) || (statement.op == OP_GUESTSTORE)))
++		{
++			hasGuestMemoryOp = true;
++			break;
++		}
++	}
++
++	if(hasGuestMemoryOp)
++	{
++		//Guest memory ops can call a handler that may read or write context
++		//state: only symbols declared safe can stay in registers across them.
++		for(auto& symbolRegAlloc : symbolRegAllocs)
++		{
++			if(!IsGuestMemorySafeSymbol(symbolRegAlloc.first.get()))
++			{
++				symbolRegAlloc.second.aliased = true;
++			}
++		}
++	}
++
++	for(const auto& statementInfo : ConstIndexedStatementList(basicBlock.statements))
++	{
++		auto& statement(statementInfo.statement);
++		const auto& statementIdx(statementInfo.index);
++		if(statementIdx < allocRange.first) continue;
++		if(statementIdx > allocRange.second) break;
++		if(statement.op == OP_PARAM_RET)
++		{
++			//This symbol will end up being written to by the callee, thus will be aliased
++			auto& symbolRegAlloc = symbolRegAllocs[statement.src1->GetSymbol()];
++			symbolRegAlloc.aliased = true;
++		}
++		for(auto& symbolRegAlloc : symbolRegAllocs)
++		{
++			if(symbolRegAlloc.second.aliased) continue;
++			auto testedSymbol = symbolRegAlloc.first;
++			statement.VisitOperands(
++			    [&](const SymbolRefPtr& symbolRef, bool) {
++				    auto symbol = symbolRef->GetSymbol();
++				    if(symbol->Equals(testedSymbol.get())) return;
++				    if(symbol->Aliases(testedSymbol.get()))
++				    {
++					    symbolRegAlloc.second.aliased = true;
++				    }
++			    });
++		}
++	}
++}
+diff --git a/src/Jitter_SymbolTable.cpp b/src/Jitter_SymbolTable.cpp
+--- a/src/Jitter_SymbolTable.cpp
++++ b/src/Jitter_SymbolTable.cpp
+@@ -1,32 +1,32 @@
+-#include <assert.h>
+-#include "Jitter_SymbolTable.h"
+-
+-using namespace Jitter;
+-
+-CSymbolTable::SymbolSet& CSymbolTable::GetSymbols()
+-{
+-	return m_symbols;
+-}
+-
+-CSymbolTable::SymbolIterator CSymbolTable::RemoveSymbol(const SymbolIterator& symbolIterator)
+-{
+-	return m_symbols.erase(symbolIterator);
+-}
+-
+-SymbolPtr CSymbolTable::MakeSymbol(const SymbolPtr& srcSymbol)
+-{
+-	auto symbolIterator(m_symbols.find(srcSymbol));
+-	if(symbolIterator != m_symbols.end())
+-	{
+-		return *symbolIterator;
+-	}
+-	auto result = std::make_shared<CSymbol>(*srcSymbol);
+-	m_symbols.insert(result);
+-	return result;
+-}
+-
+-SymbolPtr CSymbolTable::MakeSymbol(SYM_TYPE type, uint32 valueLow, uint32 valueHigh)
+-{
+-	CSymbol symbol(type, valueLow, valueHigh);
+-	return MakeSymbol(SymbolPtr(&symbol, SymbolNullDeleter()));
+-}
++#include <assert.h>
++#include "Jitter_SymbolTable.h"
++
++using namespace Jitter;
++
++CSymbolTable::SymbolSet& CSymbolTable::GetSymbols()
++{
++	return m_symbols;
++}
++
++CSymbolTable::SymbolIterator CSymbolTable::RemoveSymbol(const SymbolIterator& symbolIterator)
++{
++	return m_symbols.erase(symbolIterator);
++}
++
++SymbolPtr CSymbolTable::MakeSymbol(const SymbolPtr& srcSymbol)
++{
++	auto symbolIterator(m_symbols.find(srcSymbol));
++	if(symbolIterator != m_symbols.end())
++	{
++		return *symbolIterator;
++	}
++	auto result = MakeSymbolPtr(*srcSymbol);
++	m_symbols.insert(result);
++	return result;
++}
++
++SymbolPtr CSymbolTable::MakeSymbol(SYM_TYPE type, uint32 valueLow, uint32 valueHigh)
++{
++	CSymbol symbol(type, valueLow, valueHigh);
++	return MakeSymbol(SymbolPtr(&symbol, SymbolNullDeleter()));
++}
