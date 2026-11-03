@@ -33,20 +33,25 @@ namespace
 		g_batchLinear = linear;
 	}
 
-	void Quad(float x0, float y0, float x1, float y1, float s0, float t0, float s1, float t1, uint32_t color)
+	void Quad(float x0, float y0, float x1, float y1, float s0, float t0, float s1, float t1, uint32_t color, uint32_t bottomColor)
 	{
 		// Pixels to clip space, y down.
 		float sx = 2.0f / g_screenWidth, sy = -2.0f / g_screenHeight;
 		VERTEX tl = {x0 * sx - 1.0f, y0 * sy + 1.0f, s0, t0, color};
 		VERTEX tr = {x1 * sx - 1.0f, y0 * sy + 1.0f, s1, t0, color};
-		VERTEX bl = {x0 * sx - 1.0f, y1 * sy + 1.0f, s0, t1, color};
-		VERTEX br = {x1 * sx - 1.0f, y1 * sy + 1.0f, s1, t1, color};
+		VERTEX bl = {x0 * sx - 1.0f, y1 * sy + 1.0f, s0, t1, bottomColor};
+		VERTEX br = {x1 * sx - 1.0f, y1 * sy + 1.0f, s1, t1, bottomColor};
 		g_vertices.push_back(tl);
 		g_vertices.push_back(tr);
 		g_vertices.push_back(bl);
 		g_vertices.push_back(tr);
 		g_vertices.push_back(br);
 		g_vertices.push_back(bl);
+	}
+
+	void Quad(float x0, float y0, float x1, float y1, float s0, float t0, float s1, float t1, uint32_t color)
+	{
+		Quad(x0, y0, x1, y1, s0, t0, s1, t1, color, color);
 	}
 
 	GLuint CreateTexture(uint32_t width, uint32_t height, const void* pixels)
@@ -229,4 +234,29 @@ void Gfx::UploadFrame(const uint32_t* pixels, uint32_t width, uint32_t height)
 GLuint Gfx::FrameTexture()
 {
 	return g_frameTexture;
+}
+
+void Gfx::GradientRect(float x, float y, float width, float height, uint32_t top, uint32_t bottom)
+{
+	BindBatch(g_whiteTexture, true, false);
+	Quad(x, y, x + width, y + height, 0, 0, 1, 1, top, bottom);
+}
+
+GLuint Gfx::CreateMask(uint32_t width, uint32_t height, const uint8_t* alpha)
+{
+	std::vector<uint32_t> pixels(static_cast<size_t>(width) * height);
+	for(size_t i = 0; i < pixels.size(); i++) pixels[i] = 0x00FFFFFF | (static_cast<uint32_t>(alpha[i]) << 24);
+	return CreateTexture(width, height, pixels.data());
+}
+
+void Gfx::Mask(GLuint texture, float x, float y, float width, float height, uint32_t color)
+{
+	BindBatch(texture, true, true);
+	Quad(x, y, x + width, y + height, 0, 0, 1, 1, color);
+}
+
+void Gfx::MaskRegion(GLuint texture, float x, float y, float width, float height, float s0, float t0, float s1, float t1, uint32_t color)
+{
+	BindBatch(texture, true, true);
+	Quad(x, y, x + width, y + height, s0, t0, s1, t1, color);
 }

@@ -15,6 +15,7 @@
 // needs libshacccg.suprx (ur0:data/libshacccg.suprx or ur0:data/external/).
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
@@ -38,6 +39,7 @@
 #include <vitaGL.h>
 
 #include "AutoCycleRate.h"
+#include "AutoTuner.h"
 #ifndef VITAPS2_BUILD
 #define VITAPS2_BUILD "dev"
 #endif
@@ -51,6 +53,7 @@
 #include "Jitter.h"
 #include "Log.h"
 #include "GameProfiles.h"
+#include "Theme.h"
 #include "GSH_Hardware.h"
 #include "Gfx.h"
 #include "GsBenchmark.h"
@@ -210,15 +213,17 @@ namespace
 		else if(key == "threaded_spu") settings.threadedSpu = value != 0;
 	}
 
-	// Defaults, then the bundled per-game profile, then the player's choices.
-	GAME_SETTINGS LoadSettings(const std::string& gamePath, const CGameProfiles::PROFILE* profile)
+	// What the first-boot tuner found for a game (CAutoTuner).
+	std::string AutoTunePathFor(const std::string& gamePath)
 	{
-		GAME_SETTINGS settings;
-		if(profile)
-		{
-			for(const auto& [key, value] : *profile) ApplySetting(settings, key, value);
-		}
-		std::ifstream file(SettingsPathFor(gamePath));
+		auto slash = gamePath.find_last_of('/');
+		return std::string(SETTINGS_PATH) + "/" + gamePath.substr(slash + 1) + ".auto.ini";
+	}
+
+	bool ApplySettingsFile(GAME_SETTINGS& settings, const std::string& path)
+	{
+		std::ifstream file(path);
+		if(!file) return false;
 		std::string line;
 		while(std::getline(file, line))
 		{
@@ -226,7 +231,29 @@ namespace
 			if(eq == std::string::npos) continue;
 			ApplySetting(settings, line.substr(0, eq), line.substr(eq + 1));
 		}
+		return true;
+	}
+
+	// Defaults, then the bundled per-game profile, then what the first-boot
+	// tuner found, then the player's choices.
+	GAME_SETTINGS LoadSettings(const std::string& gamePath, const CGameProfiles::PROFILE* profile, bool& tuned, bool& playerFile)
+	{
+		GAME_SETTINGS settings;
+		if(profile)
+		{
+			for(const auto& [key, value] : *profile) ApplySetting(settings, key, value);
+		}
+		tuned = ApplySettingsFile(settings, AutoTunePathFor(gamePath));
+		playerFile = ApplySettingsFile(settings, SettingsPathFor(gamePath));
 		return settings;
+	}
+
+	void SaveAutoTune(const std::string& gamePath, const CAutoTuner& tuner)
+	{
+		std::ofstream file(AutoTunePathFor(gamePath));
+		file << "# first-boot tuning: " << tuner.GetFinalFps() << " emulated fps\n"
+		     << "threaded_vu1=" << (tuner.GetChoice().threadedVu1 ? 1 : 0) << "\n"
+		     << "frame_skip=" << tuner.GetChoice().frameSkip << "\n";
 	}
 
 	void SaveSettings(const std::string& gamePath, const GAME_SETTINGS& settings)
@@ -454,7 +481,7 @@ namespace
 		auto games = ScanGames();
 		int selected = 0;
 		int scroll = 0;
-		const int visible = 15;
+		const int visible = 12;
 		uint32_t previous = ~0u;
 
 		while(true)
@@ -488,21 +515,9 @@ namespace
 			if(selected < scroll) scroll = selected;
 			if(selected >= scroll + visible) scroll = selected - visible + 1;
 
+			float seconds = static_cast<float>(sceKernelGetProcessTimeWide() % 100000000000ULL) / 1000000.0f;
 			BeginFrame();
-			Gfx::Text(30, 45, COLOR_ACCENT, 1.4f, "VitaPS2");
-			Gfx::Text(180, 45, COLOR_GREY, 0.8f, "PlayStation 2 emulator (experimental)  build " VITAPS2_BUILD);
-			for(int i = scroll; i < std::min(count, scroll + visible); i++)
-			{
-				int y = 95 + (i - scroll) * 26;
-				if(i == selected) Gfx::Rect(20, y - 20, 920, 26, COLOR_SELECTION);
-				Gfx::Text(30, y, (i == selected) ? COLOR_WHITE : COLOR_GREY, 0.8f, games[i].c_str());
-			}
-			if(count <= 1)
-			{
-				Gfx::Textf(30, 490, COLOR_WHITE, 0.8f, "Copy .iso/.cso/.chd/.elf files to %s", GAMES_PATH);
-			}
-			Gfx::Text(30, 530, COLOR_GREY, 0.65f,
-			          "X: boot  TRIANGLE: refresh  SELECT: GS benchmark  START: quit  |  In game: SELECT+START menu");
+			Theme::Browser(games, selected, scroll, visible, seconds, "PlayStation 2 emulator  build " VITAPS2_BUILD, GAMES_PATH);
 			EndFrame();
 		}
 	}
@@ -537,11 +552,19 @@ namespace
 		}
 		std::printf("booting %s serial '%s' profile %s\n", path.c_str(), discSerial.c_str(),
 		            profile ? (gameName.empty() ? "yes" : gameName.c_str()) : "none");
-		GAME_SETTINGS settings = LoadSettings(path, profile);
+		bool tuned = false, playerFile = false;
+		GAME_SETTINGS settings = LoadSettings(path, profile, tuned, playerFile);
+		// First boot of a game the player has not configured: try the speed
+		// settings that help some games and hurt others (scripted runs only with
+		// auto_tune=1, so experiments keep their settings).
+		bool autoTune = !tuned && !playerFile;
 		std::FILE* perfFile = nullptr;
 		if(autostart)
 		{
 			for(const auto& [key, value] : autostart->settings) ApplySetting(settings, key, value);
+			bool tuneRequested = std::any_of(autostart->settings.begin(), autostart->settings.end(),
+			                                 [](const auto& setting) { return (setting.first == "auto_tune") && (setting.second == "1"); });
+			autoTune = autoTune && tuneRequested;
 			perfFile = std::fopen(PERF_PATH, "w");
 			if(perfFile)
 			{
@@ -578,6 +601,12 @@ namespace
 		CEmuSession::SetSafeJit(settings.safeJit);
 		std::printf("safe jit: %s\n", settings.safeJit ? "on" : "off");
 		CAutoCycleRate autoRate;
+		CAutoTuner::CHOICE tuneStart;
+		tuneStart.threadedVu1 = settings.threadedVu1;
+		tuneStart.frameSkip = settings.frameSkip;
+		CAutoTuner tuner(tuneStart);
+		if(!autoTune) tuner.Cancel();
+		std::printf("first-boot tuning: %s\n", autoTune ? "on" : (tuned ? "done before" : "off (player settings)"));
 		// PAL discs (SCES/SLES/SCED...) run at 50 fps.
 		const float targetFps = ((discSerial.size() > 2) && (discSerial[2] == 'E' || discSerial[2] == 'e')) ? 50.0f : 60.0f;
 		const bool gpu = !settings.softwareRenderer;
@@ -710,7 +739,15 @@ namespace
 			if((buttons & SCE_CTRL_SELECT) && (pressed & SCE_CTRL_START))
 			{
 				uint32_t previousRate = settings.eeCycleRate;
+				bool previousVu1 = settings.threadedVu1;
+				uint32_t previousSkip = settings.frameSkip;
 				bool quit = RunPauseMenu(*session, settings, screen, autoRate);
+				// The player's choice wins over first-boot tuning.
+				if(!tuner.IsDone() && ((settings.threadedVu1 != previousVu1) || (settings.frameSkip != previousSkip)))
+				{
+					tuner.Cancel();
+					std::printf("first-boot tuning: stopped (player settings)\n");
+				}
 				if((settings.eeCycleRate == 0) && (previousRate != 0))
 				{
 					autoRate.Reset();
@@ -999,6 +1036,24 @@ namespace
 				{
 					std::printf("auto ee cycle rate: %u%%\n", autoRate.GetRate());
 					session->SetSpeedHacks(ToSpeedHacks(settings, autoRate));
+				}
+				if(!tuner.IsDone())
+				{
+					if(tuner.Update(vmFps, targetFps, stallShare))
+					{
+						settings.threadedVu1 = tuner.GetChoice().threadedVu1;
+						settings.frameSkip = tuner.GetChoice().frameSkip;
+						std::printf("first-boot tuning: trying threaded_vu1=%d frame_skip=%u\n", settings.threadedVu1 ? 1 : 0, settings.frameSkip);
+						session->SetSpeedHacks(ToSpeedHacks(settings, autoRate));
+					}
+					if(tuner.IsDone())
+					{
+						SaveAutoTune(path, tuner);
+						// A settings file saved before tuning finished holds the old values.
+						if(std::ifstream(SettingsPathFor(path))) SaveSettings(path, settings);
+						std::printf("first-boot tuning: done, threaded_vu1=%d frame_skip=%u (%.1f fps)\n", settings.threadedVu1 ? 1 : 0,
+						            settings.frameSkip, tuner.GetFinalFps());
+					}
 				}
 				if(!stallPcs.empty())
 				{
@@ -1295,6 +1350,7 @@ int main()
 		sceKernelExitProcess(0);
 		return 0;
 	}
+	Theme::Init();
 
 	try
 	{

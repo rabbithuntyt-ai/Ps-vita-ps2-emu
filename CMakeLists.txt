@@ -118,6 +118,13 @@ if(VITAPS2_HAS_GL)
 	)
 	target_include_directories(vitaps2_ui PUBLIC src/ui)
 	target_link_libraries(vitaps2_ui PUBLIC gsh_hardware)
+
+	# The VitaStation2 game list drawn on the host (tools/make_branding.py art).
+	if(OSMESA_LIBRARY)
+		add_executable(theme_preview tests/theme_preview.cpp src/vita/Theme.cpp)
+		target_include_directories(theme_preview PRIVATE src/vita)
+		target_link_libraries(theme_preview PRIVATE vitaps2_ui)
+	endif()
 endif()
 
 # Frontend-independent glue shared by the Vita app and the host harness.
@@ -220,6 +227,10 @@ else()
 
 	add_executable(game_profiles_tests tests/game_profiles_tests.cpp)
 	target_link_libraries(game_profiles_tests PRIVATE vitaps2_common)
+
+	add_executable(auto_tuner_tests tests/auto_tuner_tests.cpp)
+	target_include_directories(auto_tuner_tests PRIVATE src/common)
+	add_test(NAME auto_tuner_tests COMMAND auto_tuner_tests)
 	add_test(NAME game_profiles_tests COMMAND game_profiles_tests ${CMAKE_CURRENT_SOURCE_DIR}/assets/game_profiles.ini)
 
 	add_executable(audio_stretch_tests tests/audio_stretch_tests.cpp)

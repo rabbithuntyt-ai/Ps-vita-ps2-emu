@@ -2,7 +2,8 @@
 
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
-set(VITA_APP_NAME "VitaPS2")
+set(VITA_APP_NAME "VitaPS2")      # VPK file name (scripts and CI artifacts)
+set(VITA_APP_TITLE "VitaStation2") # name on the home screen and LiveArea
 set(VITA_TITLEID  "VTPS20000")
 set(VITA_VERSION  "00.10")
 
@@ -14,6 +15,7 @@ add_executable(vitaps2
 	src/vita/CpuScreen.cpp
 	src/vita/CpuScreen.h
 	src/vita/FastNew.cpp
+	src/vita/Theme.cpp
 	src/vita/JitMemory.cpp
 	src/vita/JitMemory.h
 	src/vita/PH_Vita.cpp
@@ -73,7 +75,7 @@ target_link_libraries(vitaps2
 vita_create_self(eboot.bin vitaps2 UNSAFE)
 vita_create_vpk(${VITA_APP_NAME}.vpk ${VITA_TITLEID} eboot.bin
 	VERSION ${VITA_VERSION}
-	NAME ${VITA_APP_NAME}
+	NAME ${VITA_APP_TITLE}
 	FILE sce_sys/icon0.png sce_sys/icon0.png
 	FILE sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
 	FILE sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
@@ -81,4 +83,8 @@ vita_create_vpk(${VITA_APP_NAME}.vpk ${VITA_TITLEID} eboot.bin
 	FILE ${PLAY_DIR}/GameConfig.xml GameConfig.xml
 	FILE assets/gs_test.elf gs_test.elf
 	FILE assets/game_profiles.ini game_profiles.ini
+	FILE assets/brand/wordmark.a8 brand/wordmark.a8
+	FILE assets/brand/digit.a8 brand/digit.a8
+	FILE assets/brand/glow.a8 brand/glow.a8
+	FILE assets/brand/buttons.a8 brand/buttons.a8
 )

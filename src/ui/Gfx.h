@@ -37,6 +37,14 @@ namespace Gfx
 #endif
 	    ;
 	float TextWidth(float scale, const char* text);
+
+	// A rectangle shading from 'top' to 'bottom' (vertical gradient).
+	void GradientRect(float x, float y, float width, float height, uint32_t top, uint32_t bottom);
+	// Alpha masks (wordmark, glows): drawn tinted by 'color', blended, filtered.
+	GLuint CreateMask(uint32_t width, uint32_t height, const uint8_t* alpha);
+	void Mask(GLuint texture, float x, float y, float width, float height, uint32_t color);
+	// Part of a mask (normalized texture coordinates), e.g. one icon of an atlas.
+	void MaskRegion(GLuint texture, float x, float y, float width, float height, float s0, float t0, float s1, float t1, uint32_t color);
 	float LineHeight(float scale);
 
 	// Draws a region of a texture (texel coordinates) into a screen rectangle.
