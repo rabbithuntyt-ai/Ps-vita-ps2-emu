@@ -16,9 +16,9 @@ common VU1 microprograms and common GS usage.
    screenshots, `perf.csv` and crash dumps. A compatibility table and a
    cross-game chart in the repo replace the single Silent Hill 2 line; the
    bottleneck shared by the most games is worked on next.
-   - [ ] Harness script (boot, play, collect, classify: no boot / menus / in game / playable)
-   - [ ] Top-50 candidate list (sales and popularity, minus games with Vita versions, each checked)
-   - [ ] `docs/COMPATIBILITY.md` table and a cross-game fps chart, updated per run
+   - [x] Harness script `tools/vitalab_compat.sh` (boot, press past menus, collect, classify: crash / no boot / boots with fps and bottleneck)
+   - [x] Top-50 list with the Play! core status of each game (docs/COMPATIBILITY.md)
+   - [x] `docs/COMPATIBILITY.md` measured-runs table updated per run (`tools/compat_report.py`); [ ] cross-game fps chart
 2. **Library HLE by signature.** Find library functions by their code
    bytes (not addresses) and run native ARM/NEON versions; libmpeg's
    `sceMpegGetPicture` (`src/common/MpegHle.cpp`) is the template.
@@ -41,12 +41,16 @@ common VU1 microprograms and common GS usage.
 5. **Automatic per-game tuning.** On first boot, measure and try the speed
    hacks (EE rate, frame skip, VU1 thread, interlaced rendering), keep the
    smoothest per serial (extends `assets/game_profiles.ini` and Auto EE rate).
+   - [x] `CAutoTuner`: VU1 thread and frame skip tried with A/B/A measurements, result in `settings/<game>.auto.ini` (EE rate stays with Auto EE rate)
+   - [ ] Interlaced rendering and the software renderer as further candidates
 6. **GS changes that help many games.** Mipmaps, dithering, the remaining
    blend modes; detection of full-screen effects (blur, bloom, depth of field)
    that can be cheapened or skipped.
-7. **Native-speed translation (AOT).** Whole functions translated ahead of
-   time with whole-program analysis, during an install step: long first load,
-   near-native code after. Design and expected gains: docs/AOT_TRANSLATION.md.
+7. **Whole-function translation on the Vita (tier 2).** Hot code regrouped
+   into whole functions and recompiled in the background on an idle core,
+   with whole-function analysis (register width, calling conventions, direct
+   RAM access); stored in the persistent JIT cache. No PC needed. Design,
+   cache findings and expected gains: docs/AOT_TRANSLATION.md.
 8. **More IOP modules replaced natively.** The IOP took up to 20% of the PS2
    thread in Silent Hill 2's menus. Play! already replaces many SDK IOP
    modules (IRX) with native code; extend that list from the harness's

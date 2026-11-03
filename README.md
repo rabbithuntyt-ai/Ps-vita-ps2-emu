@@ -1,8 +1,18 @@
-# VitaPS2
+# VitaStation2
 
-An experimental PlayStation 2 emulator for the PlayStation Vita / PS TV.
+![VitaStation2 LiveArea](docs/branding_preview.png)
 
-VitaPS2 runs the [Play!](https://github.com/jpd002/Play-) emulation core (EE and
+An experimental PlayStation 2 emulator for the PlayStation Vita / PS TV
+(formerly VitaPS2; the app keeps its title ID and `ux0:data/VitaPS2` data
+folder, so it updates in place).
+
+![Game list](docs/ui_preview.png)
+
+**Which games:** [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) tracks the
+top 50 PS2 games that have no Vita version, with their status in the
+emulation core and measurements on a real Vita.
+
+VitaStation2 runs the [Play!](https://github.com/jpd002/Play-) emulation core (EE and
 IOP recompilers, VU, SPU2, high-level emulated BIOS, so **no BIOS dump is
 needed**) on the Vita through its 32-bit ARM JIT, with new **GPU** and **software**
 Graphics Synthesizer renderers and a native vitaGL frontend.

@@ -26,7 +26,7 @@ A static recompiler that sees a whole function, or the whole program, can
 remove most of this. Projects that recompile whole games ahead of time
 (N64Recomp, XenonRecomp, PS2Recomp) get close to native speed, but each needs
 manual work per game. The goal here is the same code quality **without
-per-game work**: an automatic install step per disc.
+per-game work**, entirely on the Vita.
 
 ## The idea: an install step that rewrites the game's code
 
@@ -62,42 +62,69 @@ disc ELF + overlays ──► discovery ──► lift to SSA IR ──► whole
      lane widths.
    - **Timing:** cycles counted per function and per loop iteration;
      interrupt checks at loop back edges and calls instead of every block.
-4. **Optimize and generate code with a real compiler backend.** On a PC,
-   that means LLVM, emitting relocatable ARMv7 + NEON code bundled per disc
-   serial. (A PC companion tool, `vitaps2-prep`, takes the ISO and writes the
-   bundle to the Vita.)
-5. **Runtime.** The Vita loads the bundle and maps guest PCs to translated
-   functions. Each function carries a hash of the guest code it came from: if
-   the game overwrites or loads different code there (overlays,
-   self-modifying code), the guard fails and the JIT runs that code. Anything
-   the install step never saw also runs in the JIT, so the game always works.
+4. **Optimize and generate code** with our own Jitter (the compiler the JIT
+   already uses), extended to whole functions: function-wide register
+   allocation and the analyses above. It runs **on the Vita**: no PC is
+   needed at any point.
+5. **Runtime.** Translated functions are mapped by guest PC. Each carries a
+   hash of the guest code it came from: if the game overwrites or loads
+   different code there (overlays, self-modifying code), the guard fails and
+   the JIT runs that code. Anything never translated also runs in the JIT, so
+   the game always works.
 
-## Variant without a PC: background tier-2 on the Vita
+## How it runs on the Vita: tier 2 in the background
 
-The same idea at a smaller scale, fully automatic:
+Everything happens on the device, while the game plays:
 
 - The JIT keeps per-block execution counts (the hotspot sampler already
   exists).
-- A low-priority thread on an idle core regroups hot blocks into whole
-  functions and loops, and recompiles them with function-wide register
-  allocation, register-width tracking and fewer checks.
-- The new code is swapped in at a block boundary, and the result goes into
-  the persistent JIT cache (Library-wide plan, item 3), so the next play
-  starts fast.
+- A low-priority thread on an idle core (core 2 between VU1 and SPU2 work)
+  regroups hot blocks into whole functions and loops, and recompiles them
+  with the analyses above.
+- The new code is swapped in at a block boundary, and written to the
+  persistent JIT cache, so the next session starts with it.
 
-This gives smaller gains than LLVM on a PC, since our Jitter is a simpler
-optimizer, but needs no extra tool. It also builds the pieces the PC variant
-needs: function discovery, guards and the cache format.
+This is the "longer load times" trade spread over play: the first sessions
+of a game are as fast as today and get faster as hot code is translated;
+later sessions start translated.
+
+## Persistent JIT cache: findings
+
+The cache is the first building block (it removes scene-change stalls from
+the second play on, and it stores tier-2 code later). What the code
+generator does today, and what has to change:
+
+- **Absolute addresses:** every pointer the AArch32 code generator embeds
+  (calls into the emulator, memory handlers, constant tables) goes through
+  one function, `CCodeGen_AArch32::LoadConstantPtrInRegister`, as a
+  MOVW/MOVT pair. The eboot loads at a different base each run (seen in
+  crash dumps: 0x8103D000, for example), so these need relocation records:
+  an offset into the eboot image, or one of a few registered runtime bases
+  (EE RAM, the context structure). A block with any other pointer is not
+  cached.
+- **Links between blocks** are patched at run time (chained frames): the
+  cache stores each block as compiled, before linking, and links it again
+  after loading.
+- **Validation:** key = hash of the block's guest code + its compile hints
+  (FPU rounding, idle-loop flag) + the emulator build. Any mismatch is a
+  miss and the JIT compiles the block as today.
+- **Testing:** the ARM build runs Play!'s tests under qemu in CI; a
+  save-then-load test there (compile, store, reload in a fresh process,
+  compare register checksums) checks the relocations without a Vita.
 
 ## What it could gain
 
-Static recompilers typically reach 1.5-2.5 host instructions per guest
-instruction, against our 5-8, so **2.5-4x on EE-bound code**. That's the
-size of the gap between the Vita and full-speed EE emulation in heavy games.
-It doesn't speed up VU1 or the GS (VU1 on the GPU is a separate item).
+Static recompilers with a strong optimizer typically reach 1.5-2.5 host
+instructions per guest instruction, against our 5-8 (2.5-4x). Our Jitter is
+a simpler optimizer than an offline compiler, so the on-device tier 2 should
+be expected to land lower: **about 1.5-2.5x on EE-bound code**, mostly from
+register width, calling conventions and direct RAM access. That's a large
+part, not all, of the gap between the Vita and full-speed EE emulation in
+heavy games. It doesn't speed up VU1 or the GS (VU1 on the GPU is a separate
+item).
 
-**Load time:** a few minutes once per game on a PC, or spread over the
-first play sessions for the on-device variant.
+**Load time:** spread over the first play sessions: translation runs in the
+background on an idle core, and later sessions load the translated code.
 
 **First milestone:** run the four performance-gap workloads through the
 translator. `tools/perf_gap.py` measures ARM instructions per PS2 instruction
@@ -117,6 +144,6 @@ measurable before any game runs.
 
 ## Legal note
 
-Translation runs on the user's own disc image, on their PC or Vita. Bundles
+Translation runs on the user's own disc image, on their Vita. The cache files
 contain translated game code and are personal, like a save file: they aren't
 distributed.
