@@ -42,6 +42,8 @@
 #include "CpuScreen.h"
 #include "EmuSession.h"
 #include "EmuProfile.h"
+#include "Ps2Const.h"
+#include "ee/Ee_SubSystem.h"
 #include "Jitter.h"
 #include "Log.h"
 #include "GameProfiles.h"
@@ -547,6 +549,8 @@ namespace
 		uint32_t perfIdleChcr[12] = {};
 		uint64_t perfVif[4] = {};
 		uint32_t perfUnpack[16] = {}, perfUnpackFlags[3] = {};
+		bool eeHotMovie = false;
+		uint32_t eeHotSeconds = 0;
 		uint64_t perfCodeGen[4] = {Jitter::g_compileStats.optimizeUs.load(), Jitter::g_compileStats.allocateUs.load(), Jitter::g_compileStats.generateUs.load(), Jitter::g_compileStats.statements.load()};
 		CGSH_Hardware::GPU_TIMES perfGpu = CGSH_Hardware::GetTimes();
 		uint64_t perfPresentUs = g_presentUs;
@@ -802,6 +806,34 @@ namespace
 						}
 						perfSpuFull = full;
 						perfSpuRead = read;
+						// EE hotspots of MPEG playback: from the first second with
+						// BDEC activity on, written every 10 seconds.
+						if(!eeHotMovie && (ipu.commands[2] != perfIpu.commands[2]))
+						{
+							eeHotMovie = true;
+							session->ResetEeHotspots();
+						}
+						if(eeHotMovie && ((++eeHotSeconds % 10) == 0))
+						{
+							if(FILE* hot = std::fopen("ux0:data/VitaPS2/eehot.txt", "w"))
+							{
+								session->WriteEeHotspots(hot, 80);
+								std::fclose(hot);
+							}
+						}
+						// The code behind the hotspots, for disassembly on a PC.
+						if(eeHotMovie && (eeHotSeconds == 30) && autostart && (autostart->settings.size() != 0))
+						{
+							for(const auto& [key, value] : autostart->settings)
+							{
+								if((key != "dump_ee_ram") || (value != "1")) continue;
+								if(FILE* dump = std::fopen("ux0:data/VitaPS2/eeram.bin", "wb"))
+								{
+									std::fwrite(session->GetVm()->m_ee->m_ram, 1, PS2::EE_RAM_SIZE, dump);
+									std::fclose(dump);
+								}
+							}
+						}
 						perfIpu = ipu;
 						for(unsigned int i = 0; i < EmuProfile::IDLE_SOURCE_COUNT; i++)
 						{

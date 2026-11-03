@@ -2,6 +2,7 @@
 
 #include "EmuProfile.h"
 #include <atomic>
+#include <cstdio>
 #include <thread>
 #include <functional>
 #include <memory>
@@ -138,6 +139,12 @@ public:
 		uint32_t samples = 0;
 	};
 	PROFILE TakeProfile();
+
+	// EE hotspots: while the emulation thread runs EE code the profiler also
+	// samples the EE PC (32 byte buckets). Writes the hottest buckets with
+	// their share of the samples, most first.
+	void WriteEeHotspots(std::FILE*, unsigned int count);
+	void ResetEeHotspots();
 	// A word of EE main memory (0 outside RAM), for dumping code.
 	uint32_t ReadEeWord(uint32_t address);
 
@@ -172,6 +179,10 @@ private:
 	std::thread m_profiler;
 	std::atomic<bool> m_stopProfiler{false};
 	std::atomic<uint32_t> m_profileCounts[EmuProfile::SECTION_COUNT];
+	static constexpr unsigned int EE_HOTSPOT_SLOTS = 4096;
+	std::atomic<uint32_t> m_eeHotPc[EE_HOTSPOT_SLOTS] = {};
+	std::atomic<uint32_t> m_eeHotCount[EE_HOTSPOT_SLOTS] = {};
+	std::atomic<uint32_t> m_eeHotSamples{0};
 	CFrameMailbox m_frames;
 	std::atomic<uint64_t> m_vmFrames{0};
 	// EE idle accounting (emulation thread), published every 30 frames.

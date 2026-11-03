@@ -1,6 +1,7 @@
 #include "EmuSession.h"
 
 #include <algorithm>
+#include <vector>
 #include <cctype>
 #include <cstring>
 #include <stdexcept>
@@ -315,6 +316,47 @@ void CEmuSession::ProfilerProc()
 		std::this_thread::sleep_for(std::chrono::microseconds(500));
 		unsigned int section = EmuProfile::g_section.load(std::memory_order_relaxed);
 		if(section < EmuProfile::SECTION_COUNT) m_profileCounts[section]++;
+		if((section == EmuProfile::SECTION_EE) && m_vm)
+		{
+			// Racy read of the EE PC: blocks store it when they exit, so it
+			// points at (or just past) the code that is running.
+			uint32_t bucket = (m_vm->m_ee->m_EE.m_State.nPC & ~0x1Fu) | 1;
+			uint32_t slot = ((bucket >> 5) * 2654435761u) % EE_HOTSPOT_SLOTS;
+			// Open addressing; only this thread writes the table.
+			for(unsigned int probe = 0; probe < 16; probe++, slot = (slot + 1) % EE_HOTSPOT_SLOTS)
+			{
+				uint32_t current = m_eeHotPc[slot].load(std::memory_order_relaxed);
+				if(current == 0) m_eeHotPc[slot].store(current = bucket, std::memory_order_relaxed);
+				if(current != bucket) continue;
+				m_eeHotCount[slot].fetch_add(1, std::memory_order_relaxed);
+				break;
+			}
+			m_eeHotSamples.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
+}
+
+void CEmuSession::ResetEeHotspots()
+{
+	// Counts only: clearing addresses would race with the profiler thread.
+	for(auto& count : m_eeHotCount) count.store(0, std::memory_order_relaxed);
+	m_eeHotSamples.store(0, std::memory_order_relaxed);
+}
+
+void CEmuSession::WriteEeHotspots(std::FILE* file, unsigned int count)
+{
+	std::vector<std::pair<uint32_t, uint32_t>> hot;
+	for(unsigned int i = 0; i < EE_HOTSPOT_SLOTS; i++)
+	{
+		uint32_t samples = m_eeHotCount[i].load(std::memory_order_relaxed);
+		if(samples != 0) hot.emplace_back(m_eeHotPc[i].load(std::memory_order_relaxed) & ~0x1Fu, samples);
+	}
+	std::sort(hot.begin(), hot.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+	uint32_t total = std::max<uint32_t>(m_eeHotSamples.load(std::memory_order_relaxed), 1);
+	std::fprintf(file, "EE samples: %u\n", total);
+	for(unsigned int i = 0; (i < count) && (i < hot.size()); i++)
+	{
+		std::fprintf(file, "%08X %5.1f%%\n", hot[i].first, hot[i].second * 100.0f / total);
 	}
 }
 
