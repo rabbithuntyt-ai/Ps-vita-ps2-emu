@@ -718,6 +718,14 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 	auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
 	auto [start, size] = GsTransfer::GetDstRange(bltBuf, trxReg, trxPos);
 	m_textureCache.MarkBytesWritten(start, size);
+	if(m_diagFile && (m_diagUploads.size() < 600))
+	{
+		char text[64];
+		std::snprintf(text, sizeof(text), " %X/%u/%X@%u,%u+%ux%u", bltBuf.GetDstPtr(), static_cast<uint32>(bltBuf.nDstWidth),
+		              static_cast<uint32>(bltBuf.nDstPsm), static_cast<uint32>(trxPos.nDSAX), static_cast<uint32>(trxPos.nDSAY),
+		              static_cast<uint32>(trxReg.nRRW), static_cast<uint32>(trxReg.nRRH));
+		m_diagUploads += text;
+	}
 
 	for(auto& target : m_targets)
 	{
@@ -1280,15 +1288,23 @@ void CGSH_Hardware::AddVertex(const CSoftwareRasterizer::VERTEX& v)
 	out.fogT = 0.5f;
 	if(s.fst)
 	{
-		out.s = v.u / static_cast<float>(s.tw) * m_texScaleS + m_texOffsetS;
-		out.t = v.v / static_cast<float>(s.th) * m_texScaleT + m_texOffsetT;
+		float u = m_texClamp ? std::clamp(v.u, m_texMinS, m_texMaxS) : v.u;
+		float tv = m_texClamp ? std::clamp(v.v, m_texMinT, m_texMaxT) : v.v;
+		out.s = u / static_cast<float>(s.tw) * m_texScaleS + m_texOffsetS;
+		out.t = tv / static_cast<float>(s.th) * m_texScaleT + m_texOffsetT;
 	}
 	else
 	{
 		// Q <= 0 cannot be expressed as a clip space w; clamp.
 		float q = std::max(v.q, 1.0e-12f);
-		out.s = v.s / q * m_texScaleS + m_texOffsetS;
-		out.t = v.t / q * m_texScaleT + m_texOffsetT;
+		float texS = v.s / q, texT = v.t / q;
+		if(m_texClamp)
+		{
+			texS = std::clamp(texS, m_texMinS, m_texMaxS);
+			texT = std::clamp(texT, m_texMinT, m_texMaxT);
+		}
+		out.s = texS * m_texScaleS + m_texOffsetS;
+		out.t = texT * m_texScaleT + m_texOffsetT;
 		if(s.textured)
 		{
 			out.w = 1.0f / q;
@@ -1348,6 +1364,23 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 		// coordinates interpolated between the corners.
 		const auto& a = vertices[0];
 		const auto& b = vertices[1];
+		if(m_diagFile && m_currentTarget && (m_diagSpriteCount[m_currentTarget->fbp]++ < 6))
+		{
+			char text[160];
+			const auto& s = m_state;
+			std::snprintf(text, sizeof(text), " [%X: %.4g,%.4g-%.4g,%.4g", m_currentTarget->fbp, a.x / 16.0, a.y / 16.0, b.x / 16.0, b.y / 16.0);
+			m_diagPrims += text;
+			if(s.textured)
+			{
+				if(s.fst) std::snprintf(text, sizeof(text), " t%X/%u/%X %ux%u uv%.1f,%.1f-%.1f,%.1f b%d]", s.tbp, s.tbw, s.tpsm, s.tw, s.th, a.u, a.v, b.u, b.v, s.bilinear ? 1 : 0);
+				else std::snprintf(text, sizeof(text), " t%X/%u/%X %ux%u st%.4f,%.4f-%.4f,%.4f b%d]", s.tbp, s.tbw, s.tpsm, s.tw, s.th, a.s / a.q, a.t / a.q, b.s / b.q, b.t / b.q, s.bilinear ? 1 : 0);
+			}
+			else
+			{
+				std::snprintf(text, sizeof(text), " rgb%02X%02X%02X]", b.r, b.g, b.b);
+			}
+			m_diagPrims += text;
+		}
 		auto corner = [&](bool right, bool bottom) {
 			CSoftwareRasterizer::VERTEX v = b;
 			v.x = right ? b.x : a.x;
@@ -1370,12 +1403,39 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 			return v;
 		};
 		auto tl = corner(false, false), tr = corner(true, false), bl = corner(false, true), br = corner(true, true);
+		// On the GS the edge pixels of a blit sample the edge texels; the
+		// GPU's rasterization and interpolation can reach the texel beyond (point
+		// sampling too, at the last row of a stretched blit), which in a
+		// render target is whatever lies below the picture (a bright line
+		// under Silent Hill 2's movies, different in each work buffer).
+		m_texClamp = m_state.textured;
+		if(m_texClamp)
+		{
+			// Bounds in the units AddVertex reads: texels (UV) or normalized
+			// coordinates (STQ, already divided by q in corner()).
+			auto range = [](float a, float b, float half, float& lo, float& hi) {
+				lo = std::min(a, b) + half;
+				hi = std::max(a, b) - half;
+				if(lo > hi) lo = hi = (a + b) * 0.5f;
+			};
+			if(m_state.fst)
+			{
+				range(a.u, b.u, 0.5f, m_texMinS, m_texMaxS);
+				range(a.v, b.v, 0.5f, m_texMinT, m_texMaxT);
+			}
+			else
+			{
+				range(tl.s, br.s, 0.5f / static_cast<float>(m_state.tw), m_texMinS, m_texMaxS);
+				range(tl.t, br.t, 0.5f / static_cast<float>(m_state.th), m_texMinT, m_texMaxT);
+			}
+		}
 		AddVertex(tl);
 		AddVertex(tr);
 		AddVertex(bl);
 		AddVertex(tr);
 		AddVertex(br);
 		AddVertex(bl);
+		m_texClamp = false;
 	}
 	break;
 	}
@@ -1472,6 +1532,11 @@ void CGSH_Hardware::WriteFlipDiagnostics(const DISPLAY_INFO& dispInfo)
 		for(const auto& [key, count] : m_diagDropped)
 			std::fprintf(m_diagFile, " %X/%u/%X:%u", static_cast<uint32>(key >> 24), static_cast<uint32>((key >> 8) & 0xFFFF), static_cast<uint32>(key & 0xFF), count);
 	}
+	if(!m_diagUploads.empty()) std::fprintf(m_diagFile, " | uploads%s", m_diagUploads.c_str());
+	m_diagUploads.clear();
+	if(!m_diagPrims.empty()) std::fprintf(m_diagFile, " | sprites%s", m_diagPrims.c_str());
+	m_diagPrims.clear();
+	m_diagSpriteCount.clear();
 	std::fprintf(m_diagFile, " | targets");
 	for(const auto& target : m_targets)
 		std::fprintf(m_diagFile, " %X/%u/%X %ux%u v%u%s", target->fbp, target->fbw, target->psm, target->width, target->height,

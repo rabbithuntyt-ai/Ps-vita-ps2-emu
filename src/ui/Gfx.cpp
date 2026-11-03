@@ -208,7 +208,13 @@ void Gfx::Image(GLuint texture, uint32_t textureWidth, uint32_t textureHeight, f
 {
 	BindBatch(texture, false, linear);
 	float invW = 1.0f / textureWidth, invH = 1.0f / textureHeight;
-	Quad(x, y, x + width, y + height, srcX * invW, srcY * invH, (srcX + srcW) * invW, (srcY + srcH) * invH, 0xFFFFFFFF);
+	// Filtering blends the texel beyond the edge into the outermost half texel.
+	// The source is often part of a bigger texture (a PS2 render target), whose
+	// rows past the displayed area hold leftovers: a bright line at the bottom
+	// of movies, different in each buffer. Sample texel centers only.
+	float inset = linear ? 0.5f : 0.0f;
+	Quad(x, y, x + width, y + height, (srcX + inset) * invW, (srcY + inset) * invH, (srcX + srcW - inset) * invW,
+	     (srcY + srcH - inset) * invH, 0xFFFFFFFF);
 }
 
 void Gfx::UploadFrame(const uint32_t* pixels, uint32_t width, uint32_t height)

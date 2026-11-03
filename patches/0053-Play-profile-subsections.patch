@@ -1,0 +1,64 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -22,12 +22,16 @@ namespace EmuProfile
+ 		SECTION_JIT,
+ 		SECTION_GS_WAIT,
+ 		SECTION_LIMITER,
++		SECTION_SPU_SYNC, //waiting for the SPU thread to finish its queue
++		SECTION_SPU_READ, //waiting for the SPU thread before a register read
++		SECTION_VIF_DIRECT, //VIF1 DIRECT: image data and packets to the GS
++		SECTION_VIF_UNPACK, //VIF UNPACK into VU memory
+ 		SECTION_COUNT
+ 	};
+ 
+ 	inline const char* GetSectionName(unsigned int section)
+ 	{
+-		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle"};
++		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle", "SPUsync", "SPUread", "VIFdirect", "VIFunpack"};
+ 		return (section < SECTION_COUNT) ? names[section] : "?";
+ 	}
+ 
+diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
+--- a/Source/PS2VM.cpp
++++ b/Source/PS2VM.cpp
+@@ -880,7 +880,7 @@ void CPS2VM::SpuWorkerProc()
+ void CPS2VM::SyncSpu()
+ {
+ 	if(!m_spuThreaded) return;
+-	EmuProfile::CScope profileScope(EmuProfile::SECTION_SPU);
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_SPU_SYNC);
+ 	std::unique_lock<std::mutex> lock(m_spuMutex);
+ 	if(m_spuWork.empty() && !m_spuRendering) return;
+ 	m_spuFullSyncs++;
+@@ -894,7 +894,7 @@ void CPS2VM::AccessSpuForRead(const std::function<void()>& access)
+ 	//The read needs every queued register write applied and the mixer paused
+ 	//between blocks; it may happen while a few audio blocks are still queued
+ 	//(the read then sees the mixing state a little earlier than inline).
+-	EmuProfile::CScope profileScope(EmuProfile::SECTION_SPU);
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_SPU_READ);
+ 	std::unique_lock<std::mutex> lock(m_spuMutex);
+ 	auto ready = [this]() { return !m_spuRendering && (m_spuPendingWrites == 0) && (m_spuPendingRenders <= SPU_READ_MAX_LAG); };
+ 	if(!ready())
+diff --git a/Source/ee/Vif.cpp b/Source/ee/Vif.cpp
+--- a/Source/ee/Vif.cpp
++++ b/Source/ee/Vif.cpp
+@@ -706,6 +706,7 @@ void CVif::Cmd_STMASK(StreamType& stream, CODE command)
+ 
+ void CVif::Cmd_UNPACK(StreamType& stream, CODE nCommand, uint32 nDstAddr)
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_VIF_UNPACK);
+ 	uint32 cl = m_CYCLE.nCL;
+ 	uint32 wl = m_CYCLE.nWL;
+ 	if(wl == 0)
+diff --git a/Source/ee/Vif1.cpp b/Source/ee/Vif1.cpp
+--- a/Source/ee/Vif1.cpp
++++ b/Source/ee/Vif1.cpp
+@@ -162,6 +162,7 @@ void CVif1::ExecuteCommand(StreamType& stream, CODE nCommand)
+ 
+ void CVif1::Cmd_DIRECT(StreamType& stream, CODE nCommand)
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_VIF_DIRECT);
+ 	//PATH1 packets kicked by a threaded VU1 come before PATH2 data
+ 	m_vpu.FlushPendingXgKicks();
+ 

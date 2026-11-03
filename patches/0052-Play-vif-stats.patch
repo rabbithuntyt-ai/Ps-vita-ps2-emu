@@ -1,0 +1,47 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -62,6 +62,16 @@ namespace EmuProfile
+ 	//D0 0, D1 2, D2 4, D3 6, D4 7, D5 8, D6 9, D8 10, D9 11
+ 	inline std::atomic<uint32> g_idleChcr[12];
+ 
++	//VIF activity (counts since start).
++	struct VIF_STATS
++	{
++		std::atomic<uint64> vif1Qw{0};     //quadwords VIF1 took from DMA
++		std::atomic<uint32> vif1Empty{0};  //VIF1 DMA calls that took nothing
++		std::atomic<uint32> vewStalls{0};  //DMA arrived while waiting for a VU program to end
++		std::atomic<uint32> vewGiveUps{0}; //unused (kept for perf.csv layout)
++	};
++	inline VIF_STATS g_vif;
++
+ 	class CScope
+ 	{
+ 	public:
+diff --git a/Source/ee/Vif.cpp b/Source/ee/Vif.cpp
+--- a/Source/ee/Vif.cpp
++++ b/Source/ee/Vif.cpp
+@@ -357,7 +357,10 @@ uint32 CVif::ReceiveDMA(uint32 address, uint32 qwc, uint32 unused, bool tagInclu
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_VIF);
+ 	if(m_STAT.nVEW && !m_vpu.IsVuReady())
+ 	{
+-		//Is waiting for program end, don't bother
++		//Is waiting for program end, don't bother. (Waiting for the VU1 thread
++		//here instead was tried: the same real-world movie speed, with emulated
++		//time running 5x slower.)
++		EmuProfile::g_vif.vewStalls.fetch_add(1, std::memory_order_relaxed);
+ 		return 0;
+ 	}
+ 
+@@ -378,6 +381,11 @@ uint32 CVif::ReceiveDMA(uint32 address, uint32 qwc, uint32 unused, bool tagInclu
+ 	assert((remainingSize & 0x0F) == 0);
+ 	remainingSize /= 0x10;
+ 
++	if(m_number == 1)
++	{
++		EmuProfile::g_vif.vif1Qw.fetch_add(qwc - remainingSize, std::memory_order_relaxed);
++		if(qwc == remainingSize) EmuProfile::g_vif.vif1Empty.fetch_add(1, std::memory_order_relaxed);
++	}
+ 	return qwc - remainingSize;
+ }
+ 

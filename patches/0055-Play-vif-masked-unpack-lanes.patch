@@ -1,0 +1,48 @@
+diff --git a/Source/ee/Vif.h b/Source/ee/Vif.h
+--- a/Source/ee/Vif.h
++++ b/Source/ee/Vif.h
+@@ -559,6 +559,28 @@ protected:
+ 		assert(nDstAddr < vuMemSize);
+ 		nDstAddr &= (vuMemSize - 1);
+ 
++		//Masked writes without offset/difference: the mask, row and column
++		//registers don't change during the command, so each column's lane
++		//operations become three lane masks (keep the old value, a constant
++		//from ROW/COL, the unpacked data). Movie players unpack ~1M masked
++		//S-8 values per second; the per-lane switch below cost ~20% of the
++		//emulation thread on the Vita.
++		uint32 maskKeep[4][4] = {}, maskConst[4][4] = {}, maskData[4][4] = {};
++		if constexpr(useMask && (mode == 0))
++		{
++			for(unsigned int col = 0; col < 4; col++)
++			{
++				uint32 colMask = GetColMaskOp(col);
++				for(unsigned int i = 0; i < 4; i++)
++				{
++					uint32 maskOp = (colMask >> (i * 2)) & 0x3;
++					maskKeep[col][i] = (maskOp == MASK_MASK) ? ~0U : 0;
++					maskData[col][i] = (maskOp == MASK_DATA) ? ~0U : 0;
++					maskConst[col][i] = (maskOp == MASK_ROW) ? m_R[i] : (maskOp == MASK_COL) ? m_C[col] : 0;
++				}
++			}
++		}
++
+ 		while(currentNum != 0)
+ 		{
+ 			bool mustWrite = false;
+@@ -591,7 +613,14 @@ protected:
+ 				uint32 col = (m_writeTick > 3) ? 3 : m_writeTick;
+ 				uint32 colMask = useMask ? GetColMaskOp(col) : 0;
+ 
+-				if((colMask == 0) && (mode == 0))
++				if constexpr(useMask && (mode == 0))
++				{
++					for(unsigned int i = 0; i < 4; i++)
++					{
++						dst->nV[i] = (dst->nV[i] & maskKeep[col][i]) | maskConst[col][i] | (writeValue.nV[i] & maskData[col][i]);
++					}
++				}
++				else if((colMask == 0) && (mode == 0))
+ 				{
+ 					(*dst) = writeValue;
+ 				}

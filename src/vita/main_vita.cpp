@@ -111,8 +111,10 @@ namespace
 	void BeginFrame()
 	{
 		// Every screen (browser, menus, game) draws through here: keep the
-		// Vita from dimming and suspending while the app is in front.
-		sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
+		// Vita awake while the app is in front: DEFAULT counts as user activity
+		// (no screen dimming or screen off, no suspend). DISABLE_AUTO_SUSPEND alone
+		// still lets the screen turn off.
+		sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT);
 		Gfx::BeginFrame(SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BG);
 	}
 
@@ -533,7 +535,7 @@ namespace
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",ps2_%s", EmuProfile::GetSectionName(i));
 				std::fprintf(perfFile, ",spu_full_waits,spu_read_waits,ipu_idec,ipu_bdec,ipu_out_kb,ipu_stalls,audio_underruns,audio_tempo");
 				std::fprintf(perfFile, ",jit_blocks,jit_writes,jit_write_ms,jit_alloc_ms,jit_free_ranges,jit_translate_ms,jit_finish_ms,jit_install_ms,jit_guest_instr,jit_code_kb,jit_opt_ms,jit_alloc_regs_ms,jit_codegen_ms,jit_statements");
-				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,threads\n");
+				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads\n");
 			}
 		}
 		const uint64_t runStart = sceKernelGetProcessTimeWide();
@@ -542,6 +544,9 @@ namespace
 		VITAJIT_STATS perfJit = VitaJit_GetStats();
 		uint64_t perfJitPhases[5] = {EmuProfile::g_jit.translateUs.load(), EmuProfile::g_jit.finishUs.load(), EmuProfile::g_jit.installUs.load(), EmuProfile::g_jit.guestInstructions.load(), EmuProfile::g_jit.codeBytes.load()};
 		uint32_t perfIdle[EmuProfile::IDLE_SOURCE_COUNT] = {};
+		uint32_t perfIdleChcr[12] = {};
+		uint64_t perfVif[4] = {};
+		uint32_t perfUnpack[16] = {}, perfUnpackFlags[3] = {};
 		uint64_t perfCodeGen[4] = {Jitter::g_compileStats.optimizeUs.load(), Jitter::g_compileStats.allocateUs.load(), Jitter::g_compileStats.generateUs.load(), Jitter::g_compileStats.statements.load()};
 		CGSH_Hardware::GPU_TIMES perfGpu = CGSH_Hardware::GetTimes();
 		uint64_t perfPresentUs = g_presentUs;
@@ -561,11 +566,16 @@ namespace
 		config.limitFrameRate = true;
 		config.padFactory = CPH_Vita::GetFactoryFunction(&pad);
 		// Third core: VU1 (the audio thread there is light)
-		// Cores: 0 = EE/IOP (the bottleneck, alone), 1 = UI/GPU + SPU2 audio
-		// mixing, 2 = VU1 + audio output.
+		// Cores: 0 = EE/IOP (the bottleneck, alone), 1 = UI/GPU, 2 = VU1 +
+		// SPU2 audio mixing + audio output.
 		config.emuThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x10000 /* SCE_KERNEL_CPU_MASK_USER_0 */); };
 		config.vu1ThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */); };
-		config.spuThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x20000 /* SCE_KERNEL_CPU_MASK_USER_1 */); };
+		// SPU2 mixing used to share core 1 with the UI/GPU thread: at equal
+		// priority a woken mixer waited until that thread blocked, and the
+		// register reads and audio DMA that wait for the mixer took ~7ms each
+		// (a quarter of the emulation thread during movies). A higher priority
+		// fixed that but took the core from the GS (GS waits went 0 -> 14%).
+		config.spuThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */); };
 		config.profilerThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */); };
 		config.soundFactory = &CSH_Vita::HandlerFactory;
 		config.interlacedRendering = settings.interlaced;
@@ -672,7 +682,7 @@ namespace
 
 			// Cutscenes and movies run without input: keep the Vita from
 			// dimming and suspending while a game runs.
-			sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
+			sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT);
 
 			if(gpu)
 			{
@@ -746,7 +756,7 @@ namespace
 				{
 					auto profile = session->TakeProfile();
 					stallShare = profile.share[EmuProfile::SECTION_JIT] + profile.share[EmuProfile::SECTION_GS_WAIT] +
-					             (settings.threadedSpu ? profile.share[EmuProfile::SECTION_SPU] : 0.0f);
+					             profile.share[EmuProfile::SECTION_SPU_SYNC] + profile.share[EmuProfile::SECTION_SPU_READ];
 					if(perfFile)
 					{
 						uint32_t eeRateNow = (settings.eeCycleRate == 0) ? autoRate.GetRate() : settings.eeCycleRate;
@@ -798,6 +808,29 @@ namespace
 							uint32_t count = EmuProfile::g_idleTriggers[i].load();
 							std::fprintf(perfFile, "%u%s", count - perfIdle[i], (i + 1 < EmuProfile::IDLE_SOURCE_COUNT) ? ";" : ",");
 							perfIdle[i] = count;
+						}
+						for(unsigned int i = 0; i < 12; i++)
+						{
+							uint32_t count = EmuProfile::g_idleChcr[i].load();
+							std::fprintf(perfFile, "%u%s", count - perfIdleChcr[i], (i + 1 < 12) ? ";" : ",");
+							perfIdleChcr[i] = count;
+						}
+						{
+							const auto& vif = EmuProfile::g_vif;
+							uint64_t vifNow[4] = {vif.vif1Qw.load(), vif.vif1Empty.load(), vif.vewStalls.load(), vif.vewGiveUps.load()};
+							std::fprintf(perfFile, "%.1f,%u,%u,%u,", (vifNow[0] - perfVif[0]) / 1000.0, static_cast<unsigned int>(vifNow[1] - perfVif[1]),
+							             static_cast<unsigned int>(vifNow[2] - perfVif[2]), static_cast<unsigned int>(vifNow[3] - perfVif[3]));
+							std::copy(std::begin(vifNow), std::end(vifNow), std::begin(perfVif));
+							for(unsigned int i = 0; i < 16; i++)
+							{
+								uint32_t count = EmuProfile::g_unpackValues[i].load();
+								std::fprintf(perfFile, "%.1f%s", (count - perfUnpack[i]) / 1000.0, (i + 1 < 16) ? ";" : ",");
+								perfUnpack[i] = count;
+							}
+							uint32_t flags[3] = {EmuProfile::g_unpackMasked.load(), EmuProfile::g_unpackMode.load(), EmuProfile::g_unpackCycle.load()};
+							std::fprintf(perfFile, "%.1f,%.1f,%.1f,", (flags[0] - perfUnpackFlags[0]) / 1000.0, (flags[1] - perfUnpackFlags[1]) / 1000.0,
+							             (flags[2] - perfUnpackFlags[2]) / 1000.0);
+							std::copy(std::begin(flags), std::end(flags), std::begin(perfUnpackFlags));
 						}
 						for(const auto& usage : threadUsage) std::fprintf(perfFile, "%s=%.1f;", usage.name.c_str(), usage.cpuPercent);
 						std::fprintf(perfFile, "\n");

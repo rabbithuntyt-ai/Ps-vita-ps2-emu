@@ -1,0 +1,31 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -75,6 +75,10 @@ namespace EmuProfile
+ 		std::atomic<uint32> vewGiveUps{0}; //unused (kept for perf.csv layout)
+ 	};
+ 	inline VIF_STATS g_vif;
++	//UNPACK values requested by format (CMD & 0xF), and how many of those used a
++	//mask, an offset/difference mode or a write cycle other than CL == WL.
++	inline std::atomic<uint32> g_unpackValues[16];
++	inline std::atomic<uint32> g_unpackMasked, g_unpackMode, g_unpackCycle;
+ 
+ 	class CScope
+ 	{
+diff --git a/Source/ee/Vif.cpp b/Source/ee/Vif.cpp
+--- a/Source/ee/Vif.cpp
++++ b/Source/ee/Vif.cpp
+@@ -718,6 +718,13 @@ void CVif::Cmd_UNPACK(StreamType& stream, CODE nCommand, uint32 nDstAddr)
+ 	bool useMask = (nCommand.nCMD & 0x10) != 0;
+ 	bool usn = (m_CODE.nIMM & 0x4000) != 0;
+ 	uint8 mode = m_MODE & 0x3;
++	{
++		uint32 values = (m_NUM == 0) ? 256 : m_NUM;
++		EmuProfile::g_unpackValues[nCommand.nCMD & 0x0F].fetch_add(values, std::memory_order_relaxed);
++		if(useMask) EmuProfile::g_unpackMasked.fetch_add(values, std::memory_order_relaxed);
++		if(mode != 0) EmuProfile::g_unpackMode.fetch_add(values, std::memory_order_relaxed);
++		if(cl != wl) EmuProfile::g_unpackCycle.fetch_add(values, std::memory_order_relaxed);
++	}
+ 	auto unpackFct = m_unpacker[(nCommand.nCMD & 0x0F) | ((clGreaterEqualWl ? 1 : 0) << 4) | ((useMask ? 1 : 0) << 5) | (mode << 6) | (usn << 8)];
+ 	((*this).*(unpackFct))(stream, nCommand, nDstAddr);
+ }

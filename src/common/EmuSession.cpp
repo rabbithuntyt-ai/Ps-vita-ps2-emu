@@ -314,22 +314,22 @@ void CEmuSession::ProfilerProc()
 	{
 		std::this_thread::sleep_for(std::chrono::microseconds(500));
 		unsigned int section = EmuProfile::g_section.load(std::memory_order_relaxed);
-		if(section < 16) m_profileCounts[section]++;
+		if(section < EmuProfile::SECTION_COUNT) m_profileCounts[section]++;
 	}
 }
 
 CEmuSession::PROFILE CEmuSession::TakeProfile()
 {
 	PROFILE profile;
-	uint32_t counts[16];
-	for(int i = 0; i < 16; i++)
+	uint32_t counts[EmuProfile::SECTION_COUNT];
+	for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++)
 	{
 		counts[i] = m_profileCounts[i].exchange(0);
 		profile.samples += counts[i];
 	}
 	if(profile.samples != 0)
 	{
-		for(int i = 0; i < 16; i++) profile.share[i] = static_cast<float>(counts[i]) / static_cast<float>(profile.samples);
+		for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) profile.share[i] = static_cast<float>(counts[i]) / static_cast<float>(profile.samples);
 	}
 	return profile;
 }

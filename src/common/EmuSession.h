@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EmuProfile.h"
 #include <atomic>
 #include <thread>
 #include <functional>
@@ -133,7 +134,7 @@ public:
 	// section (EmuProfile::SECTION_*) since the previous call.
 	struct PROFILE
 	{
-		float share[16] = {};
+		float share[EmuProfile::SECTION_COUNT] = {};
 		uint32_t samples = 0;
 	};
 	PROFILE TakeProfile();
@@ -170,7 +171,7 @@ private:
 	void ProfilerProc();
 	std::thread m_profiler;
 	std::atomic<bool> m_stopProfiler{false};
-	std::atomic<uint32_t> m_profileCounts[16];
+	std::atomic<uint32_t> m_profileCounts[EmuProfile::SECTION_COUNT];
 	CFrameMailbox m_frames;
 	std::atomic<uint64_t> m_vmFrames{0};
 	// EE idle accounting (emulation thread), published every 30 frames.

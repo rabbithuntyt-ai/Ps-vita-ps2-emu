@@ -1,0 +1,30 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -58,6 +58,9 @@ namespace EmuProfile
+ 		IDLE_SOURCE_COUNT
+ 	};
+ 	inline std::atomic<uint32> g_idleTriggers[IDLE_SOURCE_COUNT];
++	//IDLE_DMA_CHCR split by register: ((address - D0_CHCR) >> 12) * 2 + (address >> 10 & 1):
++	//D0 0, D1 2, D2 4, D3 6, D4 7, D5 8, D6 9, D8 10, D9 11
++	inline std::atomic<uint32> g_idleChcr[12];
+ 
+ 	class CScope
+ 	{
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -603,7 +603,12 @@ uint32 CSubSystem::IOPortReadHandler(uint32 nAddress)
+ 					else if(nAddress == CTimer::T1_COUNT) source = EmuProfile::IDLE_TIMER;
+ 					else if((nAddress >= CIPU::IPU_CMD) && (nAddress <= CIPU::IPU_CTRL + 4)) source = EmuProfile::IDLE_IPU;
+ 					else if(nAddress == CDMAC::D_STAT) source = EmuProfile::IDLE_DMA_STAT;
+-					else if((nAddress >= CDMAC::D0_CHCR) && (nAddress <= CDMAC::D9_CHCR)) source = EmuProfile::IDLE_DMA_CHCR;
++					else if((nAddress >= CDMAC::D0_CHCR) && (nAddress <= CDMAC::D9_CHCR))
++					{
++						source = EmuProfile::IDLE_DMA_CHCR;
++						uint32 channel = ((nAddress - CDMAC::D0_CHCR) >> 12) * 2 + ((nAddress >> 10) & 1);
++						if(channel < 12) EmuProfile::g_idleChcr[channel].fetch_add(1, std::memory_order_relaxed);
++					}
+ 					EmuProfile::g_idleTriggers[source].fetch_add(1, std::memory_order_relaxed);
+ 				}
+ 			}
