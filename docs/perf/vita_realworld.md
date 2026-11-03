@@ -9,6 +9,7 @@ instruction; these numbers say what a player sees.
 
 | Date | Build | Title screen fps | Movie: emulated fps | Movie: shown fps | Movie: pictures/s | JIT ms/block | Movie: EE % | VIF % | SPU wait % | GS wait % | VIF1 kQW/s |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-11-02 | VIF unpack fast loop (0056) | 10.7 | 14.8 | 14.5 | 0.8 | 4.44 | 31.5 | 11.6 | 0.1 | 6.9 | 91.5 |
 | 2026-11-02 | SPU mixer on core 2 |  masked unpack lanes | 10.8 | 11.2 | 10.7 | 0.8 | 4.41 | 26.2 | 12.6 | 0.1 | 9.8 |
 | 2026-11-02 | SPU worker priority | 8.2 | 7.0 | 6.3 | 0.7 | 4.38 | 39.4 | 6.6 | 0.1 | 12.8 | 66.0 |
 | 2026-11-02 | sprite edge clamp (all textured) |  screen kept on | 8.9 | 8.7 | 7.9 | 0.8 | 4.41 | 32.3 | 24.9 | 21.5 | 0.0 |

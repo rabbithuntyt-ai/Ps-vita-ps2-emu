@@ -22,7 +22,7 @@ second. Full history: [docs/perf/vita_realworld.md](docs/perf/vita_realworld.md)
 <!-- vita-realworld-start -->
 | Build | Title screen fps | Movie: emulated fps | Movie: shown fps | Movie: pictures/s | JIT ms/block | Movie: EE % | VIF % | SPU wait % | GS wait % | VIF1 kQW/s |
 |---|---|---|---|---|---|---|---|---|---|---|
-| SPU mixer on core 2 (2026-11-02) |  masked unpack lanes | 10.8 | 11.2 | 10.7 | 0.8 | 4.41 | 26.2 | 12.6 | 0.1 | 9.8 |
+| VIF unpack fast loop (0056) (2026-11-02) | 10.7 | 14.8 | 14.5 | 0.8 | 4.44 | 31.5 | 11.6 | 0.1 | 6.9 | 91.5 |
 <!-- vita-realworld-end -->
 
 ## Performance gap
