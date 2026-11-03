@@ -55,9 +55,39 @@ the plan is to take over whole pictures: decode the MPEG-2 stream natively
   0x1211F00..0x1212ED0, each 0x80 qwords (2 KB) from a contiguous ring
   0x14AE880..0x152D880 (~508 KB). The REFE tag ends the chain; libmpeg
   restarts DMA4 at the ring start to wrap.
-- Stream read position = DMA4 MADR - IPU input FIFO + IPU_BP. The write
-  position (how far the game has filled the ring) is kept by the game, not
-  libmpeg: next, the callbacks above and the code that builds the tag list.
+- Stream read position = DMA4 MADR - IPU input FIFO + IPU_BP.
+- The ring belongs to the game: Sony's ezmpeg sample `ViBuf` at 0x1211E40
+  (the callbacks pass it to viBufAddDMA / StopDMA / RestartDMA / GetTs):
+
+  | Offset | Field | Value in the dump |
+  |---|---|---|
+  | +0x00 | data (ring start) | 0x14AE880 |
+  | +0x04 | tag (DMA tags, uncached) | 0x21211F00 |
+  | +0x08 | n (2 KB units) | 256 |
+  | +0x0C | dmaStart (first unit queued to the IPU) | 175 |
+  | +0x10 | dmaN (units queued) | 79 |
+  | +0x14 | readBytes (written, not queued yet) | 70479 |
+  | +0x18 | buffSize | 0x80000 |
+  | +0x1C.. | saved env: D4 MADR/TADR/QWC/CHCR, D3 MADR/QWC/CHCR, IPU_BP, IPU_CTRL | |
+  | +0x40 | sema, +0x44 isActive, +0x48 totalBytes | |
+  | +0x50 | ts table, +0x54 n_ts, +0x58 count_ts, +0x5C wt_ts | |
+
+  Valid stream = from the IPU read position through the queued units, plus
+  readBytes after them (wrapping at buffSize).
+- Callbacks: 0x2A5810 returns 1; 0x2A5820 (background: read the disc, then
+  viBufAddDMA 0x2A4620); 0x2A5870 (0x2A4890, stop DMA); 0x2A58A0 (0x2A4980,
+  restart DMA); 0x2A58D0 (timestamps, 0x2A5040 returns PTS/DTS).
+
+### Takeover protocol
+
+At `sceMpegGetPicture` (0x20E518): decode the next picture natively from the
+ring into `buf`, then move DMA4 (MADR/TADR/QWC) and the IPU (FIFO, BP)
+forward as if the IPU had consumed those bytes. The game's ViBuf code reads
+DMA progress from the registers as usual, so no game code changes. Start at
+the first picture of a stream (the decoder needs the sequence header); fall
+back to the emulated path if the queued data does not hold a whole picture.
+Still to settle: the fields libmpeg updates per picture that the game reads
+(frame count, picture type, timestamp callback per picture).
 
 ## Takeover design (next steps)
 
