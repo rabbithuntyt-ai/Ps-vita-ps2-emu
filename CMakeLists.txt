@@ -426,6 +426,23 @@ else()
 		if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
 			# Persistent JIT cache with real generated code: store, then load
 			# (default and chained frames, whose links use thunks).
+			# ...with VU1 microprograms, single threaded and with VU1 on its thread
+			foreach(JIT_CACHE_VU_MODE single mtvu)
+				if(JIT_CACHE_VU_MODE STREQUAL "mtvu")
+					set(JIT_CACHE_VU_ARGS --mtvu)
+				else()
+					set(JIT_CACHE_VU_ARGS "")
+				endif()
+				add_test(NAME jit_cache_vu_test_${JIT_CACHE_VU_MODE}
+					COMMAND ${CMAKE_COMMAND}
+						-DPYTHON=${Python3_EXECUTABLE}
+						-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+						-DRUNNER=$<TARGET_FILE:vitaps2_host>
+						"-DEMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
+						-DRUNNER_ARGS=${JIT_CACHE_VU_ARGS}
+						-DSUFFIX=_jitvu_${JIT_CACHE_VU_MODE}
+						-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/jit_cache_vu_test.cmake)
+			endforeach()
 			foreach(JIT_CACHE_CASE "1;19501935;-;default" "100;D477E7D3;--loops;default" "100;D477E7D3;--loops;chained")
 				list(GET JIT_CACHE_CASE 0 JIT_CACHE_SEED)
 				list(GET JIT_CACHE_CASE 1 JIT_CACHE_EXPECTED)

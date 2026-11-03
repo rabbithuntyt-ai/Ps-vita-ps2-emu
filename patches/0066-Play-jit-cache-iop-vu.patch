@@ -1,0 +1,322 @@
+diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
+index a9a1090d..95be5fcb 100644
+--- a/Source/BasicBlock.cpp
++++ b/Source/BasicBlock.cpp
+@@ -522,6 +522,7 @@ bool CBasicBlock::ExportToJitCache(CJitCache::ENTRY& entry) const
+ 	entry.linkEntryOffset = m_linkEntryOffset;
+ 	entry.trampolineOffset[0] = m_linkBlockTrampolineOffset[LINK_SLOT_NEXT];
+ 	entry.trampolineOffset[1] = m_linkBlockTrampolineOffset[LINK_SLOT_BRANCH];
++	entry.flags = GetJitCacheFlags();
+ 	return true;
+ #else
+ 	(void)entry;
+@@ -533,7 +534,12 @@ bool CBasicBlock::ImportFromJitCache(const CJitCache::ENTRY& entry)
+ {
+ #if defined(__arm__) && !defined(__aarch64__) && !defined(AOT_ENABLED)
+ 	auto& cache = CJitCache::GetInstance();
++	// Check everything first: a failed import leaves the block untouched for Compile().
+ 	if(entry.code.empty()) return false;
++	for(uint32 offset : entry.trampolineOffset)
++	{
++		if((offset != INVALID_LINK_SLOT) && (offset + 4 > entry.code.size())) return false;
++	}
+ 	std::vector<uint8> code = entry.code;
+ 	for(const auto& reloc : entry.relocs)
+ 	{
+@@ -545,13 +551,13 @@ bool CBasicBlock::ImportFromJitCache(const CJitCache::ENTRY& entry)
+ 	m_linkEntryOffset = entry.linkEntryOffset;
+ 	m_linkBlockTrampolineOffset[LINK_SLOT_NEXT] = entry.trampolineOffset[0];
+ 	m_linkBlockTrampolineOffset[LINK_SLOT_BRANCH] = entry.trampolineOffset[1];
++	SetJitCacheFlags(entry.flags);
+ 	// As at the end of Compile(): what an unlinked slot points to.
++	auto installed = reinterpret_cast<const uint8*>(m_function.GetCode());
+ 	for(uint32 i = 0; i < LINK_SLOT_MAX; i++)
+ 	{
+ 		m_linkSlotDefault[i] = 0;
+ 		if(m_linkBlockTrampolineOffset[i] == INVALID_LINK_SLOT) continue;
+-		if(m_linkBlockTrampolineOffset[i] + 4 > code.size()) return false;
+-		auto installed = reinterpret_cast<const uint8*>(m_function.GetCode());
+ 		m_linkSlotDefault[i] = *reinterpret_cast<const uintptr_t*>(installed + m_linkBlockTrampolineOffset[i]);
+ 	}
+ 	return true;
+@@ -561,6 +567,42 @@ bool CBasicBlock::ImportFromJitCache(const CJitCache::ENTRY& entry)
+ #endif
+ }
+ 
++void CBasicBlock::CompileWithJitCache(uint32 keyCategory, const uint128& hash, uint32 size, bool cacheable)
++{
++	auto& cache = CJitCache::GetInstance();
++	if(!cacheable || !cache.IsOpen())
++	{
++		Compile();
++		return;
++	}
++	CJitCache::KEY key;
++	key.category = keyCategory;
++	key.begin = m_begin;
++	key.size = size;
++	key.hints = m_blockCompileHints;
++	key.hash = hash;
++	CJitCache::ENTRY entry;
++	if(cache.Find(key, entry))
++	{
++		if(ImportFromJitCache(entry))
++		{
++			cache.CountHit();
++			return;
++		}
++		cache.CountFailure();
++	}
++	Compile();
++	CJitCache::ENTRY compiled;
++	if(ExportToJitCache(compiled))
++	{
++		cache.Store(key, std::move(compiled));
++	}
++	else
++	{
++		cache.CountUncacheable();
++	}
++}
++
+ void CBasicBlock::CopyFunctionFrom(const std::shared_ptr<CBasicBlock>& other)
+ {
+ #ifndef AOT_USE_CACHE
+diff --git a/Source/BasicBlock.h b/Source/BasicBlock.h
+index a1306e59..86af3d78 100644
+--- a/Source/BasicBlock.h
++++ b/Source/BasicBlock.h
+@@ -107,6 +107,22 @@ public:
+ 	// and the reverse, instead of Compile().
+ 	bool ExportToJitCache(CJitCache::ENTRY&) const;
+ 	bool ImportFromJitCache(const CJitCache::ENTRY&);
++	// Compile(), or the block's code from the JIT cache when it holds it
++	// (stored there after compiling). keyCategory tells executors sharing a
++	// category apart (VU0 and VU1); hash and size describe the guest code.
++	void CompileWithJitCache(uint32 keyCategory, const uint128& hash, uint32 size, bool cacheable);
++
++protected:
++	// Block state computed while compiling that the cache must restore.
++	virtual uint32 GetJitCacheFlags() const
++	{
++		return 0;
++	}
++	virtual void SetJitCacheFlags(uint32)
++	{
++	}
++
++public:
+ 
+ protected:
+ 	uint32 m_begin;
+diff --git a/Source/GenericMipsExecutor.h b/Source/GenericMipsExecutor.h
+index 2fb630fa..14e8dc04 100644
+--- a/Source/GenericMipsExecutor.h
++++ b/Source/GenericMipsExecutor.h
+@@ -3,6 +3,9 @@
+ #include <unordered_set>
+ #include "MIPS.h"
+ #include "BasicBlock.h"
++#include "xxhash.h"
++#include <cstring>
++#include <vector>
+ 
+ #include "BlockLookupOneWay.h"
+ #include "BlockLookupTwoWay.h"
+@@ -153,7 +156,21 @@ protected:
+ 	virtual BasicBlockPtr BlockFactory(CMIPS& context, uint32 start, uint32 end)
+ 	{
+ 		auto result = std::make_shared<CBasicBlock>(context, start, end, m_blockCategory);
+-		result->Compile();
++		if(CJitCache::GetInstance().IsOpen() && (end >= start) && !context.HasBreakpointInRange(start, end))
++		{
++			//Persistent JIT cache (IOP): keyed by the block's code
++			uint32 size = (end - start) + 4;
++			std::vector<uint32> code(size / 4);
++			for(uint32 i = 0; i < code.size(); i++) code[i] = context.m_pMemoryMap->GetInstruction(start + (i * 4));
++			auto xxHash = XXH3_128bits(code.data(), size);
++			uint128 hash;
++			memcpy(&hash, &xxHash, sizeof(xxHash));
++			result->CompileWithJitCache(m_blockCategory ^ m_addressMask, hash, size, true);
++		}
++		else
++		{
++			result->Compile();
++		}
+ 		return result;
+ 	}
+ 
+diff --git a/Source/JitCache.cpp b/Source/JitCache.cpp
+index c81279d7..d76e2002 100644
+--- a/Source/JitCache.cpp
++++ b/Source/JitCache.cpp
+@@ -10,9 +10,10 @@
+ 
+ namespace
+ {
+-	const char MAGIC[8] = {'V', 'S', '2', 'J', 'I', 'T', 'C', 1};
++	const char MAGIC[8] = {'V', 'S', '2', 'J', 'I', 'T', 'C', 2};
+ 	constexpr uint32 RELOC_SIZE = 4 + 1 + 1 + 4;
+ 	constexpr uint32 FLUSH_EVERY = 64;
++	static_assert(sizeof(CJitCache::KEY) == 32, "KEY is written as is");
+ 
+ 	struct READER
+ 	{
+@@ -166,7 +167,7 @@ void CJitCache::ReadEntries()
+ 		ENTRY entry;
+ 		uint32 codeSize = 0, relocCount = 0;
+ 		bool ok = record.Read(&key, sizeof(key)) && record.Read32(entry.linkEntryOffset) && record.Read32(entry.trampolineOffset[0]) &&
+-		          record.Read32(entry.trampolineOffset[1]) && record.Read32(codeSize) && (codeSize <= recordSize);
++		          record.Read32(entry.trampolineOffset[1]) && record.Read32(entry.flags) && record.Read32(codeSize) && (codeSize <= recordSize);
+ 		if(ok)
+ 		{
+ 			entry.code.resize(codeSize);
+@@ -190,12 +191,14 @@ void CJitCache::ReadEntries()
+ 	m_stats.loaded = static_cast<uint32>(m_entries.size());
+ }
+ 
+-const CJitCache::ENTRY* CJitCache::Find(const KEY& key)
++bool CJitCache::Find(const KEY& key, ENTRY& entry)
+ {
+ 	std::lock_guard<std::mutex> lock(m_mutex);
+-	if(!m_file) return nullptr;
++	if(!m_file) return false;
+ 	auto iterator = m_entries.find(key);
+-	return (iterator != m_entries.end()) ? &iterator->second : nullptr;
++	if(iterator == m_entries.end()) return false;
++	entry = iterator->second;
++	return true;
+ }
+ 
+ void CJitCache::Store(const KEY& key, ENTRY&& entry)
+@@ -207,6 +210,7 @@ void CJitCache::Store(const KEY& key, ENTRY&& entry)
+ 	Append32(record, entry.linkEntryOffset);
+ 	Append32(record, entry.trampolineOffset[0]);
+ 	Append32(record, entry.trampolineOffset[1]);
++	Append32(record, entry.flags);
+ 	Append32(record, static_cast<uint32>(entry.code.size()));
+ 	Append(record, entry.code.data(), entry.code.size());
+ 	Append32(record, static_cast<uint32>(entry.relocs.size()));
+diff --git a/Source/JitCache.h b/Source/JitCache.h
+index 2df49bb2..f8856204 100644
+--- a/Source/JitCache.h
++++ b/Source/JitCache.h
+@@ -51,11 +51,12 @@ public:
+ 		uint32 category = 0;
+ 		uint32 begin = 0;
+ 		uint32 size = 0;
++		uint32 hints = 0; //compile hints of the block (they change its code)
+ 		uint128 hash = {};
+ 
+ 		bool operator==(const KEY& other) const
+ 		{
+-			return (category == other.category) && (begin == other.begin) && (size == other.size) &&
++			return (category == other.category) && (begin == other.begin) && (size == other.size) && (hints == other.hints) &&
+ 			       (hash.nD0 == other.hash.nD0) && (hash.nD1 == other.hash.nD1);
+ 		}
+ 	};
+@@ -66,6 +67,7 @@ public:
+ 		std::vector<RELOC> relocs;
+ 		uint32 linkEntryOffset = 0;
+ 		uint32 trampolineOffset[2] = {~0U, ~0U};
++		uint32 flags = 0; //block state computed while compiling (CBasicBlock::GetJitCacheFlags)
+ 	};
+ 
+ 	struct STATS
+@@ -92,7 +94,8 @@ public:
+ 		return m_file != nullptr;
+ 	}
+ 
+-	const ENTRY* Find(const KEY&);
++	// Copies the entry out: blocks are compiled on several threads (VU1).
++	bool Find(const KEY&, ENTRY&);
+ 	void Store(const KEY&, ENTRY&&);
+ 	void CountHit();
+ 	void CountUncacheable();
+diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
+index 4d751eea..a2a7e735 100644
+--- a/Source/ee/EeExecutor.cpp
++++ b/Source/ee/EeExecutor.cpp
+@@ -237,46 +237,9 @@ BasicBlockPtr CEeExecutor::BlockFactory(CMIPS& context, uint32 start, uint32 end
+ 	}
+ 
+ 	// Persistent JIT cache: code compiled in an earlier run of this game.
+-	auto& jitCache = CJitCache::GetInstance();
+-	bool useJitCache = isCacheableBlock && jitCache.IsOpen();
+-	CJitCache::KEY jitCacheKey;
+-	jitCacheKey.category = m_blockCategory;
+-	jitCacheKey.begin = start;
+-	jitCacheKey.size = blockSize;
+-	jitCacheKey.hash = hash;
+-	bool imported = false;
+-	if(useJitCache)
+-	{
+-		if(const auto* entry = jitCache.Find(jitCacheKey))
+-		{
+-			imported = result->ImportFromJitCache(*entry);
+-			if(imported)
+-			{
+-				jitCache.CountHit();
+-			}
+-			else
+-			{
+-				jitCache.CountFailure();
+-				result = std::make_shared<CEeBasicBlock>(context, start, end, m_blockCategory);
+-			}
+-		}
+-	}
+-	if(!imported)
+-	{
+-		result->Compile();
+-		if(useJitCache)
+-		{
+-			CJitCache::ENTRY entry;
+-			if(result->ExportToJitCache(entry))
+-			{
+-				jitCache.Store(jitCacheKey, std::move(entry));
+-			}
+-			else
+-			{
+-				jitCache.CountUncacheable();
+-			}
+-		}
+-	}
++	// (Rounding mode and idle-loop overrides are not compile hints: those
++	// blocks are not cacheable.)
++	result->CompileWithJitCache(m_blockCategory, hash, blockSize, isCacheableBlock);
+ 	if(isCacheableBlock)
+ 	{
+ 		m_cachedBlocks.insert(std::make_pair(blockKey, result));
+diff --git a/Source/ee/VuBasicBlock.h b/Source/ee/VuBasicBlock.h
+index e2fa19a8..f1f8e85e 100644
+--- a/Source/ee/VuBasicBlock.h
++++ b/Source/ee/VuBasicBlock.h
+@@ -12,6 +12,14 @@ public:
+ 
+ protected:
+ 	void CompileRange(CMipsJitter*) override;
++	uint32 GetJitCacheFlags() const override
++	{
++		return m_isLinkable ? 1 : 0;
++	}
++	void SetJitCacheFlags(uint32 flags) override
++	{
++		m_isLinkable = (flags & 1) != 0;
++	}
+ 
+ private:
+ 	struct INTEGER_BRANCH_DELAY_INFO
+diff --git a/Source/ee/VuExecutor.cpp b/Source/ee/VuExecutor.cpp
+index 72e80fc4..5f2c77fe 100644
+--- a/Source/ee/VuExecutor.cpp
++++ b/Source/ee/VuExecutor.cpp
+@@ -84,7 +84,8 @@ BasicBlockPtr CVuExecutor::BlockFactory(CMIPS& context, uint32 begin, uint32 end
+ 		result->AddBlockCompileHints(VUShared::COMPILEHINT_NO_CLAMPING);
+ 	}
+ 
+-	result->Compile();
++	//Persistent JIT cache (VU0 and VU1 told apart by their address range)
++	result->CompileWithJitCache(m_blockCategory ^ m_addressMask, hash, blockSizeByte, !hasBreakpoint);
+ 	if(!hasBreakpoint)
+ 	{
+ 		m_cachedBlocks.insert(std::make_pair(blockKey, result));

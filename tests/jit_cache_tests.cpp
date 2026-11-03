@@ -46,12 +46,13 @@ namespace
 		}
 		entry.linkEntryOffset = 12;
 		entry.trampolineOffset[0] = 40;
+		entry.flags = fill & 1;
 		return entry;
 	}
 
 	bool SameEntry(const CJitCache::ENTRY& a, const CJitCache::ENTRY& b)
 	{
-		if((a.code != b.code) || (a.relocs.size() != b.relocs.size()) || (a.linkEntryOffset != b.linkEntryOffset)) return false;
+		if((a.code != b.code) || (a.relocs.size() != b.relocs.size()) || (a.linkEntryOffset != b.linkEntryOffset) || (a.flags != b.flags)) return false;
 		if((a.trampolineOffset[0] != b.trampolineOffset[0]) || (a.trampolineOffset[1] != b.trampolineOffset[1])) return false;
 		for(size_t i = 0; i < a.relocs.size(); i++)
 		{
@@ -108,12 +109,17 @@ int main()
 		cache.Close();
 		Check(cache.Open(path, 42, ranges), "reopen");
 		Check(cache.GetStats().loaded == 2, "two entries loaded");
-		const auto* a = cache.Find(Key(0x100000, 1));
-		const auto* b = cache.Find(Key(0x100040, 2));
-		Check(a && SameEntry(*a, Entry(0xAA, 3)), "first entry intact");
-		Check(b && SameEntry(*b, Entry(0xBB, 0)), "second entry intact (first store wins)");
-		Check(!cache.Find(Key(0x100000, 2)), "different hash: miss");
-		Check(!cache.Find(Key(0x100080, 1)), "different address: miss");
+		CJitCache::ENTRY a, b, unused;
+		Check(cache.Find(Key(0x100000, 1), a) && SameEntry(a, Entry(0xAA, 3)), "first entry intact");
+		Check(cache.Find(Key(0x100040, 2), b) && SameEntry(b, Entry(0xBB, 0)), "second entry intact, flags too (first store wins)");
+		Check(!cache.Find(Key(0x100000, 2), unused), "different hash: miss");
+		Check(!cache.Find(Key(0x100080, 1), unused), "different address: miss");
+		auto hinted = Key(0x100000, 1);
+		hinted.hints = 4;
+		Check(!cache.Find(hinted, unused), "different compile hints: miss");
+		auto otherUnit = Key(0x100000, 1);
+		otherUnit.category ^= 0x3FFF;
+		Check(!cache.Find(otherUnit, unused), "other executor (VU0/VU1): miss");
 		// Appending after reopening keeps the old entries.
 		cache.Store(Key(0x200000, 3), Entry(0xDD, 2));
 		cache.Close();
@@ -155,7 +161,8 @@ int main()
 
 	// Not open: nothing found, nothing stored.
 	{
-		Check(!cache.IsOpen() && !cache.Find(Key(0x100000, 1)), "closed cache finds nothing");
+		CJitCache::ENTRY unused;
+		Check(!cache.IsOpen() && !cache.Find(Key(0x100000, 1), unused), "closed cache finds nothing");
 	}
 
 	std::remove(path);
