@@ -9,7 +9,7 @@ Graphics Synthesizer renderers and a native vitaGL frontend.
 
 > **Set expectations:** the Vita's Cortex-A9 is roughly 10x slower than what
 > full-speed PS2 emulation needs on ARM. Commercial 3D games will run far
-> below full speed. See [docs/RESEARCH.md](docs/RESEARCH.md) for the analysis and [docs/ROADMAP.md](docs/ROADMAP.md) for the full checklist,
+> below full speed. See [docs/RESEARCH.md](docs/RESEARCH.md) for the analysis, [docs/ROADMAP.md](docs/ROADMAP.md) for the plan (library-wide first: the top 50 PS2 games without a Vita version) and [docs/AOT_TRANSLATION.md](docs/AOT_TRANSLATION.md) for near-native translation,
 > the options considered and the optimization roadmap.
 
 ## Real-world performance (PS Vita hardware)

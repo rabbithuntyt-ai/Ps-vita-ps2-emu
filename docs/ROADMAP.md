@@ -3,6 +3,55 @@
 Status legend: `[x]` done · `[ ]` to do · **(HW)** needs testing on a real Vita.
 Phases are ordered; items inside a phase are roughly ordered by payoff.
 
+## Library-wide plan (current priority)
+
+Goal: most of the PS2 library functional, starting with the **top 50 PS2
+games that have no Vita version**. Work that helps one game only (hand
+ports, per-game rewrites) comes last; everything here targets code that many
+games share: Sony's SDK libraries, middleware (RenderWare, Criware, Havok),
+common VU1 microprograms and common GS usage.
+
+1. **Compatibility harness first.** Vita Lab runs each game unattended
+   (autostart, a few minutes, button presses to get past menus) and collects
+   screenshots, `perf.csv` and crash dumps. A compatibility table and a
+   cross-game chart in the repo replace the single Silent Hill 2 line; the
+   bottleneck shared by the most games is worked on next.
+   - [ ] Harness script (boot, play, collect, classify: no boot / menus / in game / playable)
+   - [ ] Top-50 candidate list (sales and popularity, minus games with Vita versions, each checked)
+   - [ ] `docs/COMPATIBILITY.md` table and a cross-game fps chart, updated per run
+2. **Library HLE by signature.** Find library functions by their code
+   bytes (not addresses) and run native ARM/NEON versions; libmpeg's
+   `sceMpegGetPicture` (`src/common/MpegHle.cpp`) is the template.
+   - [ ] Finish libmpeg on hardware (movies at full speed in every libmpeg game)
+   - [ ] Signature scanner shared by all HLE modules (masked code patterns, per-SDK-version variants)
+   - [ ] memcpy/memset/strlen and math (sin/cos/sqrt/atan2) from the SDK's libc and libm
+   - [ ] Criware (Sofdec/ADX) movies and audio
+   - [ ] RenderWare and other middleware hot paths, picked by the harness's hotspot data
+3. **Persistent JIT cache per disc serial.** The first play compiles and
+   stores blocks (keyed by code hash), later plays load them: scene changes
+   stop stalling after one pass, for every game. See docs/AOT_TRANSLATION.md.
+   - [ ] Relocatable block code (no absolute addresses baked in), cache file per serial
+   - [ ] Load on boot, validate by code hash, fall back to the JIT on a miss
+4. **VU1 microprograms on the GPU.** Games reuse a small set of transform
+   and lighting microprograms (SDK samples, middleware). Translate the common
+   ones to GXM vertex programs, keyed by microcode hash, so the Vita's GPU
+   does the work VU1 does on the CPU today (the usual 3D bottleneck).
+   - [ ] Microprogram census across the test set (hash, size, frequency)
+   - [ ] Translator for the common subset (FMAC, loads/stores, XGKICK output) with a CPU fallback
+5. **Automatic per-game tuning.** On first boot, measure and try the speed
+   hacks (EE rate, frame skip, VU1 thread, interlaced rendering), keep the
+   smoothest per serial (extends `assets/game_profiles.ini` and Auto EE rate).
+6. **GS changes that help many games.** Mipmaps, dithering, the remaining
+   blend modes; detection of full-screen effects (blur, bloom, depth of field)
+   that can be cheapened or skipped.
+7. **Native-speed translation (AOT).** Whole functions translated ahead of
+   time with whole-program analysis, during an install step: long first load,
+   near-native code after. Design and expected gains: docs/AOT_TRANSLATION.md.
+8. **More IOP modules replaced natively.** The IOP took up to 20% of the PS2
+   thread in Silent Hill 2's menus. Play! already replaces many SDK IOP
+   modules (IRX) with native code; extend that list from the harness's
+   per-game module logs, starting with sound drivers and CD streaming.
+
 ## Phase 0: Foundation (done)
 
 - [x] Research and pick the approach (Play! core + Vita frontend, see RESEARCH.md)
@@ -24,13 +73,13 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 - [ ] Audio plays without crackling
 - [x] Controls, rear touch L2/R2, front touch L3/R3 work
 - [x] Exit to game list and boot another game without restarting the app
-- [ ] Crash handler: write a crash report (registers, PC, last log lines) to the log
+- [x] Crash reports: `crash.txt` on C++ terminate; Vita core dumps (`psp2dmp`) read on a PC by our own parser (stop reason, registers, module bases)
 
 ## Phase 2: Measure before optimizing **(HW)**
 
-- [ ] Per-frame time breakdown: EE JIT, IOP, VU0/VU1, GS raster, presentation
-- [ ] Sampling profiler on device (periodic PC sampling, hottest JIT blocks/functions)
-- [ ] Test set of ~20 games across genres/engines with fps and status recorded
+- [x] Per-second time breakdown in `perf.csv` (autostart mode): ~70 counters, EE/IOP/VU/VIF/SPU/IPU/JIT sections and sub-sections, JIT compile phases, GPU stages, idle triggers per register and DMA channel, VIF unpack formats
+- [x] Sampling profiler on device: EE hotspot buckets (`eehot.txt`) and EE RAM dumps for disassembly on a PC
+- [ ] Test set: the top 50 PS2 games without a Vita version (see "Library-wide plan"), run unattended by the compatibility harness
 - [ ] Decide priorities from data: CPU-bound vs GS-bound share of the catalog
 
 ## Phase 3: Smoothness (felt performance)
@@ -113,7 +162,7 @@ Phases are ordered; items inside a phase are roughly ordered by payoff.
 - [ ] Frame-dump replay test: record GS streams from games, compare against reference renderer
 - [ ] Track and merge upstream Play! fixes regularly
 - [ ] Memory card management (format, delete, per-game cards)
-- [ ] Save states (Play! supports them; needs UI and storage handling)
+- [x] Save states: SELECT + R / SELECT + Triangle, one per game, refused while an IPU command runs (a state saved mid-command crashed on load)
 
 ## Phase 6.5: Auto-tuning across the catalog
 
