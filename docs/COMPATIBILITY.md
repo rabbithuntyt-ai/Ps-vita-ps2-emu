@@ -134,6 +134,10 @@ Latest run of each game (tools/vitalab_compat.sh).
 
 <!-- compat-runs-start -->
 
-No runs yet: see "Running a compatibility test".
+| Game | Serial | Result | First frame (s) | Emulated fps | Shown fps | EE % | VU1 % | GS wait % | JIT ms/block | Date |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Midnight Club 3 - DUB Edition Remix (USA) | - | no-boot | - | 1.0 | 0.0 | 2.2 | 0.0 | 0.0 | 2.22 | 2026-11-03 |
+| Resident Evil 4 (USA) | - | boots | 15.5 | 3.0 | 1.0 | 4.3 | 0.1 | 0.0 | 3.48 | 2026-11-03 |
+| TimeSplitters (USA) (v2.00)/TimeSplitters (USA) (v2.00) | - | boots | 31.8 | 58.9 | 0.0 | 5.3 | 0.9 | 0.0 | 2.29 | 2026-11-03 |
 
 <!-- compat-runs-end -->

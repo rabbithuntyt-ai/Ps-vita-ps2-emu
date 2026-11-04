@@ -1,0 +1,4 @@
+date,game,serial,result,first_draw_s,vm_fps,out_fps,ee_pct,vu1_pct,gs_wait_pct,jit_ms_block,crash
+2026-11-03,"Resident Evil 4 (USA).iso",-,boots,15.5,3.0,1.0,4.3,0.1,0.0,3.48,-
+2026-11-03,"Midnight Club 3 - DUB Edition Remix (USA).iso",-,no-boot,-,1.0,0.0,2.2,0.0,0.0,2.22,-
+2026-11-03,"TimeSplitters (USA) (v2.00)/TimeSplitters (USA) (v2.00).cue",-,boots,31.8,58.9,0.0,5.3,0.9,0.0,2.29,-
