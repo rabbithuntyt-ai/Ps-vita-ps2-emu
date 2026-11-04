@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 400" width="760" height="400" role="img" aria-labelledby="t d" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
 <title id="t">VitaPS2 performance gap</title>
-<desc id="d">ARM instructions the emulator needs per PS2 instruction, per workload, over time. Latest: Integer (CRC loop) 5.33, Float (matrix x vector) 7.88, 128-bit MMI (pixel blend) 6.24, Loads/stores (all sizes) 7.78. Lower is better; 1.0 is one-to-one.</desc>
+<desc id="d">ARM instructions the emulator needs per PS2 instruction, per workload, over time. Latest: Integer (CRC loop) 5.33, Float (matrix x vector) 7.88, 128-bit MMI (pixel blend) 6.24, Loads/stores (all sizes) 7.76. Lower is better; 1.0 is one-to-one.</desc>
 <style>
 svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;
 --s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100}
@@ -15,7 +15,7 @@ svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0
 <rect class="bg" width="760" height="400" rx="8"/>
 <text class="t2" x="56" y="30" font-size="13">PS2 → Vita performance gap (lower is better, 1.0 = one-to-one)</text>
 <text class="h" x="56" y="66" font-size="30" font-weight="600">6.81×</text>
-<text class="t2" x="154" y="66" font-size="13">ARM instructions per PS2 instruction, average of 4 workloads · 2d969d2</text>
+<text class="t2" x="154" y="66" font-size="13">ARM instructions per PS2 instruction, average of 4 workloads · a910986</text>
 <line class="axis" x1="56" x2="610" y1="360.0" y2="360.0"/>
 <text class="m" x="48" y="364.0" font-size="11" text-anchor="end">0</text>
 <line class="grid" x1="56" x2="610" y1="299.0" y2="299.0"/>
@@ -30,19 +30,19 @@ svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0
 <text class="t2" x="618" y="351.8" font-size="11">one-to-one</text>
 <text class="m" x="56" y="380" font-size="11">2026-11-02</text>
 <text class="m" x="610" y="380" font-size="11" text-anchor="end">2026-11-04</text>
-<polyline class="line" style="stroke:var(--s1)" points="56.0,283.8 75.8,283.8 95.6,283.8 115.4,283.8 135.1,287.9 154.9,290.9 174.7,294.9 194.5,294.9 214.3,294.9 234.1,294.9 253.9,294.9 273.6,294.9 293.4,294.9 313.2,294.9 333.0,294.9 352.8,294.9 372.6,294.9 392.4,294.9 412.1,294.9 431.9,294.9 451.7,294.9 471.5,294.9 491.3,294.9 511.1,294.9 530.9,294.9 550.6,294.9 570.4,294.9 590.2,294.9 610.0,294.9"/>
+<polyline class="line" style="stroke:var(--s1)" points="56.0,283.8 75.1,283.8 94.2,283.8 113.3,283.8 132.4,287.9 151.5,290.9 170.6,294.9 189.7,294.9 208.8,294.9 227.9,294.9 247.0,294.9 266.1,294.9 285.2,294.9 304.3,294.9 323.4,294.9 342.6,294.9 361.7,294.9 380.8,294.9 399.9,294.9 419.0,294.9 438.1,294.9 457.2,294.9 476.3,294.9 495.4,294.9 514.5,294.9 533.6,294.9 552.7,294.9 571.8,294.9 590.9,294.9 610.0,294.9"/>
 <circle class="dot" style="fill:var(--s1)" cx="610.0" cy="294.9" r="4.5"/>
-<polyline class="line" style="stroke:var(--s2)" points="56.0,171.3 75.8,171.3 95.6,260.8 115.4,260.8 135.1,262.0 154.9,262.8 174.7,263.9 194.5,263.9 214.3,263.8 234.1,263.9 253.9,263.9 273.6,263.9 293.4,263.8 313.2,263.8 333.0,263.9 352.8,263.9 372.6,263.9 392.4,263.9 412.1,263.9 431.9,263.8 451.7,263.9 471.5,263.9 491.3,263.9 511.1,263.9 530.9,263.9 550.6,263.9 570.4,263.9 590.2,263.9 610.0,263.9"/>
+<polyline class="line" style="stroke:var(--s2)" points="56.0,171.3 75.1,171.3 94.2,260.8 113.3,260.8 132.4,262.0 151.5,262.8 170.6,263.9 189.7,263.9 208.8,263.8 227.9,263.9 247.0,263.9 266.1,263.9 285.2,263.8 304.3,263.8 323.4,263.9 342.6,263.9 361.7,263.9 380.8,263.9 399.9,263.9 419.0,263.8 438.1,263.9 457.2,263.9 476.3,263.9 495.4,263.9 514.5,263.9 533.6,263.9 552.7,263.9 571.8,263.9 590.9,263.9 610.0,263.9"/>
 <circle class="dot" style="fill:var(--s2)" cx="610.0" cy="263.9" r="4.5"/>
-<polyline class="line" style="stroke:var(--s3)" points="56.0,276.0 75.8,276.0 95.6,276.0 115.4,276.0 135.1,278.6 154.9,281.3 174.7,283.8 194.5,283.8 214.3,283.8 234.1,283.8 253.9,283.8 273.6,283.8 293.4,283.8 313.2,283.8 333.0,283.8 352.8,283.8 372.6,283.8 392.4,283.8 412.1,283.8 431.9,283.8 451.7,283.8 471.5,283.8 491.3,283.8 511.1,283.8 530.9,283.8 550.6,283.8 570.4,283.8 590.2,283.8 610.0,283.8"/>
+<polyline class="line" style="stroke:var(--s3)" points="56.0,276.0 75.1,276.0 94.2,276.0 113.3,276.0 132.4,278.6 151.5,281.3 170.6,283.8 189.7,283.8 208.8,283.8 227.9,283.8 247.0,283.8 266.1,283.8 285.2,283.8 304.3,283.8 323.4,283.8 342.6,283.8 361.7,283.8 380.8,283.8 399.9,283.8 419.0,283.8 438.1,283.8 457.2,283.8 476.3,283.8 495.4,283.8 514.5,283.8 533.6,283.8 552.7,283.8 571.8,283.8 590.9,283.8 610.0,283.8"/>
 <circle class="dot" style="fill:var(--s3)" cx="610.0" cy="283.8" r="4.5"/>
-<polyline class="line" style="stroke:var(--s4)" points="56.0,118.1 75.8,118.1 95.6,118.1 115.4,261.2 135.1,262.6 154.9,264.1 174.7,265.3 194.5,265.3 214.3,265.3 234.1,265.3 253.9,265.3 273.6,265.3 293.4,265.3 313.2,265.2 333.0,265.2 352.8,265.3 372.6,265.3 392.4,265.3 412.1,265.2 431.9,265.2 451.7,265.3 471.5,265.3 491.3,265.2 511.1,265.2 530.9,265.3 550.6,265.3 570.4,265.3 590.2,265.3 610.0,265.1"/>
-<circle class="dot" style="fill:var(--s4)" cx="610.0" cy="265.1" r="4.5"/>
+<polyline class="line" style="stroke:var(--s4)" points="56.0,118.1 75.1,118.1 94.2,118.1 113.3,261.2 132.4,262.6 151.5,264.1 170.6,265.3 189.7,265.3 208.8,265.3 227.9,265.3 247.0,265.3 266.1,265.3 285.2,265.3 304.3,265.2 323.4,265.2 342.6,265.3 361.7,265.3 380.8,265.3 399.9,265.2 419.0,265.2 438.1,265.3 457.2,265.3 476.3,265.2 495.4,265.2 514.5,265.3 533.6,265.3 552.7,265.3 571.8,265.3 590.9,265.1 610.0,265.3"/>
+<circle class="dot" style="fill:var(--s4)" cx="610.0" cy="265.3" r="4.5"/>
 <path d="M615.0 263.9 L621.0 263.9" style="stroke:var(--s2);stroke-width:1;fill:none"/>
 <text class="h" x="624" y="267.9" font-size="12" font-weight="600">7.88</text>
 <text class="t2" x="658" y="267.9" font-size="12">float</text>
-<path d="M615.0 265.1 L621.0 281.9" style="stroke:var(--s4);stroke-width:1;fill:none"/>
-<text class="h" x="624" y="285.9" font-size="12" font-weight="600">7.78</text>
+<path d="M615.0 265.3 L621.0 281.9" style="stroke:var(--s4);stroke-width:1;fill:none"/>
+<text class="h" x="624" y="285.9" font-size="12" font-weight="600">7.76</text>
 <text class="t2" x="658" y="285.9" font-size="12">mem</text>
 <path d="M615.0 283.8 L621.0 299.9" style="stroke:var(--s3);stroke-width:1;fill:none"/>
 <text class="h" x="624" y="303.9" font-size="12" font-weight="600">6.24</text>
