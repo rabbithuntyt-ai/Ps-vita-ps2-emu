@@ -187,6 +187,7 @@ namespace
 		bool safeJit = false;    //no NEON/VFP register allocation in the JIT
 		bool threadedSpu = true; //SPU2 audio mixing on the second core
 		bool jitCache = true;    //keep compiled code between runs (ux0:data/VitaPS2/jitcache)
+		bool movieHle = false;   //native movie decoding (libmpeg 2.2 games, docs/HLE_MPEG.md)
 	};
 
 	std::string SettingsPathFor(const std::string& gamePath)
@@ -215,6 +216,7 @@ namespace
 		else if(key == "safe_jit") settings.safeJit = value != 0;
 		else if(key == "threaded_spu") settings.threadedSpu = value != 0;
 		else if(key == "jit_cache") settings.jitCache = value != 0;
+		else if(key == "mpeg_hle") settings.movieHle = value != 0;
 	}
 
 	// What the first-boot tuner found for a game (CAutoTuner).
@@ -674,6 +676,14 @@ namespace
 				std::printf("jit cache %s: %s\n", cachePath.c_str(), opened ? JitCacheSetup::Describe().c_str() : "not available");
 			}
 			session->Boot(path);
+			if(settings.movieHle)
+			{
+				// Native movie decoding (libmpeg 2.2 sceMpegGetPicture), decoder on
+				// core 2 (VU1 has little to do while the EE does not decode).
+				mpegHle.Enable(session->GetVm()->m_ee->m_ram, "ux0:data/VitaPS2/mpeghle.txt", []() {
+					sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */);
+				});
+			}
 			// Scripted runs: gs_diag=N logs N flips (buffers, targets) to gsdiag.txt.
 			if(gpu && autostart)
 			{
@@ -690,18 +700,6 @@ namespace
 					{
 						// Silent Hill 2 (SLUS-20228): sceMpeg context at 0x1213080 (docs/HLE_MPEG.md).
 						if(value == "1") mpegShadow.Enable(session->GetVm()->m_ee->m_ram, 0x1213080, "ux0:data/VitaPS2/mpegshadow.txt");
-						continue;
-					}
-					if(key == "mpeg_hle")
-					{
-						// Native movie decoding (libmpeg 2.2 sceMpegGetPicture), decoder on
-						// core 2 (VU1 has little to do while the EE does not decode).
-						if(value == "1")
-						{
-							mpegHle.Enable(session->GetVm()->m_ee->m_ram, "ux0:data/VitaPS2/mpeghle.txt", []() {
-								sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */);
-							});
-						}
 						continue;
 					}
 					if(key != "gs_diag") continue;
