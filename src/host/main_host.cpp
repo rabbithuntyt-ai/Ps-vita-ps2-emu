@@ -43,6 +43,7 @@
 #include "PadHandler.h"
 #include "ControllerInfo.h"
 #include "MpegHle.h"
+#include "ee/Vif.h"
 #include <atomic>
 #ifdef VITAPS2_HAS_GL
 #include <GL/osmesa.h>
@@ -394,6 +395,20 @@ int main(int argc, char** argv)
 		            debug.eeRa, debug.iopPc, debug.iopRa, debug.iopThread, debug.intcStat, debug.intcMask, debug.dmacStat,
 		            debug.vu1Start, debug.vu1Pc, debug.vu1RunMs);
 		std::printf("EE s6 %08X s7 %08X\n", debug.eeGpr[22], debug.eeGpr[23]);
+		{
+			// DMA and VIF1 state (hangs waiting on a transfer).
+			auto& ee = *session.GetVm()->m_ee;
+			auto dmac = [&](uint32 address) { return ee.m_dmac.GetRegister(address); };
+			std::printf("DMAC CTRL %08X STAT %08X PCR %08X STADR %08X\n", dmac(0x1000E000), dmac(0x1000E010), dmac(0x1000E020), dmac(0x1000E040));
+			const std::pair<const char*, uint32> channels[] = {{"VIF0", 0x10008000}, {"VIF1", 0x10009000}, {"GIF", 0x1000A000},
+			                                                   {"fromIPU", 0x1000B000}, {"toIPU", 0x1000B400}};
+			for(const auto& [name, base] : channels)
+				std::printf("D %-7s CHCR %08X MADR %08X QWC %04X TADR %08X\n", name, dmac(base), dmac(base + 0x10), dmac(base + 0x20), dmac(base + 0x30));
+			auto& vif1 = ee.m_vpu1->GetVif();
+			std::printf("VIF1 STAT %08X CODE %08X NUM %u TOP %X ITOP %X\n", vif1.GetRegister(0x10003C00), vif1.GetRegister(0x10003C80),
+			            vif1.GetRegister(0x10003C60), vif1.GetRegister(0x10003CE0), vif1.GetRegister(0x10003CD0));
+			std::printf("GIF STAT %08X\n", ee.m_gif.GetRegister(0x10003020));
+		}
 		if(!jitCachePath.empty())
 		{
 			std::printf("%s\n", JitCacheSetup::Describe().c_str());
