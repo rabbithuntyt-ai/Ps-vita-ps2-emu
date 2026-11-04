@@ -292,6 +292,7 @@ void CGSH_Hardware::ResetImpl()
 void CGSH_Hardware::MarkNewFrame()
 {
 	FlushBatch();
+	m_frameNumber++;
 	m_lastFrameStats = m_stats;
 	m_stats = STATS();
 	// Frame skip: the frame that just ended may have been skipped; decide
@@ -345,6 +346,11 @@ bool CGSH_Hardware::RowsOverlap(const TARGET& target, uint32 rowBegin, uint32 ro
 
 void CGSH_Hardware::DeleteTarget(TARGET& target)
 {
+	if(m_pointTarget == &target)
+	{
+		if(!m_points.empty()) FlushBatch(); //drawn while it was the current target
+		m_pointTarget = nullptr;
+	}
 	if(m_currentTarget == &target) m_currentTarget = nullptr;
 	if(target.framebuffer) glDeleteFramebuffers(1, &target.framebuffer);
 	if(target.colorTexture) glDeleteTextures(1, &target.colorTexture);
@@ -374,6 +380,22 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 {
 	if(!IsColorPsm(psm) || (fbw == 0)) return nullptr;
 	minHeight = std::min<uint32>(minHeight, 1024);
+	// Rows up to the next target in use (drawn in this frame or the last
+	// two): a scissor reaching past it does not make the buffer that tall
+	// (Silent Hill 2's movies draw 192 rows of 512x256 buffers at 0x200000 and
+	// 0x280000 with a 448 row scissor).
+	uint32 roomRows = ~0u;
+	{
+		GS_SURFACE surface;
+		surface.Init(psm, fbp, fbw);
+		uint32 rowBytes = std::max<uint32>(surface.pagesPerRow, 1) * 8192;
+		for(const auto& other : m_targets)
+		{
+			if((other->fbp <= fbp) || (m_frameNumber - other->lastUseFrame > 2)) continue;
+			roomRows = std::min(roomRows, ((other->fbp - fbp) / rowBytes) << surface.phShift);
+		}
+		if((roomRows >= 256) && (roomRows < minHeight)) minHeight = roomRows;
+	}
 
 	for(auto& target : m_targets)
 	{
@@ -383,6 +405,7 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 			{
 				target->psm = psm;
 				target->lastUse = ++m_useCounter;
+				target->lastUseFrame = m_frameNumber;
 				return target.get();
 			}
 			break; //too small: recreated below
@@ -399,38 +422,82 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 	target->psm = psm;
 	target->width = std::min<uint32>(fbw * 64, 1024);
 	target->height = RoundUpTargetHeight(std::max<uint32>(minHeight, 448));
+	if((target->height > roomRows) && (RoundUpTargetHeight(minHeight) <= roomRows)) target->height = RoundUpTargetHeight(minHeight);
+	target->lastUseFrame = m_frameNumber;
 
 	// Targets whose contents live in this memory go back to GS memory first
-	// (the new one is filled from GS memory as rows get used).
+	// (the new one is filled from GS memory as rows get used). One that only
+	// reaches into it with rows nothing was drawn in is cut short instead
+	// (Silent Hill 2's movies draw into 512x256 buffers at 0x200000 and
+	// 0x280000 by turns: 512 row targets replaced each other every frame,
+	// each one read back first).
 	uint32 start = 0, end = 0;
 	RowsToBytes(*target, 0, target->height, start, end);
+	for(auto& other : m_targets)
+	{
+		if((other->fbp >= start) || other->depthUsed) continue;
+		uint32 otherStart = 0, otherEnd = 0;
+		RowsToBytes(*other, 0, other->height, otherStart, otherEnd);
+		if(otherEnd <= start) continue;
+		GS_SURFACE surface;
+		surface.Init(other->psm, other->fbp, other->fbw);
+		uint32 rowBytes = std::max<uint32>(surface.pagesPerRow, 1) * 8192;
+		uint32 keepRows = ((start - other->fbp) / rowBytes) << surface.phShift;
+		if((keepRows == 0) || (keepRows >= other->height) || (other->gpuDirty && (other->dirtyY1 > keepRows))) continue;
+		ShrinkTarget(*other, keepRows);
+	}
 	RemoveTargetsOverlapping(nullptr, start, end - start);
 
-	glGenTextures(1, &target->colorTexture);
-	glBindTexture(GL_TEXTURE_2D, target->colorTexture);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, target->width, target->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-
-	glGenRenderbuffers(1, &target->depthBuffer);
-	glBindRenderbuffer(GL_RENDERBUFFER, target->depthBuffer);
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, target->width, target->height);
-
-	glGenFramebuffers(1, &target->framebuffer);
-	glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target->colorTexture, 0);
-	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, target->depthBuffer);
-	glDisable(GL_SCISSOR_TEST);
-	glDepthMask(GL_TRUE);
-	glClearDepth(0.0);
-	glClear(GL_DEPTH_BUFFER_BIT);
-
+	AllocateTargetGl(*target);
 	target->lastUse = ++m_useCounter;
 	m_targets.push_back(std::move(target));
 	m_stateApplied = false;
 	return m_targets.back().get();
+}
+
+void CGSH_Hardware::AllocateTargetGl(TARGET& target)
+{
+	glGenTextures(1, &target.colorTexture);
+	glBindTexture(GL_TEXTURE_2D, target.colorTexture);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, target.width, target.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+	glGenRenderbuffers(1, &target.depthBuffer);
+	glBindRenderbuffer(GL_RENDERBUFFER, target.depthBuffer);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, target.width, target.height);
+
+	glGenFramebuffers(1, &target.framebuffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target.colorTexture, 0);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, target.depthBuffer);
+	glDisable(GL_SCISSOR_TEST);
+	glDepthMask(GL_TRUE);
+	glClearDepth(0.0);
+	glClear(GL_DEPTH_BUFFER_BIT);
+}
+
+void CGSH_Hardware::ShrinkTarget(TARGET& target, uint32 rows)
+{
+	// The first 'rows' rows of the color buffer move to a smaller one on the
+	// GPU (callers make sure no depth was drawn and the rest is not dirty).
+	FlushBatch();
+	GLuint oldFramebuffer = target.framebuffer, oldColor = target.colorTexture, oldDepth = target.depthBuffer;
+	target.height = rows;
+	AllocateTargetGl(target);
+	glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
+	glBindTexture(GL_TEXTURE_2D, target.colorTexture);
+	glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, target.width, rows);
+	glDeleteFramebuffers(1, &oldFramebuffer);
+	glDeleteTextures(1, &oldColor);
+	glDeleteRenderbuffers(1, &oldDepth);
+	target.validRows = std::min(target.validRows, rows);
+	target.staleEnd = std::min(target.staleEnd, rows);
+	if(target.staleBegin >= target.staleEnd) target.staleBegin = target.staleEnd = 0;
+	m_stats.targetsShrunk++;
+	m_stateApplied = false;
 }
 
 CGSH_Hardware::TARGET* CGSH_Hardware::FindTargetContaining(uint32 ptr, uint32 fbw, uint32 psm, uint32 rows, uint32& offsetX, uint32& offsetY)
@@ -1108,6 +1175,12 @@ void CGSH_Hardware::ApplyState()
 	}
 	EnsureValidRows(*target, static_cast<uint32>(std::max(s.scay1, 0)) + 1);
 	m_currentTarget = target;
+	// Depth tested or written: the target's depth buffer matters.
+	bool depthActive = s.zte && !((s.ztst == DEPTH_TEST_ALWAYS) && s.zmsk);
+	if(depthActive) target->depthUsed = true;
+	// Points that just write their color (see AddDirectPoint).
+	m_pointsDirect = !s.textured && !s.alphaBlend && !s.fog && (s.fbmsk == 0) && !s.date && !s.fba && !depthActive &&
+	                 (!s.ate || (s.atst == ALPHA_TEST_ALWAYS)) && (s.fpsm == PSMCT32);
 
 	// Texture next: binding may download targets or copy the current one.
 	BindTexture();
@@ -1429,6 +1502,7 @@ void CGSH_Hardware::SkipOverwrittenRows(const CSoftwareRasterizer::VERTEX& a, co
 
 void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoftwareRasterizer::VERTEX* vertices)
 {
+	if(m_diagFile) m_diagKinds[kind & 3]++;
 	if(!m_stateApplied)
 	{
 		// The first primitive after a state change: an opaque sprite over
@@ -1443,6 +1517,11 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 	{
 		FlushBatch();
 		m_batchMode = mode;
+	}
+	if((kind == CSoftwareRasterizer::PRIMITIVE_POINT) && m_pointsDirect && m_currentTarget)
+	{
+		AddDirectPoint(vertices[0]);
+		return;
 	}
 
 	switch(kind)
@@ -1551,9 +1630,83 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 	if(m_batch.size() >= 3 * 4096) FlushBatch();
 }
 
+void CGSH_Hardware::AddDirectPoint(const CSoftwareRasterizer::VERTEX& v)
+{
+	const auto& s = m_state;
+	TARGET& target = *m_currentTarget;
+	// The pixel a GPU point covers (and CSoftwareRasterizer's rule).
+	int32 x = (v.x + 8) >> 4, y = (v.y + 8) >> 4;
+	if((x < std::max(s.scax0, 0)) || (x > s.scax1) || (y < std::max(s.scay0, 0)) || (y > s.scay1)) return;
+	if((x >= static_cast<int32>(target.width)) || (y >= static_cast<int32>(target.height))) return;
+	if(m_pointTarget != &target)
+	{
+		m_pointTarget = &target;
+		m_pointPixels.resize(target.width * target.height);
+		m_pointWritten.assign(target.width * target.height, 0);
+	}
+	if(m_points.empty())
+	{
+		m_pointX0 = m_pointX1 = x;
+		m_pointY0 = m_pointY1 = y;
+		m_pointUnique = 0;
+	}
+	else
+	{
+		m_pointX0 = std::min(m_pointX0, x);
+		m_pointX1 = std::max(m_pointX1, x);
+		m_pointY0 = std::min(m_pointY0, y);
+		m_pointY1 = std::max(m_pointY1, y);
+	}
+	uint32 index = x + y * target.width;
+	m_pointPixels[index] = v.r | (v.g << 8) | (v.b << 16) | (static_cast<uint32>(GsAlphaToTarget(v.a)) << 24);
+	if(!m_pointWritten[index])
+	{
+		m_pointWritten[index] = 1;
+		m_pointUnique++;
+	}
+	m_points.push_back({x, y, v});
+}
+
+void CGSH_Hardware::FlushPoints()
+{
+	if(m_points.empty()) return;
+	TARGET& target = *m_pointTarget;
+	uint32 width = m_pointX1 - m_pointX0 + 1, height = m_pointY1 - m_pointY0 + 1;
+	if(m_pointUnique == width * height)
+	{
+		// Every pixel of the rectangle written: upload it.
+		m_transferPixels.resize(width * height);
+		for(uint32 row = 0; row < height; row++)
+		{
+			uint32 index = m_pointX0 + (m_pointY0 + row) * target.width;
+			std::memcpy(&m_transferPixels[row * width], &m_pointPixels[index], width * 4);
+		}
+		glBindTexture(GL_TEXTURE_2D, target.colorTexture);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, m_pointX0, m_pointY0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, m_transferPixels.data());
+		MarkTargetDirty(target, m_pointX0, m_pointY0, m_pointX1 + 1, m_pointY1 + 1);
+		m_stats.pointRects++;
+		m_stats.drawCalls++;
+		m_stateApplied = false; //texture binding changed
+	}
+	else
+	{
+		// Gaps: draw them as points after all (the batch is in point mode).
+		TARGET* current = m_currentTarget;
+		m_currentTarget = &target;
+		for(const auto& point : m_points) AddVertex(point.vertex);
+		MarkTargetDirty(target, m_pointX0, m_pointY0, m_pointX1 + 1, m_pointY1 + 1);
+		m_currentTarget = current;
+		m_stats.pointsDrawn += static_cast<uint32>(m_points.size());
+	}
+	for(uint32 row = 0; row < height; row++)
+		std::memset(&m_pointWritten[m_pointX0 + (m_pointY0 + row) * target.width], 0, width);
+	m_points.clear();
+}
+
 void CGSH_Hardware::FlushBatch()
 {
 	CStageTimer stageTimer(GPU_STAGE_GL);
+	FlushPoints();
 	if(m_batch.empty()) return;
 	const GLsizei stride = sizeof(BATCH_VERTEX);
 	glVertexPointer(4, GL_FLOAT, stride, &m_batch[0].x);
@@ -1630,6 +1783,8 @@ void CGSH_Hardware::WriteFlipDiagnostics(const DISPLAY_INFO& dispInfo)
 	}
 	if(!m_diagUploads.empty()) std::fprintf(m_diagFile, " | uploads%s", m_diagUploads.c_str());
 	m_diagUploads.clear();
+	std::fprintf(m_diagFile, " | prims p%u l%u t%u s%u", m_diagKinds[0], m_diagKinds[1], m_diagKinds[2], m_diagKinds[3]);
+	std::memset(m_diagKinds, 0, sizeof(m_diagKinds));
 	if(!m_diagPrims.empty()) std::fprintf(m_diagFile, " | sprites%s", m_diagPrims.c_str());
 	m_diagPrims.clear();
 	m_diagSpriteCount.clear();

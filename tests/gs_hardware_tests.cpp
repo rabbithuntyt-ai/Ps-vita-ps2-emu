@@ -509,6 +509,32 @@ namespace
 		gs.Present();
 	}
 
+	// One point per pixel over a rectangle (Silent Hill 2's movies), then
+	// scattered points with gaps, on top of earlier drawing.
+	void ScenePoints(IDriver& gs)
+	{
+		Setup(gs);
+		Clear(gs, Rgbaq(0x20, 0x30, 0x40, 0x80));
+		gs.Write(GS_REG_PRIM, CGSHandler::PRIM_POINT);
+		for(uint32 y = 0; y < 96; y++)
+			for(uint32 x = 0; x < 128; x++)
+			{
+				gs.Write(GS_REG_RGBAQ, Rgbaq(static_cast<uint8>(x * 2), static_cast<uint8>(y * 2), static_cast<uint8>(x ^ y), 0x80));
+				gs.Write(GS_REG_XYZ2, Xyz(OffX(100 + x), OffX(50 + y), 0));
+			}
+		// A state change in between, then points with gaps.
+		gs.Write(GS_REG_PRIM, CGSHandler::PRIM_SPRITE);
+		Sprite(gs, 300, 300, 340, 340, Rgbaq(0xFF, 0x00, 0x00, 0x80));
+		gs.Write(GS_REG_PRIM, CGSHandler::PRIM_POINT);
+		for(uint32 i = 0; i < 2000; i++)
+		{
+			uint32 x = (i * 37) % 300, y = (i * 91) % 200;
+			gs.Write(GS_REG_RGBAQ, Rgbaq(0xE0, static_cast<uint8>(i), 0x10, 0x80));
+			gs.Write(GS_REG_XYZ2, Xyz(OffX(300 + x), OffX(200 + y), 0));
+		}
+		gs.Present();
+	}
+
 	// Random states and primitives within what the GPU renderer supports
 	// (no fog, no region clamp, alpha test fail mode KEEP).
 	void SceneRandom(IDriver& gs, uint32 seed)
@@ -736,7 +762,8 @@ int main(int argc, char** argv)
 	    {"display readback", SceneDisplayReadback, 0.5},
 	    {"texture in frame", [](IDriver& gs) { SceneTextureInFrame(gs, true); }, 0.5},
 	    {"texture in frame shown", [](IDriver& gs) { SceneTextureInFrame(gs, false); }, 0.5},
-	    {"texture outside frame", [](IDriver& gs) { SceneTextureInFrame(gs, true, 0x2C0000); }, 0.5},
+	    {"points", ScenePoints, 0.5},
+	    {"texture outside frame",[](IDriver& gs) { SceneTextureInFrame(gs, true, 0x2C0000); }, 0.5},
 	};
 	std::vector<SCENE> allScenes(std::begin(scenes), std::end(scenes));
 	static std::vector<std::string> randomNames;
@@ -777,6 +804,17 @@ int main(int argc, char** argv)
 			if((stats.downloadedPixels != 0) || (stats.uploadedPixels > 640 * 448))
 			{
 				std::printf("  FAIL %s: unexpected GS memory synchronization\n", scene.name);
+				failures++;
+			}
+		}
+		if(!std::strcmp(scene.name, "points"))
+		{
+			// The full rectangle is one upload; the scattered points are drawn.
+			auto stats = hardware.Stats();
+			std::printf("       point rectangles %u, points drawn %u\n", stats.pointRects, stats.pointsDrawn);
+			if((stats.pointRects != 1) || (stats.pointsDrawn != 2000))
+			{
+				std::printf("  FAIL %s: points not batched as expected\n", scene.name);
 				failures++;
 			}
 		}

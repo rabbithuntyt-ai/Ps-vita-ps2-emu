@@ -44,7 +44,9 @@
 #include "ControllerInfo.h"
 #include "MpegHle.h"
 #include "ee/Vif.h"
+#include <algorithm>
 #include <atomic>
+#include <map>
 #ifdef VITAPS2_HAS_GL
 #include <GL/osmesa.h>
 #include "GSH_Hardware.h"
@@ -190,6 +192,8 @@ int main(int argc, char** argv)
 	std::string shotDir = ".";
 	std::string statsPath;
 	uint32_t gsDiagLines = 0;
+	uint64_t hotFrom = ~0ULL; //sample the EE PC from this frame on (--hot-from)
+	std::string ramDumpPath;
 	for(int i = 2; i < argc; i++)
 	{
 		if(!std::strcmp(argv[i], "--frames") && (i + 1 < argc)) targetFrames = std::strtoull(argv[++i], nullptr, 10);
@@ -216,6 +220,8 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--shot-dir") && (i + 1 < argc)) shotDir = argv[++i];
 		else if(!std::strcmp(argv[i], "--stats") && (i + 1 < argc)) statsPath = argv[++i];
 		else if(!std::strcmp(argv[i], "--gs-diag") && (i + 1 < argc)) gsDiagLines = std::atoi(argv[++i]);
+		else if(!std::strcmp(argv[i], "--hot-from") && (i + 1 < argc)) hotFrom = std::strtoull(argv[++i], nullptr, 10);
+		else if(!std::strcmp(argv[i], "--dump-ram") && (i + 1 < argc)) ramDumpPath = argv[++i];
 	}
 
 	const char* home = std::getenv("HOME");
@@ -334,12 +340,14 @@ int main(int argc, char** argv)
 		CGSH_Hardware::GPU_TIMES statsGpu = CGSH_Hardware::GetTimes();
 #endif
 		CMpegHle::STATS statsMpeg;
+		std::map<uint32, uint32> hotPcs;
 		while(session.GetVmFrameCount() < targetFrames)
 		{
 			if(session.GetFrames().Fetch(serial, pixels, width, height)) presented++;
 			if(std::chrono::steady_clock::now() - start > std::chrono::seconds(timeoutSeconds)) break;
 			pump(5);
 			uint64_t frame = session.GetVmFrameCount();
+			if(frame >= hotFrom) hotPcs[session.GetDebugState().eePc]++;
 			if(shotEvery && (frame >= nextShot))
 			{
 				nextShot = frame - (frame % shotEvery) + shotEvery;
@@ -383,6 +391,17 @@ int main(int argc, char** argv)
 		}
 		if(statsFile) std::fclose(statsFile);
 		mpegHle.Disable();
+		if(!hotPcs.empty())
+		{
+			// EE PC samples (one per runner loop) by address, most frequent first.
+			std::vector<std::pair<uint32, uint32>> hot(hotPcs.begin(), hotPcs.end());
+			std::sort(hot.begin(), hot.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+			uint32 total = 0;
+			for(const auto& entry : hot) total += entry.second;
+			std::printf("EE hot (%u samples):", total);
+			for(size_t i = 0; i < std::min<size_t>(hot.size(), 24); i++) std::printf(" %08X:%u", hot[i].first, hot[i].second);
+			std::printf("\n");
+		}
 		auto threadUsage = ThreadProfiler::Sample();
 		auto profile = session.TakeProfile();
 		session.Pause();
@@ -408,6 +427,14 @@ int main(int argc, char** argv)
 			std::printf("VIF1 STAT %08X CODE %08X NUM %u TOP %X ITOP %X\n", vif1.GetRegister(0x10003C00), vif1.GetRegister(0x10003C80),
 			            vif1.GetRegister(0x10003C60), vif1.GetRegister(0x10003CE0), vif1.GetRegister(0x10003CD0));
 			std::printf("GIF STAT %08X active path %u\n", ee.m_gif.GetRegister(0x10003020), ee.m_gif.GetActivePath());
+			if(!ramDumpPath.empty())
+			{
+				if(std::FILE* file = std::fopen(ramDumpPath.c_str(), "wb"))
+				{
+					std::fwrite(ee.m_ram, 1, 0x02000000, file); //retail RAM (32 MB)
+					std::fclose(file);
+				}
+			}
 		}
 		if(!jitCachePath.empty())
 		{

@@ -97,6 +97,9 @@ public:
 		uint32 deferredUploads = 0;   //target rows left to fill from GS memory on use (texture data over a target)
 		uint32 skippedUploadRows = 0; //target rows an opaque sprite replaced before they were uploaded
 		uint32 unchangedTransfers = 0; //host to local transfers that changed no byte of GS memory
+		uint32 targetsShrunk = 0;      //targets cut short for a new one in their unused rows
+		uint32 pointRects = 0;         //point runs uploaded as one rectangle
+		uint32 pointsDrawn = 0;        //points drawn as points
 		uint32 redundantStateChanges = 0; //state rewrites that did not break batching //state changes with a blend GL cannot express
 	};
 
@@ -182,6 +185,9 @@ private:
 		// transfer in another layout wrote there): filled from it like rows past
 		// validRows, or never if an opaque sprite covers them first. Not dirty.
 		uint32 staleBegin = 0, staleEnd = 0;
+		// Drawn with depth testing or writes (its depth buffer must be kept).
+		bool depthUsed = false;
+		uint32 lastUseFrame = 0;
 		// Pixels rendered by the GPU and not yet written back to GS memory.
 		bool gpuDirty = false;
 		uint32 dirtyX0 = 0, dirtyY0 = 0, dirtyX1 = 0, dirtyY1 = 0;
@@ -210,6 +216,9 @@ private:
 	// starting some page rows into it.
 	TARGET* FindTargetContaining(uint32 ptr, uint32 fbw, uint32 psm, uint32 rows, uint32& offsetX, uint32& offsetY);
 	void DeleteTarget(TARGET&);
+	void AllocateTargetGl(TARGET&);
+	// Keeps only the first rows of a target (on the GPU, no read back).
+	void ShrinkTarget(TARGET&, uint32 rows);
 	void RemoveTargetsOverlapping(const TARGET* except, uint32 start, uint32 size);
 	void EnsureValidRows(TARGET&, uint32 rows);
 	// Rows a transfer rewrote in another layout: uploaded when used (stale range).
@@ -263,6 +272,7 @@ private:
 	// Keyed by texture cache entry and uploaded region (see TEXTURE_REGION).
 	std::map<std::pair<uint64, uint64>, CACHED_TEXTURE> m_glTextures;
 	uint32 m_useCounter = 0;
+	uint32 m_frameNumber = 0; //MarkNewFrame calls
 	uint64 m_clutHash = 0;
 
 	CSoftwareRasterizer::STATE m_state;
@@ -271,6 +281,25 @@ private:
 	TARGET* m_currentTarget = nullptr;
 	GLenum m_batchMode = GL_TRIANGLES;
 	std::vector<BATCH_VERTEX> m_batch;
+
+	// Points that only write their color (no texture, blending, tests, mask or
+	// fog) collect in a pixel buffer; when they fill their bounding rectangle
+	// it is uploaded at once instead of drawn as points (Silent Hill 2's movies
+	// draw every pixel of a 512x192 field as a point: 98K per frame).
+	struct PENDING_POINT
+	{
+		int32 x, y;
+		CSoftwareRasterizer::VERTEX vertex;
+	};
+	bool m_pointsDirect = false; //the applied state allows it
+	TARGET* m_pointTarget = nullptr;
+	std::vector<PENDING_POINT> m_points;
+	std::vector<uint32> m_pointPixels;
+	std::vector<uint8> m_pointWritten;
+	int32 m_pointX0 = 0, m_pointY0 = 0, m_pointX1 = 0, m_pointY1 = 0;
+	uint32 m_pointUnique = 0;
+	void AddDirectPoint(const CSoftwareRasterizer::VERTEX&);
+	void FlushPoints();
 	// Texture coordinate transform for render target textures.
 	float m_texScaleS = 1, m_texScaleT = 1, m_texOffsetS = 0, m_texOffsetT = 0;
 	bool m_fixAlpha = false;
@@ -300,4 +329,5 @@ private:
 	std::string m_diagUploads; //host->local transfers since the last flip
 	std::string m_diagPrims;   //sprites drawn since the last flip
 	std::map<uint32, uint32> m_diagSpriteCount; //sprites logged per target since the last flip
+	uint32 m_diagKinds[4] = {}; //points, lines, triangles, sprites since the last flip
 };
