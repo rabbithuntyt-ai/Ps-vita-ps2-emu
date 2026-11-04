@@ -288,8 +288,8 @@ private:
 	// draw every pixel of a 512x192 field as a point: 98K per frame).
 	struct PENDING_POINT
 	{
-		int32 x, y;
-		CSoftwareRasterizer::VERTEX vertex;
+		int32 x, y; //12.4 fixed point, as in the vertex
+		uint32 rgba;
 	};
 	bool m_pointsDirect = false; //the applied state allows it
 	TARGET* m_pointTarget = nullptr;

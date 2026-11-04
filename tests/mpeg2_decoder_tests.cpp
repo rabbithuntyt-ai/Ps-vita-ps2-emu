@@ -1,7 +1,10 @@
-// Native MPEG-2 decoder test: mpeg2_decoder_tests MOVIE.pss [max pictures]
+// Native MPEG-2 decoder test: mpeg2_decoder_tests MOVIE.pss [max pictures] [--yuv OUT] [--ipu]
 // Demuxes the video stream of a PSS (MPEG-2 program stream), decodes it and
 // writes every 30th picture as MOVIE.pss.NNNN.ppm. Prints pictures, types and
 // decoding speed. Without an argument (ctest) there is nothing to decode.
+// --yuv writes every picture (output order) as planar 4:2:0 to OUT, to compare
+// with a reference decoder (ffmpeg -f rawvideo -pix_fmt yuv420p); --ipu
+// selects the emulated IPU's quantisation.
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -80,7 +83,14 @@ int main(int argc, char** argv)
 		std::printf("usage: mpeg2_decoder_tests MOVIE.pss [max pictures]\n");
 		return 0;
 	}
-	unsigned int maxPictures = (argc > 2) ? static_cast<unsigned int>(std::atoi(argv[2])) : 300;
+	unsigned int maxPictures = ((argc > 2) && (argv[2][0] != '-')) ? static_cast<unsigned int>(std::atoi(argv[2])) : 300;
+	FILE* yuv = nullptr;
+	bool ipu = false;
+	for(int i = 2; i < argc; i++)
+	{
+		if(!std::strcmp(argv[i], "--yuv") && (i + 1 < argc)) yuv = std::fopen(argv[++i], "wb");
+		else if(!std::strcmp(argv[i], "--ipu")) ipu = true;
+	}
 	std::vector<uint8_t> ps;
 	if(FILE* file = std::fopen(argv[1], "rb"))
 	{
@@ -95,6 +105,7 @@ int main(int argc, char** argv)
 	std::printf("program stream %zu bytes, video %zu bytes\n", ps.size(), es.size());
 
 	CMpeg2Decoder decoder;
+	decoder.SetIpuCompatibleQuantisation(ipu);
 	size_t position = 0;
 	unsigned int pictures = 0;
 	char types[4] = {'?', 'I', 'P', 'B'};
@@ -109,6 +120,12 @@ int main(int argc, char** argv)
 		{
 			const auto& picture = decoder.GetPicture();
 			if(order.size() < 60) order += types[picture.pictureType & 3];
+			if(yuv)
+			{
+				std::fwrite(picture.y.data(), 1, picture.y.size(), yuv);
+				std::fwrite(picture.cb.data(), 1, picture.cb.size(), yuv);
+				std::fwrite(picture.cr.data(), 1, picture.cr.size(), yuv);
+			}
 			if((pictures % 30) == 0)
 			{
 				char path[512];
@@ -124,5 +141,6 @@ int main(int argc, char** argv)
 	}
 	double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 	std::printf("%u pictures (%s...) in %.2f s: %.1f pictures/s\n", pictures, order.c_str(), seconds, pictures / seconds);
+	if(yuv) std::fclose(yuv);
 	return (pictures != 0) ? 0 : 1;
 }

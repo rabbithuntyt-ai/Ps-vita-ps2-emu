@@ -1664,7 +1664,7 @@ void CGSH_Hardware::AddDirectPoint(const CSoftwareRasterizer::VERTEX& v)
 		m_pointWritten[index] = 1;
 		m_pointUnique++;
 	}
-	m_points.push_back({x, y, v});
+	m_points.push_back({v.x, v.y, static_cast<uint32>(v.r) | (v.g << 8) | (v.b << 16) | (static_cast<uint32>(v.a) << 24)});
 }
 
 void CGSH_Hardware::FlushPoints()
@@ -1693,10 +1693,28 @@ void CGSH_Hardware::FlushPoints()
 		// Gaps: draw them as points after all (the batch is in point mode).
 		TARGET* current = m_currentTarget;
 		m_currentTarget = &target;
-		for(const auto& point : m_points) AddVertex(point.vertex);
+		// Only position and color matter for these points (no texture, fog or
+		// depth). Drawn in batches like other primitives (the list is moved out:
+		// FlushBatch comes back here).
+		std::vector<PENDING_POINT> points;
+		points.swap(m_points);
+		CSoftwareRasterizer::VERTEX vertex = {};
+		for(const auto& point : points)
+		{
+			if(m_batch.size() >= 3 * 4096) FlushBatch();
+			vertex.x = point.x;
+			vertex.y = point.y;
+			vertex.r = point.rgba & 0xFF;
+			vertex.g = (point.rgba >> 8) & 0xFF;
+			vertex.b = (point.rgba >> 16) & 0xFF;
+			vertex.a = point.rgba >> 24;
+			AddVertex(vertex);
+		}
 		MarkTargetDirty(target, m_pointX0, m_pointY0, m_pointX1 + 1, m_pointY1 + 1);
 		m_currentTarget = current;
-		m_stats.pointsDrawn += static_cast<uint32>(m_points.size());
+		m_stats.pointsDrawn += static_cast<uint32>(points.size());
+		points.clear();
+		m_points.swap(points); //keeps the allocation
 	}
 	for(uint32 row = 0; row < height; row++)
 		std::memset(&m_pointWritten[m_pointX0 + (m_pointY0 + row) * target.width], 0, width);

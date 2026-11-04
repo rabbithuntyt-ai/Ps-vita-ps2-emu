@@ -1,0 +1,97 @@
+diff --git a/Source/JitCache.cpp b/Source/JitCache.cpp
+index d76e2002..cbb72cca 100644
+--- a/Source/JitCache.cpp
++++ b/Source/JitCache.cpp
+@@ -82,6 +82,7 @@ bool CJitCache::Open(const std::string& path, uint64 fingerprint, const std::vec
+ 	m_ranges = ranges;
+ 	m_maxFileSize = maxFileSize;
+ 	m_entries.clear();
++	m_known.clear();
+ 	m_stats = STATS();
+ 	ReadEntries();
+ 	if(m_entries.empty() && (m_fileSize == 0))
+@@ -115,6 +116,7 @@ void CJitCache::Close()
+ 	}
+ 	m_file = nullptr;
+ 	m_entries.clear();
++	m_known.clear();
+ 	m_unflushed = 0;
+ }
+ 
+@@ -197,14 +199,19 @@ bool CJitCache::Find(const KEY& key, ENTRY& entry)
+ 	if(!m_file) return false;
+ 	auto iterator = m_entries.find(key);
+ 	if(iterator == m_entries.end()) return false;
+-	entry = iterator->second;
++	// Taken out: the block's code now lives in the JIT's memory (a second copy
++	// held here cost the Vita's heap ~10 MB per game). Its key stays known so
++	// that a recompile does not append it to the file again.
++	entry = std::move(iterator->second);
++	m_entries.erase(iterator);
++	m_known.insert(key);
+ 	return true;
+ }
+ 
+ void CJitCache::Store(const KEY& key, ENTRY&& entry)
+ {
+ 	std::lock_guard<std::mutex> lock(m_mutex);
+-	if(!m_file || (m_entries.find(key) != m_entries.end())) return;
++	if(!m_file || (m_entries.find(key) != m_entries.end()) || (m_known.find(key) != m_known.end())) return;
+ 	std::vector<uint8> record;
+ 	Append(record, &key, sizeof(key));
+ 	Append32(record, entry.linkEntryOffset);
+@@ -232,7 +239,7 @@ void CJitCache::Store(const KEY& key, ENTRY&& entry)
+ 		return;
+ 	}
+ 	m_fileSize += 4 + record.size();
+-	m_entries[key] = std::move(entry);
++	m_known.insert(key); //in the file now; the code itself is not needed here
+ 	m_stats.stored++;
+ 	if(++m_unflushed >= FLUSH_EVERY)
+ 	{
+diff --git a/Source/JitCache.h b/Source/JitCache.h
+index f8856204..bbd08208 100644
+--- a/Source/JitCache.h
++++ b/Source/JitCache.h
+@@ -18,6 +18,7 @@
+ #include <mutex>
+ #include <string>
+ #include <unordered_map>
++#include <unordered_set>
+ #include <vector>
+ #include "Types.h"
+ #include "uint128.h"
+@@ -130,7 +131,8 @@ private:
+ 	std::vector<RANGE> m_ranges;
+ 	size_t m_maxFileSize = 0;
+ 	size_t m_fileSize = 0;
+-	std::unordered_map<KEY, ENTRY, KEY_HASH> m_entries;
++	std::unordered_map<KEY, ENTRY, KEY_HASH> m_entries; //loaded from the file, not used yet
++	std::unordered_set<KEY, KEY_HASH> m_known;          //used or stored in this session
+ 	STATS m_stats;
+ 	uint32 m_unflushed = 0;
+ };
+diff --git a/Source/Ps2Const.h b/Source/Ps2Const.h
+index 1cacaf90..aa0725d4 100644
+--- a/Source/Ps2Const.h
++++ b/Source/Ps2Const.h
+@@ -5,7 +5,9 @@ namespace PS2
+ {
+ 	enum
+ 	{
+-		EE_RAM_SIZE = 0x04000000,
++		// VitaPS2: retail PS2 memory only (the 64 MB of Namco System 256
++		// boards is not supported; 34 MB of the Vita's heap back).
++		EE_RAM_SIZE = 0x02000000,
+ 		EE_BASE_RAM_SIZE = 0x02000000,
+ 		EE_EXT_RAM_SIZE = 0x04000000,
+ 	};
+@@ -44,7 +46,7 @@ namespace PS2
+ 
+ 	enum
+ 	{
+-		IOP_RAM_SIZE = 0x00400000,
++		IOP_RAM_SIZE = 0x00200000,
+ 		IOP_BASE_RAM_SIZE = 0x00200000,
+ 		IOP_EXT_RAM_SIZE = 0x00400000,
+ 	};

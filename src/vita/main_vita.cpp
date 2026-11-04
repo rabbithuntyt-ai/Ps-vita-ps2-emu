@@ -15,6 +15,7 @@
 // needs libshacccg.suprx (ur0:data/libshacccg.suprx or ur0:data/external/).
 
 #include <algorithm>
+#include <malloc.h>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -578,7 +579,7 @@ namespace
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",ps2_%s", EmuProfile::GetSectionName(i));
 				std::fprintf(perfFile, ",spu_full_waits,spu_read_waits,ipu_idec,ipu_bdec,ipu_out_kb,ipu_stalls,audio_underruns,audio_tempo");
 				std::fprintf(perfFile, ",jit_blocks,jit_writes,jit_write_ms,jit_alloc_ms,jit_free_ranges,jit_translate_ms,jit_finish_ms,jit_install_ms,jit_guest_instr,jit_code_kb,jit_opt_ms,jit_alloc_regs_ms,jit_codegen_ms,jit_statements");
-				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads\n");
+				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb\n");
 			}
 		}
 		const uint64_t runStart = sceKernelGetProcessTimeWide();
@@ -1005,6 +1006,9 @@ namespace
 							std::copy(std::begin(flags), std::end(flags), std::begin(perfUnpackFlags));
 						}
 						for(const auto& usage : threadUsage) std::fprintf(perfFile, "%s=%.1f;", usage.name.c_str(), usage.cpuPercent);
+						// Heap in use and free (newlib heap of _newlib_heap_size_user).
+						struct mallinfo heap = mallinfo();
+						std::fprintf(perfFile, ",%.1f,%.1f", heap.uordblks / 1048576.0, heap.fordblks / 1048576.0);
 						std::fprintf(perfFile, "\n");
 						std::fflush(perfFile);
 					}
