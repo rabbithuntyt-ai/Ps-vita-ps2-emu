@@ -1,0 +1,90 @@
+diff --git a/Source/gs/GsTransferWrite.h b/Source/gs/GsTransferWrite.h
+index 1403e2d5..d518f635 100644
+--- a/Source/gs/GsTransferWrite.h
++++ b/Source/gs/GsTransferWrite.h
+@@ -61,6 +61,63 @@ namespace GsTransferWrite
+ 		return dirty;
+ 	}
+ 
++	// For whole PSMT4 pages: the source nibble of every nibble of a page, as an
++	// index from the page's first source pixel in a transfer 'rrw' pixels wide
++	// (y * rrw + x). Rebuilt when rrw changes (GS thread only).
++	inline const uint32* GetPsmt4PageSources(uint32 rrw)
++	{
++		typedef CGsPixelFormats::STORAGEPSMT4 Storage;
++		static uint32 tableRrw = 0;
++		static uint32 table[Storage::PAGEWIDTH * Storage::PAGEHEIGHT];
++		if(tableRrw != rrw)
++		{
++			const uint32* pageOffsets = CGsPixelFormats::CPixelIndexor<Storage>::GetPageOffsets();
++			for(uint32 y = 0; y < Storage::PAGEHEIGHT; y++)
++				for(uint32 x = 0; x < Storage::PAGEWIDTH; x++)
++					table[pageOffsets[y * Storage::PAGEWIDTH + x]] = y * rrw + x;
++			tableRrw = rrw;
++		}
++		return table;
++	}
++
++	// One row of whole PSMT4 pages (128 transfer rows): every byte of each page
++	// is built from its two source nibbles, a word at a time (no per pixel read,
++	// modify, write). False if the pages are not all inside GS memory.
++	inline bool WritePsmt4PageRow(uint8* ram, uint32 ramSize, uint32 pointer, uint32 bufferWidth, uint32 x, uint32 y, uint32 rrw,
++	                              const uint8* source, bool& dirty)
++	{
++		typedef CGsPixelFormats::STORAGEPSMT4 Storage;
++		uint32 rowPage = ((y / Storage::PAGEHEIGHT) * (bufferWidth * 64)) / Storage::PAGEWIDTH;
++		uint32 pages = rrw / Storage::PAGEWIDTH;
++		for(uint32 k = 0; k < pages; k++)
++		{
++			uint32 address = pointer + (rowPage + x / Storage::PAGEWIDTH + k) * CGsPixelFormats::PAGESIZE;
++			if(address + CGsPixelFormats::PAGESIZE > ramSize) return false;
++		}
++		const uint32* sources = GetPsmt4PageSources(rrw);
++		for(uint32 k = 0; k < pages; k++)
++		{
++			uint32* page = reinterpret_cast<uint32*>(ram + pointer + (rowPage + x / Storage::PAGEWIDTH + k) * CGsPixelFormats::PAGESIZE);
++			uint32 base = k * Storage::PAGEWIDTH;
++			for(uint32 w = 0; w < CGsPixelFormats::PAGESIZE / 4; w++)
++			{
++				const uint32* nibbleSources = sources + w * 8;
++				uint32 word = 0;
++				for(uint32 j = 0; j < 8; j++)
++				{
++					uint32 n = base + nibbleSources[j];
++					word |= ((source[n >> 1] >> ((n & 1) * 4)) & 0x0F) << (j * 4);
++				}
++				if(page[w] != word)
++				{
++					page[w] = word;
++					dirty = true;
++				}
++			}
++		}
++		return true;
++	}
++
+ 	// PSMT4: two pixels per source byte, low nibble first. The PSMT4 page
+ 	// offsets are nibble addresses (byte * 2 + high nibble).
+ 	inline bool WritePsmt4(uint8* ram, uint32 ramSize, uint32 pointer, uint32 bufferWidth, POSITION position, const uint8* source, uint32 byteCount)
+@@ -70,8 +127,21 @@ namespace GsTransferWrite
+ 		bool dirty = false;
+ 		uint32 count = byteCount * 2;
+ 		uint32 i = 0;
++		// Whole pages at a time when the transfer covers whole pages (Silent Hill
++		// 2's title screen streams a 512x512 image every frame).
++		bool pageAligned = ((position.dsax % Storage::PAGEWIDTH) == 0) && ((position.rrw % Storage::PAGEWIDTH) == 0) &&
++		                   (position.dsax + position.rrw <= 2048);
+ 		while(i < count)
+ 		{
++			uint32 pageRowNibbles = position.rrw * Storage::PAGEHEIGHT;
++			if(pageAligned && (position.rrx == 0) && ((i & 1) == 0) && (count - i >= pageRowNibbles) &&
++			   (((position.rry + position.dsay) % Storage::PAGEHEIGHT) == 0) &&
++			   WritePsmt4PageRow(ram, ramSize, pointer, bufferWidth, position.dsax, (position.rry + position.dsay) % 2048, position.rrw, source + i / 2, dirty))
++			{
++				i += pageRowNibbles;
++				position.rry += Storage::PAGEHEIGHT;
++				continue;
++			}
+ 			uint32 run = std::min(position.rrw - position.rrx, count - i);
+ 			uint32 y = (position.rry + position.dsay) % 2048;
+ 			const uint32* rowOffsets = pageOffsets + (y % Storage::PAGEHEIGHT) * Storage::PAGEWIDTH;

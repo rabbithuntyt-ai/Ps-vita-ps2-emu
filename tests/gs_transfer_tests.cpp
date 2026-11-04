@@ -70,6 +70,19 @@ namespace
 
 	std::mt19937 g_random(42);
 
+	// Whole PSMT4 pages (the page row fast path): page aligned x, widths of
+	// whole pages, page aligned y most of the time.
+	TRANSFER RandomPageTransfer()
+	{
+		TRANSFER t;
+		t.pointer = (g_random() % 0x4000) * 256;
+		t.width = 2 * (1 + (g_random() % 8));
+		t.dsax = (g_random() % 12) * 128;
+		t.dsay = (g_random() % 4 == 0) ? (g_random() % 2048) : (g_random() % 16) * 128;
+		t.rrw = 128 * (1 + (g_random() % 4));
+		return t;
+	}
+
 	TRANSFER RandomTransfer(uint32 maxWidth)
 	{
 		TRANSFER t;
@@ -112,21 +125,25 @@ namespace
 		return failures;
 	}
 
-	unsigned int TestPsmt4(std::vector<uint8>& ramA, std::vector<uint8>& ramB)
+	unsigned int TestPsmt4(std::vector<uint8>& ramA, std::vector<uint8>& ramB, bool pages)
 	{
 		unsigned int failures = 0;
 		for(unsigned int test = 0; test < 300; test++)
 		{
-			TRANSFER t = RandomTransfer(300);
+			TRANSFER t = pages ? RandomPageTransfer() : RandomTransfer(300);
 			t.rrw &= ~1u; //PSMT4 transfers are whole bytes per row
 			if(t.rrw == 0) t.rrw = 2;
-			uint32 bytes = (t.rrw / 2) * (1 + g_random() % 40);
+			uint32 rows = pages ? (1 + g_random() % 300) : (1 + g_random() % 40);
+			uint32 bytes = (t.rrw / 2) * rows;
 			std::vector<uint8> data(bytes);
 			for(auto& value : data) value = static_cast<uint8>((g_random() % 4 == 0) ? 0 : g_random());
+			// Some page transfers write the bytes already there (dirty flag).
+			if(pages && (test % 5 == 0)) std::fill(data.begin(), data.end(), 0);
 			uint32 rrxA = 0, rryA = 0, rrxB = 0, rryB = 0, done = 0;
 			while(done < bytes)
 			{
-				uint32 piece = std::min<uint32>(bytes - done, 1 + g_random() % 700);
+				uint32 maxPiece = (pages && (g_random() % 2)) ? 200000 : 700;
+				uint32 piece = std::min<uint32>(bytes - done, 1 + g_random() % maxPiece);
 				bool dirtyA = ReferencePsmt4(ramA.data(), t, rrxA, rryA, data.data() + done, piece);
 				GsTransferWrite::POSITION position{rrxB, rryB, t.dsax, t.dsay, t.rrw};
 				bool dirtyB = GsTransferWrite::WritePsmt4(ramB.data(), RAMSIZE, t.pointer, t.width, position, data.data() + done, piece);
@@ -139,7 +156,7 @@ namespace
 				ramB = ramA;
 			}
 		}
-		std::printf("PSMT4: %u failures\n", failures);
+		std::printf("PSMT4%s: %u failures\n", pages ? " (whole pages)" : "", failures);
 		return failures;
 	}
 }
@@ -181,6 +198,7 @@ int main(int argc, char** argv)
 	failures += TestUnits<CGsPixelFormats::STORAGEPSMCT16>("PSMCT16", ramA, ramB);
 	failures += TestUnits<CGsPixelFormats::STORAGEPSMCT16S>("PSMCT16S", ramA, ramB);
 	failures += TestUnits<CGsPixelFormats::STORAGEPSMT8>("PSMT8", ramA, ramB);
-	failures += TestPsmt4(ramA, ramB);
+	failures += TestPsmt4(ramA, ramB, false);
+	failures += TestPsmt4(ramA, ramB, true);
 	return (failures == 0) ? 0 : 1;
 }
