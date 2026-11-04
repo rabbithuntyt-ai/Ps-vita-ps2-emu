@@ -34,7 +34,7 @@ second. Full history: [docs/perf/vita_realworld.md](docs/perf/vita_realworld.md)
 <!-- vita-realworld-start -->
 | Build | Title screen fps | Movie: emulated fps | Movie: shown fps | Movie: pictures/s | JIT ms/block | Movie: EE % | VIF % | SPU wait % | GS wait % | VIF1 kQW/s |
 |---|---|---|---|---|---|---|---|---|---|---|
-| VIF unpack fast loop (0056) (2026-11-02) | 10.7 | 14.8 | 14.5 | 0.8 | 4.44 | 31.5 | 11.6 | 0.1 | 6.9 | 91.5 |
+| stale rows + PSMT4 pages + native movie (2026-11-04) | 25.0 | 15.9 | 15.2 | 1.0 | 2.34 | 35.0 | 27.0 | - | - | - |
 <!-- vita-realworld-end -->
 
 ## Performance gap

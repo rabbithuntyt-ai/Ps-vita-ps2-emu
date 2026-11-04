@@ -163,3 +163,64 @@ Status: works up to the display hand-off; not verified to play through yet.
   the decoded coefficients only and an unclamped prediction path. On ARM the
   prediction and block add use NEON (Mpeg2Simd.h); the HLE runs a NEON vs
   scalar self-test at startup and falls back to scalar on any mismatch.
+
+## Status, 2026-11-04 (Silent Hill 2, opening movie)
+
+Measured on a Vita unless noted. **The movie is not fixed: it plays at about one
+new picture per second, and it can hang.**
+
+### What works
+
+- Native decoding reaches the end of the movie on the PC. Two output bugs caused
+  the stall after five pictures: `mp->width/height` stayed 0, and macroblocks must
+  be returned column by column.
+- The decoder is not the bottleneck: ~40 ms per 512x384 picture on core 2, and
+  pictures were nearly always ready when the game asked.
+- The decoder is not the source of the artifacts: against ffmpeg on the first
+  stream of `DATA/MOVIE.MGF`, PSNR is 65 dB (luma, 300 pictures,
+  `tests/mpeg2_decoder_tests --yuv`). Mismatch with the emulated IPU in shadow mode
+  grows to a mean of ~10 per byte; that comparison uses the IPU as its reference.
+
+### Why it is a slideshow
+
+Each picture is converted twice (once per field) by the game's own VIF1 + VU1 chain:
+
+- 768 macroblocks, each ~13 small DMA tags and masked `UNPACK S-8`s and one `MSCNT`:
+  ~10,000 tags and ~5.5 MB of VU memory per field.
+- VU1 emits one GS point per pixel: 98,304 points per field
+  (`tools/vif_chain.py`, `--gs-diag`).
+- Measured: ~1,400 VIF waits on VU1 per second and ~1 picture per second. The
+  emulation thread is ~80% busy, VU1 ~45%, GPU thread ~500 ms/s.
+
+Batching points into one upload cut GL time on the PC (422 -> 43 ms per 60 frames)
+but barely moved the Vita's picture rate, so the GPU thread is not the limit. The
+per-unit costs (~325 us of VU1 per macroblock) are estimates from those shares; the
+movie callgrind report (`runs/host/cg_movie.sh`) has not been analysed yet.
+
+Candidate fix, not started: recognise the conversion chain and convert the field
+natively, skipping the VIF, VU1 and point stages. Check the result pixel by pixel
+against the VU1 path on the PC.
+
+### Open bugs
+
+1. **Hang with threaded VU1.** Reproduced on the PC with `--mtvu --mpeg-hle`: the EE
+   polls VIF1's CHCR at 0x1F8338, VIF1 has VEW set on a `FLUSH`, a DMA tag is waiting
+   to be delivered (CHCR bit 1), VU1 reports ready. It stopped after 42, 43, 45 and
+   173 pictures in four runs. Without `--mtvu` the same run passed 300 pictures. Root
+   cause unknown. `CVif::ResumeDelayedMicroProgram` can restart a VU1 that is still
+   running; guarding it gave 89 pictures, 325+ pictures and one run stuck before the
+   movie with GIF path 3 open, so the guard was not kept.
+2. **Black screen after New Game on the Vita.** The last two runs on the newest local
+   build showed no output (one confirmed 0 pictures, EE and IOP idle, no crash dump).
+   Not root-caused. That build has the uncommitted change in item 3, and those runs
+   pressed through the menus at different times, so neither is ruled out or confirmed.
+3. **Rectangular artifacts on the Vita.** Regions of an older picture and a grey block
+   appear in the field. They do not appear on the PC. Hypothesis: a field takes ~15
+   frames to convert, so the other buffer stops counting as in use and the converting
+   target is rebuilt from stale GS memory. The candidate fix (sampled and displayed
+   targets count as used, 60 frame window) is **not committed**, because it could not
+   be verified and coincides with item 2.
+
+Native decoding is on by default for this game (`assets/game_profiles.ini`,
+`mpeg_hle=1`): 17.9 fps median emulated against 11.9 with the emulated IPU, but the
+emulated IPU path has not been checked for these bugs.

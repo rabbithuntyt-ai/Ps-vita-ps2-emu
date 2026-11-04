@@ -418,7 +418,8 @@ int main(int argc, char** argv)
 			// DMA and VIF1 state (hangs waiting on a transfer).
 			auto& ee = *session.GetVm()->m_ee;
 			auto dmac = [&](uint32 address) { return ee.m_dmac.GetRegister(address); };
-			std::printf("DMAC CTRL %08X STAT %08X PCR %08X STADR %08X\n", dmac(0x1000E000), dmac(0x1000E010), dmac(0x1000E020), dmac(0x1000E040));
+			std::printf("DMAC CTRL %08X STAT %08X PCR %08X STADR %08X ENABLER %08X\n", dmac(0x1000E000), dmac(0x1000E010), dmac(0x1000E020),
+			            dmac(0x1000E040), dmac(0x1000F520));
 			const std::pair<const char*, uint32> channels[] = {{"VIF0", 0x10008000}, {"VIF1", 0x10009000}, {"GIF", 0x1000A000},
 			                                                   {"fromIPU", 0x1000B000}, {"toIPU", 0x1000B400}};
 			for(const auto& [name, base] : channels)
@@ -427,6 +428,8 @@ int main(int argc, char** argv)
 			std::printf("VIF1 STAT %08X CODE %08X NUM %u TOP %X ITOP %X\n", vif1.GetRegister(0x10003C00), vif1.GetRegister(0x10003C80),
 			            vif1.GetRegister(0x10003C60), vif1.GetRegister(0x10003CE0), vif1.GetRegister(0x10003CD0));
 			std::printf("GIF STAT %08X active path %u\n", ee.m_gif.GetRegister(0x10003020), ee.m_gif.GetActivePath());
+			std::printf("VU1 ready %d running %d threaded %d start %04X pc %04X\n", ee.m_vpu1->IsVuReady() ? 1 : 0, ee.m_vpu1->IsVuRunning() ? 1 : 0,
+			            ee.m_vpu1->IsThreaded() ? 1 : 0, ee.m_vpu1->GetProgramStart(), ee.m_vpu1->GetCurrentPc());
 			if(!ramDumpPath.empty())
 			{
 				if(std::FILE* file = std::fopen(ramDumpPath.c_str(), "wb"))
