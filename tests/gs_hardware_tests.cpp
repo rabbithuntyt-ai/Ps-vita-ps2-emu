@@ -72,7 +72,7 @@ namespace
 		}
 		void Transfer(const uint8* data, uint32 size) override
 		{
-			m_gs.FeedImageData(data, size);
+			m_gs.Transfer(data, size);
 		}
 
 	private:
@@ -105,6 +105,11 @@ namespace
 		{
 			return m_pRAM;
 		}
+		// See CTestGs::Transfer.
+		void Transfer(const uint8* data, uint32 size)
+		{
+			FeedImageDataImpl(data, size);
+		}
 	};
 
 	class CHardwareDriver : public IDriver
@@ -132,7 +137,7 @@ namespace
 		}
 		void Transfer(const uint8* data, uint32 size) override
 		{
-			m_gs.FeedImageData(data, size);
+			m_gs.Transfer(data, size);
 		}
 		CGSH_Hardware::STATS Stats() const
 		{
@@ -460,6 +465,50 @@ namespace
 		gs.Present();
 	}
 
+	// Silent Hill 2's title screen: an 8-bit texture uploaded over the first
+	// rows of the frame buffer (another layout, not reaching its end), drawn
+	// into an off-screen buffer, which then covers the frame. 'cover' false:
+	// the frame is shown with the texture bytes still in it.
+	void SceneTextureInFrame(IDriver& gs, bool cover, uint32 texPtr = 0)
+	{
+		Setup(gs);
+		Clear(gs, Rgbaq(0x10, 0x20, 0x30, 0x80));
+		const uint32 clutPtr = 0x340000;
+		for(uint32 i = 0; i < 256; i++)
+			GsMemory::WriteRaw(gs.Ram(), CGSHandler::PSMCT32, clutPtr, 1, i & 15, i >> 4, 0x80000000 | (i * 0x010305));
+		std::vector<uint8> image(640 * 128);
+		for(uint32 i = 0; i < image.size(); i++) image[i] = static_cast<uint8>((i % 640) + (i / 640) * 3);
+		gs.Write(GS_REG_BITBLTBUF, (static_cast<uint64>(texPtr / 256) << 32) | (static_cast<uint64>(FBW) << 48) | (static_cast<uint64>(CGSHandler::PSMT8) << 56));
+		gs.Write(GS_REG_TRXPOS, 0);
+		gs.Write(GS_REG_TRXREG, 640 | (128ULL << 32));
+		gs.Write(GS_REG_TRXDIR, 0);
+		gs.Transfer(image.data(), static_cast<uint32>(image.size()));
+		if(cover)
+		{
+			const uint32 rtPtr = 0x280000;
+			gs.Write(GS_REG_FRAME_1, static_cast<uint64>(rtPtr / 8192) | (4ULL << 16)); //256 wide
+			gs.Write(GS_REG_SCISSOR_1, Scissor(0, 255, 0, 127));
+			gs.Write(GS_REG_TEX0_1, Tex0(texPtr, FBW, CGSHandler::PSMT8, 9, 7, false, CGSHandler::TEX0_FUNCTION_DECAL, clutPtr, true));
+			gs.Write(GS_REG_TEX1_1, 0);
+			gs.Write(GS_REG_CLAMP_1, 0);
+			gs.Write(GS_REG_PRIM, CGSHandler::PRIM_SPRITE | (1 << 4) | (1 << 8));
+			gs.Write(GS_REG_RGBAQ, Rgbaq(0x80, 0x80, 0x80, 0x80));
+			gs.Write(GS_REG_UV, Uv(0, 0));
+			gs.Write(GS_REG_XYZ2, Xyz(OffX(0), OffX(0), 0));
+			gs.Write(GS_REG_UV, Uv(256 << 4, 128 << 4));
+			gs.Write(GS_REG_XYZ2, Xyz(OffX(256), OffX(128), 0));
+			// The off-screen picture over the whole frame (ends at 639.75,447.75 like the game).
+			gs.Write(GS_REG_FRAME_1, Frame(0));
+			gs.Write(GS_REG_SCISSOR_1, Scissor(0, 639, 0, 447));
+			gs.Write(GS_REG_TEX0_1, Tex0(rtPtr, 4, CGSHandler::PSMCT32, 8, 7, false, CGSHandler::TEX0_FUNCTION_DECAL));
+			gs.Write(GS_REG_UV, Uv(0, 0));
+			gs.Write(GS_REG_XYZ2, Xyz(OffX(0) - 4, OffX(0) - 4, 0));
+			gs.Write(GS_REG_UV, Uv(256 << 4, 128 << 4));
+			gs.Write(GS_REG_XYZ2, Xyz(OffX(640) - 4, OffX(448) - 4, 0));
+		}
+		gs.Present();
+	}
+
 	// Random states and primitives within what the GPU renderer supports
 	// (no fog, no region clamp, alpha test fail mode KEEP).
 	void SceneRandom(IDriver& gs, uint32 seed)
@@ -685,6 +734,9 @@ int main(int argc, char** argv)
 	    {"textures after frame", SceneTexturesAfterFrame, 0.5},
 	    {"display inside target", SceneDisplayInsideTarget, 0.5},
 	    {"display readback", SceneDisplayReadback, 0.5},
+	    {"texture in frame", [](IDriver& gs) { SceneTextureInFrame(gs, true); }, 0.5},
+	    {"texture in frame shown", [](IDriver& gs) { SceneTextureInFrame(gs, false); }, 0.5},
+	    {"texture outside frame", [](IDriver& gs) { SceneTextureInFrame(gs, true, 0x2C0000); }, 0.5},
 	};
 	std::vector<SCENE> allScenes(std::begin(scenes), std::end(scenes));
 	static std::vector<std::string> randomNames;
@@ -723,6 +775,19 @@ int main(int argc, char** argv)
 			auto stats = hardware.Stats();
 			std::printf("       readback %u px, upload %u px\n", stats.downloadedPixels, stats.uploadedPixels);
 			if((stats.downloadedPixels != 0) || (stats.uploadedPixels > 640 * 448))
+			{
+				std::printf("  FAIL %s: unexpected GS memory synchronization\n", scene.name);
+				failures++;
+			}
+		}
+		if(!std::strcmp(scene.name, "texture in frame"))
+		{
+			// The texture rows of the frame (32 rows of it) are covered before
+			// anything uses them: not uploaded, and nothing is read back. (The
+			// uploads are the two new targets.)
+			auto stats = hardware.Stats();
+			std::printf("       readback %u px, upload %u px, skipped %u rows\n", stats.downloadedPixels, stats.uploadedPixels, stats.skippedUploadRows);
+			if((stats.downloadedPixels != 0) || (stats.skippedUploadRows < 32) || (stats.uploadedPixels > 640 * 448 + 256 * 128))
 			{
 				std::printf("  FAIL %s: unexpected GS memory synchronization\n", scene.name);
 				failures++;

@@ -42,6 +42,13 @@ namespace GsTest
 			FlipImpl(GetCurrentDisplayInfo());
 		}
 
+		// Image data for the transfer TRXDIR started, right away (FeedImageData
+		// queues it for a GS thread these tests do not run).
+		void Transfer(const void* data, uint32 size)
+		{
+			FeedImageDataImpl(static_cast<const uint8*>(data), size);
+		}
+
 		uint32 Pixel32(uint32 fbp, uint32 fbw, uint32 x, uint32 y)
 		{
 			return GsMemory::ReadRaw(m_pRAM, PSMCT32, fbp, fbw, x, y);

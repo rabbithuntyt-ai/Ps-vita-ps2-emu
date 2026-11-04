@@ -178,6 +178,10 @@ private:
 		// Rows [0, validRows) of the GPU copy are current; more rows are
 		// filled from GS memory when drawing, display or sampling needs them.
 		uint32 validRows = 0;
+		// Rows [staleBegin, staleEnd) inside them are older than GS memory (a
+		// transfer in another layout wrote there): filled from it like rows past
+		// validRows, or never if an opaque sprite covers them first. Not dirty.
+		uint32 staleBegin = 0, staleEnd = 0;
 		// Pixels rendered by the GPU and not yet written back to GS memory.
 		bool gpuDirty = false;
 		uint32 dirtyX0 = 0, dirtyY0 = 0, dirtyX1 = 0, dirtyY1 = 0;
@@ -208,6 +212,9 @@ private:
 	void DeleteTarget(TARGET&);
 	void RemoveTargetsOverlapping(const TARGET* except, uint32 start, uint32 size);
 	void EnsureValidRows(TARGET&, uint32 rows);
+	// Rows a transfer rewrote in another layout: uploaded when used (stale range).
+	void MarkRowsStale(TARGET&, uint32 rowBegin, uint32 rowEnd);
+	void UploadStaleRows(TARGET&, uint32 rowEnd);
 	// Before the first primitive of a state: an opaque sprite over whole rows
 	// not uploaded yet makes them valid without an upload.
 	void SkipOverwrittenRows(const CSoftwareRasterizer::VERTEX&, const CSoftwareRasterizer::VERTEX&);

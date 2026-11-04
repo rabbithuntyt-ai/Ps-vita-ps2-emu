@@ -174,7 +174,13 @@ void CTextureCache::GetPageRange(const KEY& key, uint32& firstPage, uint32& page
 	uint32 pagesPerRow = std::max<uint32>(surface.pagesPerRow, 1);
 	uint32 widthPages = (key.tw + surface.pwMask) >> surface.pwShift;
 	firstPage = (key.tbp >> GS_SURFACE::PAGE_SHIFT) & (PAGE_COUNT - 1);
-	pageCount = std::min<uint32>(pagesPerRow * pageRows + widthPages + 1, PAGE_COUNT);
+	// Texel (x, y) lies in page row y / page height, page x / page width of it.
+	// A texture starting inside a page or wider than its buffer reaches into
+	// pages beyond that. (The margin pulled a render target under Silent Hill
+	// 2's title texture back to GS memory every frame.)
+	bool pageAligned = (key.tbp & ((1u << GS_SURFACE::PAGE_SHIFT) - 1)) == 0;
+	uint32 margin = (pageAligned && (widthPages <= pagesPerRow)) ? 0 : widthPages + 1;
+	pageCount = std::min<uint32>(pagesPerRow * pageRows + margin, PAGE_COUNT);
 }
 
 uint32 CTextureCache::CTexture::Expand16(uint32 color16) const

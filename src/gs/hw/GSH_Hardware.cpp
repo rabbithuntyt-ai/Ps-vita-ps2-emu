@@ -455,9 +455,44 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTargetContaining(uint32 ptr, uint32 fb
 	return nullptr;
 }
 
+void CGSH_Hardware::UploadStaleRows(TARGET& target, uint32 rowEnd)
+{
+	// Stale rows below rowEnd: [staleBegin, min(staleEnd, rowEnd)).
+	if((target.staleBegin >= target.staleEnd) || (target.staleBegin >= rowEnd)) return;
+	uint32 begin = target.staleBegin, end = std::min(target.staleEnd, rowEnd);
+	uint32 start = 0, stop = 0;
+	RowsToBytes(target, begin, end, start, stop);
+	RemoveTargetsOverlapping(&target, start, stop - start);
+	UploadTarget(target, 0, begin, target.width, end - begin);
+	target.staleBegin = end;
+	if(target.staleBegin >= target.staleEnd) target.staleBegin = target.staleEnd = 0;
+}
+
+void CGSH_Hardware::MarkRowsStale(TARGET& target, uint32 rowBegin, uint32 rowEnd)
+{
+	// GPU pixels not written back yet cannot be replaced from GS memory later.
+	bool dirtyRows = target.gpuDirty && (target.dirtyY0 < rowEnd) && (rowBegin < target.dirtyY1);
+	bool hasStale = target.staleBegin < target.staleEnd;
+	if(hasStale && ((rowBegin > target.staleEnd) || (rowEnd < target.staleBegin)))
+	{
+		// One range per target: a separate older one is uploaded now.
+		UploadStaleRows(target, target.staleEnd);
+		hasStale = false;
+	}
+	if(dirtyRows)
+	{
+		UploadTarget(target, 0, rowBegin, target.width, rowEnd - rowBegin);
+		return;
+	}
+	target.staleBegin = hasStale ? std::min(target.staleBegin, rowBegin) : rowBegin;
+	target.staleEnd = hasStale ? std::max(target.staleEnd, rowEnd) : rowEnd;
+	m_stats.deferredUploads++;
+}
+
 void CGSH_Hardware::EnsureValidRows(TARGET& target, uint32 rows)
 {
 	rows = std::min(rows, target.height);
+	UploadStaleRows(target, rows);
 	if(rows <= target.validRows) return;
 	uint32 begin = target.validRows;
 	// Other targets holding newer data for these rows go back to memory.
@@ -561,6 +596,12 @@ void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEn
 	FlushBatch();
 	uint32 x0 = target.dirtyX0;
 	uint32 width = target.dirtyX1 - x0, height = y1 - y0;
+	if(m_diagFile && (m_diagUploads.size() < 600))
+	{
+		char text[64];
+		std::snprintf(text, sizeof(text), " D%X:%u,%u+%ux%u(%u-%u)", target.fbp, x0, y0, width, height, rowBegin, rowEnd);
+		m_diagUploads += text;
+	}
 	m_transferPixels.resize(width * height);
 	uint32* pixels = m_transferPixels.data();
 	glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
@@ -767,13 +808,17 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 			// upload textures into frame buffer memory, then clear the frame
 			// with an opaque sprite (see SkipOverwrittenRows).
 			target->validRows = rowBegin;
+			target->staleEnd = std::min(target->staleEnd, rowBegin);
+			if(target->staleBegin >= target->staleEnd) target->staleBegin = target->staleEnd = 0;
 			m_stats.deferredUploads++;
 		}
 		else
 		{
 			// Data in another layout written over the middle of the target:
-			// only the page rows it touched change.
-			UploadTarget(*target, 0, rowBegin, target->width, rowEnd - rowBegin);
+			// only the page rows it touched change, and only when used (Silent
+			// Hill 2's title screen uploads its textures into the next frame
+			// buffer, then covers them with the frame).
+			MarkRowsStale(*target, rowBegin, rowEnd);
 		}
 	}
 	m_stateApplied = false;
@@ -1349,23 +1394,37 @@ void CGSH_Hardware::SkipOverwrittenRows(const CSoftwareRasterizer::VERTEX& a, co
 	TARGET* target = FindTarget(s.fbp, s.fbw, s.fpsm, false, needed);
 	if(!target) return;
 	needed = std::min(needed, target->height);
-	if(needed <= target->validRows) return;
-	// Whole rows [validRows, needed): the sprite and the scissor span the
-	// target's width (12.4 fixed point coordinates).
-	int32 x0 = std::min(a.x, b.x), x1 = std::max(a.x, b.x);
-	int32 y0 = std::min(a.y, b.y), y1 = std::max(a.y, b.y);
+	// Pixels the sprite draws: [ceil(x0), ceil(x1)) (12.4 fixed point corners,
+	// as CSoftwareRasterizer; a frame drawn at -0.25..511.75 covers 0..511).
+	// They and the scissor span the target's width.
+	auto ceilPixel = [](int32 value) { return (value + 15) >> 4; };
+	int32 x0 = ceilPixel(std::min(a.x, b.x)), x1 = ceilPixel(std::max(a.x, b.x));
+	int32 y0 = ceilPixel(std::min(a.y, b.y)), y1 = ceilPixel(std::max(a.y, b.y));
 	int32 width = static_cast<int32>(target->width);
-	if((x0 > 0) || (x1 < width * 16) || (s.scax0 > 0) || (s.scax1 < width - 1)) return;
-	if((y0 > static_cast<int32>(target->validRows) * 16) || (y1 < static_cast<int32>(needed) * 16) ||
-	   (s.scay0 > static_cast<int32>(target->validRows)))
-		return;
-	// The rows' GS memory is not needed on the GPU: no upload. Other targets
-	// holding these rows still go back to memory, as for an upload.
-	uint32 start = 0, end = 0;
-	RowsToBytes(*target, target->validRows, needed, start, end);
-	RemoveTargetsOverlapping(target, start, end - start);
-	m_stats.skippedUploadRows += needed - target->validRows;
-	target->validRows = needed;
+	if((x0 > 0) || (x1 < width) || (s.scax0 > 0) || (s.scax1 < width - 1)) return;
+	// Whole rows [begin, end) covered: their GS memory is not needed on the
+	// GPU, no upload. Other targets holding these rows still go back to
+	// memory, as for an upload.
+	auto covers = [&](uint32 begin, uint32 end) {
+		return (y0 <= static_cast<int32>(begin)) && (y1 >= static_cast<int32>(end)) &&
+		       (s.scay0 <= static_cast<int32>(begin)) && (s.scay1 + 1 >= static_cast<int32>(end));
+	};
+	auto skip = [&](uint32 begin, uint32 end) {
+		uint32 start = 0, stop = 0;
+		RowsToBytes(*target, begin, end, start, stop);
+		RemoveTargetsOverlapping(target, start, stop - start);
+		m_stats.skippedUploadRows += end - begin;
+	};
+	if((target->staleBegin < target->staleEnd) && covers(target->staleBegin, target->staleEnd))
+	{
+		skip(target->staleBegin, target->staleEnd);
+		target->staleBegin = target->staleEnd = 0;
+	}
+	if((needed > target->validRows) && covers(target->validRows, needed))
+	{
+		skip(target->validRows, needed);
+		target->validRows = needed;
+	}
 }
 
 void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoftwareRasterizer::VERTEX* vertices)
@@ -1428,6 +1487,12 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 			const auto& s = m_state;
 			std::snprintf(text, sizeof(text), " [%X: %.4g,%.4g-%.4g,%.4g", m_currentTarget->fbp, a.x / 16.0, a.y / 16.0, b.x / 16.0, b.y / 16.0);
 			m_diagPrims += text;
+			if(s.alphaBlend)
+			{
+				// Blend (A-B)*C+D: 0 Cs/As, 1 Cd/Ad, 2 zero/FIX; vertex alpha.
+				std::snprintf(text, sizeof(text), " abe%u%u%u%u/%02X a%02X", s.blendA, s.blendB, s.blendC, s.blendD, s.blendFix, b.a);
+				m_diagPrims += text;
+			}
 			if(s.textured)
 			{
 				if(s.fst) std::snprintf(text, sizeof(text), " t%X/%u/%X %ux%u uv%.1f,%.1f-%.1f,%.1f b%d]", s.tbp, s.tbw, s.tpsm, s.tw, s.th, a.u, a.v, b.u, b.v, s.bilinear ? 1 : 0);
@@ -1570,8 +1635,11 @@ void CGSH_Hardware::WriteFlipDiagnostics(const DISPLAY_INFO& dispInfo)
 	m_diagSpriteCount.clear();
 	std::fprintf(m_diagFile, " | targets");
 	for(const auto& target : m_targets)
+	{
 		std::fprintf(m_diagFile, " %X/%u/%X %ux%u v%u%s", target->fbp, target->fbw, target->psm, target->width, target->height,
 		             target->validRows, target->gpuDirty ? "d" : "");
+		if(target->staleBegin < target->staleEnd) std::fprintf(m_diagFile, " s%u-%u", target->staleBegin, target->staleEnd);
+	}
 	std::fprintf(m_diagFile, "\n");
 	std::fflush(m_diagFile);
 	m_diagDraws.clear();
