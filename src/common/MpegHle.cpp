@@ -236,8 +236,15 @@ void CMpegHle::HandleGetPicture(CMIPS& ee, bool first)
 			size_t bytes = std::min<size_t>(picture.raw8.size(), static_cast<size_t>(m_mbCount) * 0x180);
 			if((m_buffer + bytes) <= 0x02000000) std::memcpy(m_ram + m_buffer, picture.raw8.data(), bytes);
 			if(m_frameIndex < 400) Log("give picture %u after %u waits\n", m_frameIndex, m_waitsThisPicture);
-			//libmpeg's per-picture fields (docs/HLE_MPEG.md): frame count from 0,
+			//libmpeg's per-picture fields (docs/HLE_MPEG.md): picture size (set
+			//by libmpeg from the sequence header), frame count from 0,
 			//timestamps at 29.97 Hz, frame picture flags.
+			if(m_frameIndex < 2)
+			{
+				Log("mp size was %ux%u, picture %ux%u\n", Read32(m_ram, m_mp + 0x00), Read32(m_ram, m_mp + 0x04), picture.width, picture.height);
+			}
+			Write32(m_ram, m_mp + 0x00, picture.width);
+			Write32(m_ram, m_mp + 0x04, picture.height);
 			Write32(m_ram, m_mp + 0x08, m_frameIndex);
 			Write64(m_ram, m_mp + 0x10, static_cast<uint64_t>(m_frameIndex) * 3003);
 			Write64(m_ram, m_mp + 0x18, ~0ULL);
@@ -355,10 +362,15 @@ void CMpegHle::DecoderThread()
 			const auto& frame = decoder.GetPicture();
 			uint32_t mbWidth = frame.width / 16, mbHeight = frame.height / 16;
 			picture.raw8.resize(mbWidth * mbHeight * 0x180);
+			picture.width = frame.width;
+			picture.height = frame.height;
+			// Macroblocks column by column (libmpeg's output order: Silent Hill
+			// 2 shows 16 pixel wide strips of the wrong blocks otherwise; its
+			// reference frames in sys+0xFC.. are row by row).
 			uint8_t* out = picture.raw8.data();
-			for(uint32_t mby = 0; mby < mbHeight; mby++)
+			for(uint32_t mbx = 0; mbx < mbWidth; mbx++)
 			{
-				for(uint32_t mbx = 0; mbx < mbWidth; mbx++, out += 0x180)
+				for(uint32_t mby = 0; mby < mbHeight; mby++, out += 0x180)
 				{
 					for(unsigned int j = 0; j < 16; j++) std::memcpy(out + j * 16, &frame.y[(mby * 16 + j) * frame.width + mbx * 16], 16);
 					for(unsigned int j = 0; j < 8; j++)

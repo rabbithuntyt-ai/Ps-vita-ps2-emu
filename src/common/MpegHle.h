@@ -47,6 +47,7 @@ private:
 	struct PICTURE
 	{
 		std::vector<uint8_t> raw8; //RAW8 macroblocks (256 Y, 64 Cb, 64 Cr); empty: end of the stream
+		uint32_t width = 0, height = 0; //sequence size in pixels
 		bool last = false;         //the sequence ends with this picture
 	};
 

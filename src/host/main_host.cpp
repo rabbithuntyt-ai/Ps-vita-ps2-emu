@@ -407,7 +407,7 @@ int main(int argc, char** argv)
 			auto& vif1 = ee.m_vpu1->GetVif();
 			std::printf("VIF1 STAT %08X CODE %08X NUM %u TOP %X ITOP %X\n", vif1.GetRegister(0x10003C00), vif1.GetRegister(0x10003C80),
 			            vif1.GetRegister(0x10003C60), vif1.GetRegister(0x10003CE0), vif1.GetRegister(0x10003CD0));
-			std::printf("GIF STAT %08X\n", ee.m_gif.GetRegister(0x10003020));
+			std::printf("GIF STAT %08X active path %u\n", ee.m_gif.GetRegister(0x10003020), ee.m_gif.GetActivePath());
 		}
 		if(!jitCachePath.empty())
 		{
