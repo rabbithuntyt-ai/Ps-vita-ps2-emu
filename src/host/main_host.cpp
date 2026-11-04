@@ -4,10 +4,26 @@
 //
 //   vitaps2_host <game.elf|game.iso> [--frames N] [--timeout SECONDS] [--out frame.ppm]
 //                [--gs-threads N] [--interlaced] [--frameskip N] [--hw] [--mtvu]
-//                [--jit-cache FILE]
+//                [--mtspu] [--jit-cache FILE] [--press FRAME:BUTTONS[:HOLD],...]
+//                [--mpeg-hle] [--shot-every N] [--shot-dir DIR] [--stats FILE]
+//                [--gs-diag LINES]
 //
 // --hw renders with the GPU renderer on an offscreen Mesa context, pumped
 // from the main thread exactly like the Vita frontend does.
+//
+// Game debugging without a Vita (same core and renderer as the Vita build):
+//   --press      scripted controller input by emulated frame (vblank), e.g.
+//                "600:start,900:cross,960:down+cross:30" (HOLD frames, default 8);
+//                buttons: up down left right start select cross circle square
+//                triangle l1 l2 l3 r1 r2 r3
+//   --mpeg-hle   native movie decoding (autostart key mpeg_hle=1 on the Vita),
+//                log in mpeghle.txt
+//   --shot-every write the displayed frame every N emulated frames
+//                (DIR/shot_<frame>.ppm)
+//   --stats      one CSV row per emulated second (60 frames): fps, emulation
+//                thread shares, EE pc, movie pictures, and with --hw the GPU
+//                renderer times and the last flipped frame's GS counters
+//   --gs-diag    GPU renderer diagnostics (draws, transfers per flip) in gsdiag.txt
 //
 // Exit code is 0 when at least one frame was presented.
 
@@ -24,6 +40,10 @@
 #include "EmuProfile.h"
 #include "ThreadProfiler.h"
 #include "PS2VM.h"
+#include "PadHandler.h"
+#include "ControllerInfo.h"
+#include "MpegHle.h"
+#include <atomic>
 #ifdef VITAPS2_HAS_GL
 #include <GL/osmesa.h>
 #include "GSH_Hardware.h"
@@ -51,6 +71,96 @@ namespace
 		std::fclose(file);
 		return true;
 	}
+
+	// Controller driven by a script of presses keyed by emulated frame (vblank).
+	class CPH_Script : public CPadHandler
+	{
+	public:
+		struct PRESS
+		{
+			uint64_t frame = 0;
+			uint32_t hold = 8;
+			std::vector<PS2::CControllerInfo::BUTTON> buttons;
+		};
+
+		explicit CPH_Script(std::vector<PRESS> presses)
+		    : m_presses(std::move(presses))
+		{
+		}
+
+		void Update(uint8* ram) override
+		{
+			uint64_t frame = m_vblanks++;
+			bool held[PS2::CControllerInfo::MAX_BUTTONS] = {};
+			for(const auto& press : m_presses)
+			{
+				if((frame < press.frame) || (frame >= press.frame + press.hold)) continue;
+				for(auto button : press.buttons) held[button] = true;
+			}
+			for(auto* listener : m_interfaces)
+			{
+				for(unsigned int i = 0; i < PS2::CControllerInfo::MAX_BUTTONS; i++)
+				{
+					auto button = static_cast<PS2::CControllerInfo::BUTTON>(i);
+					if(PS2::CControllerInfo::IsAxis(button)) listener->SetAxisState(0, button, 0x7F, ram);
+					else listener->SetButtonState(0, button, held[i], ram);
+				}
+			}
+		}
+
+	private:
+		std::vector<PRESS> m_presses;
+		std::atomic<uint64_t> m_vblanks{0};
+	};
+
+	// "600:start,900:cross,960:down+cross:30"
+	bool ParsePresses(const std::string& text, std::vector<CPH_Script::PRESS>& presses)
+	{
+		using PS2::CControllerInfo;
+		static const std::pair<const char*, CControllerInfo::BUTTON> names[] = {
+		    {"up", CControllerInfo::DPAD_UP}, {"down", CControllerInfo::DPAD_DOWN}, {"left", CControllerInfo::DPAD_LEFT},
+		    {"right", CControllerInfo::DPAD_RIGHT}, {"start", CControllerInfo::START}, {"select", CControllerInfo::SELECT},
+		    {"cross", CControllerInfo::CROSS}, {"circle", CControllerInfo::CIRCLE}, {"square", CControllerInfo::SQUARE},
+		    {"triangle", CControllerInfo::TRIANGLE}, {"l1", CControllerInfo::L1}, {"l2", CControllerInfo::L2},
+		    {"l3", CControllerInfo::L3}, {"r1", CControllerInfo::R1}, {"r2", CControllerInfo::R2}, {"r3", CControllerInfo::R3}};
+		size_t start = 0;
+		while(start < text.size())
+		{
+			size_t end = text.find(',', start);
+			if(end == std::string::npos) end = text.size();
+			std::string item = text.substr(start, end - start);
+			start = end + 1;
+			size_t colon = item.find(':');
+			if(colon == std::string::npos) return false;
+			CPH_Script::PRESS press;
+			press.frame = std::strtoull(item.c_str(), nullptr, 10);
+			std::string rest = item.substr(colon + 1);
+			size_t holdColon = rest.find(':');
+			if(holdColon != std::string::npos)
+			{
+				press.hold = std::atoi(rest.c_str() + holdColon + 1);
+				rest.resize(holdColon);
+			}
+			size_t nameStart = 0;
+			while(nameStart <= rest.size())
+			{
+				size_t plus = rest.find('+', nameStart);
+				if(plus == std::string::npos) plus = rest.size();
+				std::string name = rest.substr(nameStart, plus - nameStart);
+				nameStart = plus + 1;
+				bool found = false;
+				for(const auto& [buttonName, button] : names)
+				{
+					if(name != buttonName) continue;
+					press.buttons.push_back(button);
+					found = true;
+				}
+				if(!found) return false;
+			}
+			presses.push_back(press);
+		}
+		return true;
+	}
 }
 
 int main(int argc, char** argv)
@@ -73,6 +183,12 @@ int main(int argc, char** argv)
 	bool threadedSpu = false;
 	bool benchExit = false; //exit from the emulation thread right at the last frame (deterministic for measurements)
 	std::string jitCachePath; //persistent JIT cache file (32-bit ARM only)
+	std::vector<CPH_Script::PRESS> presses;
+	bool mpegHleEnabled = false;
+	uint64_t shotEvery = 0;
+	std::string shotDir = ".";
+	std::string statsPath;
+	uint32_t gsDiagLines = 0;
 	for(int i = 2; i < argc; i++)
 	{
 		if(!std::strcmp(argv[i], "--frames") && (i + 1 < argc)) targetFrames = std::strtoull(argv[++i], nullptr, 10);
@@ -86,6 +202,19 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--mtspu")) threadedSpu = true;
 		else if(!std::strcmp(argv[i], "--bench-exit")) benchExit = true;
 		else if(!std::strcmp(argv[i], "--jit-cache") && (i + 1 < argc)) jitCachePath = argv[++i];
+		else if(!std::strcmp(argv[i], "--press") && (i + 1 < argc))
+		{
+			if(!ParsePresses(argv[++i], presses))
+			{
+				std::fprintf(stderr, "bad --press script: %s\n", argv[i]);
+				return 2;
+			}
+		}
+		else if(!std::strcmp(argv[i], "--mpeg-hle")) mpegHleEnabled = true;
+		else if(!std::strcmp(argv[i], "--shot-every") && (i + 1 < argc)) shotEvery = std::strtoull(argv[++i], nullptr, 10);
+		else if(!std::strcmp(argv[i], "--shot-dir") && (i + 1 < argc)) shotDir = argv[++i];
+		else if(!std::strcmp(argv[i], "--stats") && (i + 1 < argc)) statsPath = argv[++i];
+		else if(!std::strcmp(argv[i], "--gs-diag") && (i + 1 < argc)) gsDiagLines = std::atoi(argv[++i]);
 	}
 
 	const char* home = std::getenv("HOME");
@@ -98,6 +227,7 @@ int main(int argc, char** argv)
 	config.rasterizerThreads = gsThreads;
 	config.interlacedRendering = interlaced;
 	config.frameSkip = frameSkip;
+	config.padFactory = [presses]() { return new CPH_Script(presses); };
 	if(benchExit)
 	{
 		config.frameHook = [targetFrames](uint64_t frame, uint64_t eeExecuted) {
@@ -166,6 +296,30 @@ int main(int argc, char** argv)
 			std::printf("jit cache %s: %s\n", jitCachePath.c_str(), opened ? "open" : "not available here");
 		}
 		session.Boot(bootPath);
+		CMpegHle mpegHle;
+		if(mpegHleEnabled) mpegHle.Enable(session.GetVm()->m_ee->m_ram, "mpeghle.txt", nullptr);
+#ifdef VITAPS2_HAS_GL
+		if(hardware && gsDiagLines)
+		{
+			static_cast<CGSH_Hardware*>(session.GetVm()->GetGSHandler())->SetDiagnosticsFile("gsdiag.txt", gsDiagLines);
+		}
+#endif
+
+		std::FILE* statsFile = statsPath.empty() ? nullptr : std::fopen(statsPath.c_str(), "w");
+		if(statsFile)
+		{
+			std::fprintf(statsFile, "frame,real_s,vm_fps,presented,ee_pc");
+			for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(statsFile, ",ps2_%s", EmuProfile::GetSectionName(i));
+			std::fprintf(statsFile, ",mpeg_pictures,mpeg_waits");
+#ifdef VITAPS2_HAS_GL
+			if(hardware)
+			{
+				std::fprintf(statsFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix"
+				                        ",draws,tex_up,rt_up,rt_dl,up_px,dl_px,targets_new,xfer_in,xfer_out,xfer_local,rt_deferred,rt_skip_rows,xfer_same");
+			}
+#endif
+			std::fprintf(statsFile, "\n");
+		}
 
 		ThreadProfiler::Sample();
 		auto start = std::chrono::steady_clock::now();
@@ -173,12 +327,61 @@ int main(int argc, char** argv)
 		std::vector<uint32_t> pixels;
 		uint32_t width = 0, height = 0;
 		uint64_t presented = 0;
+		uint64_t nextShot = shotEvery, nextStats = 60, statsPresented = 0;
+		auto statsTime = start;
+#ifdef VITAPS2_HAS_GL
+		CGSH_Hardware::GPU_TIMES statsGpu = CGSH_Hardware::GetTimes();
+#endif
+		CMpegHle::STATS statsMpeg;
 		while(session.GetVmFrameCount() < targetFrames)
 		{
 			if(session.GetFrames().Fetch(serial, pixels, width, height)) presented++;
 			if(std::chrono::steady_clock::now() - start > std::chrono::seconds(timeoutSeconds)) break;
 			pump(5);
+			uint64_t frame = session.GetVmFrameCount();
+			if(shotEvery && (frame >= nextShot))
+			{
+				nextShot = frame - (frame % shotEvery) + shotEvery;
+				if(width) WritePpm(shotDir + "/shot_" + std::to_string(frame) + ".ppm", pixels, width, height);
+			}
+			if(statsFile && (frame >= nextStats))
+			{
+				// One row per emulated second.
+				nextStats = frame - (frame % 60) + 60;
+				auto now = std::chrono::steady_clock::now();
+				double seconds = std::chrono::duration<double>(now - statsTime).count();
+				statsTime = now;
+				auto profile = session.TakeProfile();
+				auto debug = session.GetDebugState();
+				std::fprintf(statsFile, "%llu,%.2f,%.1f,%llu,%08X", (unsigned long long)frame, seconds, 60.0 / seconds,
+				             (unsigned long long)(presented - statsPresented), debug.eePc);
+				statsPresented = presented;
+				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(statsFile, ",%.3f", profile.share[i]);
+				auto mpegStats = mpegHle.GetStats();
+				std::fprintf(statsFile, ",%u,%u", mpegStats.pictures - statsMpeg.pictures, mpegStats.waits - statsMpeg.waits);
+				statsMpeg = mpegStats;
+#ifdef VITAPS2_HAS_GL
+				if(hardware)
+				{
+					auto times = CGSH_Hardware::GetTimes();
+					auto f = static_cast<CGSH_Hardware*>(session.GetVm()->GetGSHandler())->GetLastFrameStats();
+					std::fprintf(statsFile, ",%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%u,%.1f,%u", (times.pumpUs - statsGpu.pumpUs) / 1000.0,
+					             (times.stageUs[0] - statsGpu.stageUs[0]) / 1000.0, (times.stageUs[1] - statsGpu.stageUs[1]) / 1000.0,
+					             (times.stageUs[2] - statsGpu.stageUs[2]) / 1000.0, (times.stageUs[3] - statsGpu.stageUs[3]) / 1000.0,
+					             (times.uploadGlUs - statsGpu.uploadGlUs) / 1000.0, static_cast<unsigned int>((times.uploadPixels - statsGpu.uploadPixels) / 1000),
+					             (times.downloadGlUs - statsGpu.downloadGlUs) / 1000.0, static_cast<unsigned int>((times.downloadPixels - statsGpu.downloadPixels) / 1000));
+					std::fprintf(statsFile, ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u", f.drawCalls, f.textureUploads, f.targetUploads, f.targetDownloads,
+					             f.uploadedPixels, f.downloadedPixels, f.targetsCreated, f.transfersIn, f.transfersOut, f.transfersLocal,
+					             f.deferredUploads, f.skippedUploadRows, f.unchangedTransfers);
+					statsGpu = times;
+				}
+#endif
+				std::fprintf(statsFile, "\n");
+				std::fflush(statsFile);
+			}
 		}
+		if(statsFile) std::fclose(statsFile);
+		mpegHle.Disable();
 		auto threadUsage = ThreadProfiler::Sample();
 		auto profile = session.TakeProfile();
 		session.Pause();
