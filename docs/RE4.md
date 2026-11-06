@@ -18,9 +18,9 @@ movie pictures handed to the game, not flips. A real 30 needs 60 emulated fps.
 | Orange intro (New Game) | black, 3 pictures/s | **picture correct, 14.2 pictures/s**, 30.6 emulated fps. Plays through, "Six years later", then Leon's car cutscene | 30 pictures/s |
 | Leon's car cutscene | never reached | picture correct, 13.9 pictures/s | 30 pictures/s |
 | Attract trailer (idle at the title) | black, 3 pictures/s | picture correct, 13 pictures/s (peaks of 17), 27 emulated fps. Plays through and returns to the title | 30 pictures/s |
-| Gameplay | not reached yet | not reached yet | 30 |
+| Real-time 3D (Leon on the path, from a save state) | grey screen or hang | **drawn, with depth. 0.9 fps.** Some textures on Leon are wrong (patches on hair and jacket) | 30 |
 
-Not verified: gameplay, New Game, audio sync in movies, and the movie picture
+Not verified: moving Leon (no input tried yet), audio sync in movies, and the movie picture
 compared with a reference. Pictures looked right in frame dumps only, apart from one
 frame (t=317 of a run) that was mostly black with a blocky patch: maybe a scene cut,
 maybe a decoding problem.
@@ -42,6 +42,31 @@ one a number comes from**.
 | The JIT cache read its whole file into the heap (17 MB for RE4), and a block could only come back once | Patch 0069: index in memory, blocks read from the file on demand. Movie reached at 112 s instead of 137 s | All games |
 | The main loop hands over every 4800 EE cycles, about 3000 host cycles of overhead per slice | Patch 0070, `ee_slice`. **19200: title screen 35 to 53 fps.** 38400 breaks RE4 (no display output) | All games, per game setting. Not tested on other games |
 | Native movie decoding only knew libmpeg 2.2 | libmpeg 3.0 in both output modes, NEON RGB32 conversion | Games on libmpeg 3.0, including Sofdec ones. Only RE4 tested |
+
+## Real-time 3D: three things stood in the way
+
+1. **Threaded VU1 hangs.** At the first real-time scene the game waits forever for DMA
+   channel 1 (0x251928: `bc0f` loop on `D_PCR`), running at 59 emulated fps with no output
+   and sound playing. Same as open bug 1 in HLE_MPEG.md. `threaded_vu1=0` in the profile
+   for now. The root cause is still open, and it costs a core's worth of speed.
+2. **`MAX_TEXTURES` was 24, and GL textures were dropped after 64 binds.** A scene uses
+   65 or more textures per frame and does hundreds of binds: everything was decoded again on
+   every frame. Now 512 textures or 48 MB.
+3. **Depth on the Vita does not survive a new GPU scene.** vitaGL stores depth but does not
+   load it, so after a target switch, a read-back or a copy, depth starts at 1.0 and every
+   GEQUAL test fails: 8700 triangles, a grey screen. Depth is now cleared to 0 when a target
+   is drawn with depth after such a break. Things drawn earlier in the frame no longer hide
+   later ones, so **every break also risks wrong overlaps. Fewer breaks fixes both this and
+   the speed.** Found with `gs_debug=1` (no depth test), which showed the world at once.
+
+Where the 0.9 fps goes: GPU thread 1600 ms/s in `gpu_tex`, the emulation thread 83% waiting
+for the GS, 640 draws, 28 read-backs, 12 uploads and 19 texture decodes per frame. Targets
+at the same address with different widths and formats (0x2D8000 as 1 and 4 pages wide;
+0x310000 as 2, 4 and 8, formats 0 and 2) replace each other, reading back each time: the
+first thing to fix.
+
+A state from just before this scene saves 10 minutes per test: `save_state_at=570` during
+a New Game run, then `load_state=1`.
 
 ## Native movies under Sofdec: what to know
 
@@ -121,6 +146,9 @@ Autostart keys, all per run:
 | `iop_rate=N` | IOP clock in percent (also a per-game setting) |
 | `jit_limit_kb=N` | Treat the JIT pool as this small, to test the flush |
 | `pad_script=T:btn,T:btn` | Hold a button for the game 400 ms at second T (start, cross, up...). Works when Vita Lab's presses do not reach it |
+| `save_state_at=S` | Save a state at second S; `load_state=1` starts from it |
+| `gs_debug=N` | 1 no depth test, 2 no alpha test: shows what a test is hiding |
+| `dump_targets_at=S` | Every render target to `frames/` as images |
 | `frame_dump_every=S` | Save the displayed picture to `ux0:data/VitaPS2/frames/` |
 | `mpeg_dump_mb=N` | Save the movie stream the decoder gets to `mpegstream.bin` |
 | `gs_diag_after=S` | Start `gs_diag` logging later (with `gs_diag=N`) |

@@ -596,6 +596,8 @@ namespace
 		int gsDiagFlips = 0;
 		uint32_t gsDiagAfterSeconds = 0;
 		std::vector<std::pair<uint64_t, uint32_t>> padScript; //autostart: time (us), button held for the game
+		uint32_t dumpTargetsAtSeconds = 0; //autostart: every render target to ux0:data/VitaPS2/frames/ at this second
+		uint32_t saveStateAtSeconds = 0; //autostart: save a state at this second, to retest a scene quickly
 		uint32_t eeHotAfterSeconds = 0; //autostart: EE hotspots (eehot.txt) sampled from this second on
 		uint32_t frameDumpEverySeconds = 0; //autostart: displayed picture to ux0:data/VitaPS2/frames/ every N seconds
 		uint64_t nextFrameDump = 0;
@@ -730,6 +732,21 @@ namespace
 						if(value == "1") mpegShadow.Enable(session->GetVm()->m_ee->m_ram, 0x1213080, "ux0:data/VitaPS2/mpegshadow.txt");
 						continue;
 					}
+					if(key == "gs_debug")
+					{
+						if(auto gs = GetHardwareGs(session.get())) gs->SetDebugFlags(static_cast<uint32_t>(std::atoi(value.c_str())));
+						continue;
+					}
+					if(key == "dump_targets_at")
+					{
+						dumpTargetsAtSeconds = static_cast<uint32_t>(std::atoi(value.c_str()));
+						continue;
+					}
+					if(key == "save_state_at")
+					{
+						saveStateAtSeconds = static_cast<uint32_t>(std::atoi(value.c_str()));
+						continue;
+					}
 					if(key == "pad_script")
 					{
 						// seconds:button,seconds:button...: held 400 ms for the game.
@@ -833,6 +850,12 @@ namespace
 			uint32_t buttons = pad ? pad->Poll() : 0;
 			uint32_t pressed = buttons & ~previousButtons;
 			previousButtons = buttons;
+			if(dumpTargetsAtSeconds && (sceKernelGetProcessTimeWide() - runStart >= dumpTargetsAtSeconds * 1000000ULL))
+			{
+				dumpTargetsAtSeconds = 0;
+				sceIoMkdir("ux0:data/VitaPS2/frames", 0777);
+				if(auto gs = GetHardwareGs(session.get())) gs->RequestTargetDump("ux0:data/VitaPS2/frames");
+			}
 			if(frameDumpEverySeconds && (sceKernelGetProcessTimeWide() - runStart >= nextFrameDump))
 			{
 				uint64_t seconds = (sceKernelGetProcessTimeWide() - runStart) / 1000000ULL;
@@ -886,6 +909,12 @@ namespace
 			{
 				stateIsLoad = (pressed & SCE_CTRL_TRIANGLE) != 0;
 				stateOperation = stateIsLoad ? session->GetVm()->LoadState(StatePath(path)) : session->GetVm()->SaveState(StatePath(path));
+			}
+			if(saveStateAtSeconds && !stateOperation.valid() && (sceKernelGetProcessTimeWide() - runStart >= saveStateAtSeconds * 1000000ULL))
+			{
+				saveStateAtSeconds = 0;
+				stateIsLoad = false;
+				stateOperation = session->GetVm()->SaveState(StatePath(path));
 			}
 			if(pendingStateLoad && !stateOperation.valid() && (session->GetVmFrameCount() >= 120))
 			{

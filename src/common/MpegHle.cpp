@@ -421,6 +421,14 @@ void CMpegHle::PatchThreadLock(CMIPS& ee)
 		return true;
 	};
 	const size_t enterWords = sizeof(g_codeLockEnter) / 4, leaveWords = sizeof(g_codeLockLeave) / 4;
+	// A state saved with them patched: the guest code is already the counter.
+	if(same(RE4_LOCK_ENTER, g_stubLockEnter, sizeof(g_stubLockEnter) / 4) && same(RE4_LOCK_LEAVE, g_stubLockLeave, sizeof(g_stubLockLeave) / 4))
+	{
+		CPS2OS::g_dispatchLockAddress = RE4_LOCK_COUNT;
+		m_threadLockPatched = true;
+		Log("critical sections already patched\n");
+		return;
+	}
 	if(!same(RE4_LOCK_ENTER, g_codeLockEnter, enterWords) || !same(RE4_LOCK_LEAVE, g_codeLockLeave, leaveWords)) return;
 	// Only outside the lock, with the EE outside the code being replaced.
 	uint32_t pc = ee.m_State.nPC;

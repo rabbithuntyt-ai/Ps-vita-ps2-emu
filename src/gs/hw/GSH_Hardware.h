@@ -86,6 +86,7 @@ public:
 	{
 		uint32 drawCalls = 0;
 		uint32 targetDownloads = 0;
+		uint32 depthRestores = 0; //depth set again after a new GPU scene (Vita)
 		uint32 targetUploads = 0;
 		uint32 textureUploads = 0;
 		uint32 downloadedPixels = 0;
@@ -177,7 +178,22 @@ public:
 		m_frameDumpPath = path;
 	}
 
+	void SetDebugFlags(uint32 flags)
+	{
+		m_debugFlags = flags;
+	}
+	// Diagnostics: every render target at the next flip, as PPM files.
+	void RequestTargetDump(const std::string& directory)
+	{
+		m_targetDumpDirectory = directory;
+	}
+
 private:
+	uint32 m_debugFlags = 0;
+	const void* m_depthSceneTarget = nullptr;
+	bool m_depthSceneValid = false;
+	void DumpTargets();
+	std::string m_targetDumpDirectory;
 	void WriteFrameDump(const uint32* pixels, uint32 width, uint32 height);
 	std::string m_frameDumpPath;
 

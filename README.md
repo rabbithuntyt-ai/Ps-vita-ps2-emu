@@ -140,7 +140,7 @@ scene repeatable, so a change can be measured on the exact same frames.
 | Software GS renderer (accuracy fallback) | Implemented and unit tested (see below) |
 | Vita frontend (game list, display, controls, audio, save states) | Running on hardware |
 | Silent Hill 2 (SLUS-20228) | Boots through the menus and plays the opening movie (below full speed) |
-| Resident Evil 4 (SLUS-21134) | Reaches the title menu and plays its movies with native decoding (14 of 30 pictures/s), and on through the intro to Leon's car cutscene; gameplay not reached yet |
+| Resident Evil 4 (SLUS-21134) | Reaches the title menu and plays its movies with native decoding (14 of 30 pictures/s), through the intro and the car cutscene into real-time 3D (drawn, at about 1 fps; some textures wrong) |
 | Host build + automated tests | Passing |
 | VPK build | CI with the official VitaSDK Docker image |
 

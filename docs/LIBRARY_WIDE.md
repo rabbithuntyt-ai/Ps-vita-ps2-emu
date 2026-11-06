@@ -17,10 +17,20 @@ of `tools/vitalab_compat.sh` across the test set.
 | `CTextureCache::Reset`, `DecodeAll` | Only written page rows are decoded again; rows decoded whole; CT32 pages in memory order | Any game that updates large textures. RE4: 277 to 126 ms/s |
 | JIT pool flush (patch 0069) | A full code pool drops EE code instead of crashing | Any large game. Tested by forcing it on RE4 |
 | On-demand JIT cache (patch 0069) | Cache file indexed, blocks read when needed, so the file (17 MB for RE4) no longer sits in the heap at boot | Every game |
+| **Depth restored after a GPU scene break (Vita)** | vitaGL does not load depth, so it was 1.0 after any target switch or read-back and GEQUAL failed. In RE4: grey screen instead of the world | **Probably every 3D game with depth and render-to-texture or read-backs on the GPU renderer.** Expect wrong overlaps where a frame has breaks in the middle of its 3D. A real fix would keep depth across scenes (a change in vitaGL, or drawing the world's breaks less often) |
+| **Texture cache of 512 textures or 48 MB, GL textures kept longer** | 24 textures and 64 binds were enough for menus only | **Every 3D game.** Heap use grows: watch `heap_used_mb` on large games |
 | **SPU2 mixer priority above other core 2 work** | Register reads no longer wait for a movie picture to finish. RE4's intro: 10.2 to 14.2 pictures/s | Every game with `mpeg_hle`. Silent Hill 2 has the same layout, so test it there first when the time comes |
 | Wait timers in `perf.csv` | Every place the emulation thread sleeps is timed. Found the largest gain so far | Every game: **look at them first**. A thread below 90% CPU with no fast game means a wait, not a CPU limit |
 | `pad_script` | Scripted buttons for the game in autostart runs | Lets the compatibility harness get past menus without Vita Lab |
 | Diagnostics (`frame_dump_every`, `ee_hot_after`, `syscalls.txt`, `mpeg_dump_mb`...) | See [RE4.md](RE4.md) | Finding the next bottleneck in any game |
+
+## Known problem for every 3D game
+
+**Threaded VU1 hangs** at RE4's first real-time scene and in Silent Hill 2 (HLE_MPEG.md, open
+bug 1): the EE waits for VIF1 forever, with no output. The signature in `perf.csv`: `vm_fps`
+near 60, `out_fps` 0, no draws. It is on by default for Silent Hill 2 and through
+`CAutoTuner` elsewhere, so any game can hit it. Worth a root cause: it frees a whole core
+for VU1 work, which 3D games need.
 
 ## General code, off until a game enables it
 

@@ -621,6 +621,7 @@ void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 wi
 	glBindTexture(GL_TEXTURE_2D, target.colorTexture);
 	uint64 glStart = NowUs();
 	glTexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	m_depthSceneValid = false;
 	GetTimes().uploadGlUs += NowUs() - glStart;
 	GetTimes().uploadPixels += width * height;
 	m_stats.targetUploads++;
@@ -682,6 +683,7 @@ void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEn
 	glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
 	uint64 glStart = NowUs();
 	glReadPixels(x0, y0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	m_depthSceneValid = false;
 	GetTimes().downloadGlUs += NowUs() - glStart;
 	GetTimes().downloadPixels += width * height;
 
@@ -1049,6 +1051,7 @@ void CGSH_Hardware::BindTexture()
 			uint32 copyW = std::min(s.tw, target->width - std::min(offsetX, target->width));
 			uint32 copyH = std::min(s.th, target->height - offsetY);
 			glCopyTexSubImage2D(GL_TEXTURE_2D, 0, offsetX, offsetY, offsetX, offsetY, copyW, copyH);
+			m_depthSceneValid = false;
 			texture = m_feedbackTexture;
 		}
 		glBindTexture(GL_TEXTURE_2D, texture);
@@ -1140,12 +1143,13 @@ void CGSH_Hardware::BindTexture()
 	m_texOffsetS = -static_cast<float>(regionU.origin) / static_cast<float>(regionU.size);
 	m_texOffsetT = -static_cast<float>(regionV.origin) / static_cast<float>(regionV.size);
 
-	// Evict GL textures that have not been used for a while.
-	if(m_glTextures.size() > 96)
+	// Evict GL textures that have not been used for a while. A use is one bind:
+	// a 3D scene does hundreds per frame.
+	if(m_glTextures.size() > 512)
 	{
 		for(auto it = m_glTextures.begin(); it != m_glTextures.end();)
 		{
-			if((it->first.first != 0) && (m_useCounter - it->second.lastUse > 64))
+			if((it->first.first != 0) && (m_useCounter - it->second.lastUse > 8192))
 			{
 				glDeleteTextures(1, &it->second.texture);
 				it = m_glTextures.erase(it);
@@ -1232,6 +1236,25 @@ void CGSH_Hardware::ApplyState()
 
 	glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
 	glViewport(0, 0, target->width, target->height);
+#ifdef __vita__
+	// On the Vita a new GPU scene does not load the depth buffer (vitaGL stores it
+	// but never loads it): it starts at the surface's background depth, 1.0, which
+	// fails every PS2 GEQUAL test. Going to another target, reading one back and
+	// copying from one all start a new scene. Depth goes back to the PS2's usual
+	// clear value before drawing with it, so what was drawn earlier in the frame
+	// no longer hides what comes later: the fewer of these breaks, the better.
+	if(target != m_depthSceneTarget) m_depthSceneValid = false;
+	m_depthSceneTarget = target;
+	if(!m_depthSceneValid && depthActive)
+	{
+		glDisable(GL_SCISSOR_TEST);
+		glDepthMask(GL_TRUE);
+		glClearDepth(0.0);
+		glClear(GL_DEPTH_BUFFER_BIT);
+		m_depthSceneValid = true;
+		m_stats.depthRestores++;
+	}
+#endif
 	glEnable(GL_SCISSOR_TEST);
 	glScissor(s.scax0, s.scay0, std::max(s.scax1 - s.scax0 + 1, 0), std::max(s.scay1 - s.scay0 + 1, 0));
 
@@ -1291,6 +1314,14 @@ void CGSH_Hardware::ApplyState()
 			m_depthWrite = false;
 		}
 	}
+
+	// Diagnostics: gs_debug=1 no depth test, 2 no alpha test, 4 no blending.
+	if(m_debugFlags & 1)
+	{
+		glDisable(GL_DEPTH_TEST);
+		m_depthFunc = GL_ALWAYS;
+	}
+	if(m_debugFlags & 2) glDisable(GL_ALPHA_TEST);
 
 	//Color mask
 	bool is24 = GsMemory::IsPsm24(s.fpsm);
@@ -1555,6 +1586,17 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 		if(kind == CSoftwareRasterizer::PRIMITIVE_SPRITE) SkipOverwrittenRows(vertices[0], vertices[1]);
 		ApplyState();
 	}
+	if(m_diagFile && (kind == CSoftwareRasterizer::PRIMITIVE_TRIANGLE) && ((m_diagKinds[2] % 700) == 1) && (m_diagPrims.size() < 6000))
+	{
+		const auto& st = m_state;
+		char text[400];
+		std::snprintf(text, sizeof(text),
+		              " {tri#%u fb%X/%u/%X msk%X z%X/%X zm%d zte%d zt%u ate%d at%u ref%u af%u date%d abe%d pabe%d %u%u%u%u fix%u fst%d tex%d %X/%u/%X %ux%u tfx%u tcc%d nothing%d sc%d,%d-%d,%d v0 %.1f,%.1f z%X rgba%02X%02X%02X%02X q%.3g v1 %.1f,%.1f z%X v2 %.1f,%.1f z%X}",
+		              m_diagKinds[2], st.fbp, st.fbw, st.fpsm, st.fbmsk, st.zbp, st.zpsm, st.zmsk ? 1 : 0, st.zte ? 1 : 0, st.ztst, st.ate ? 1 : 0, st.atst, st.aref, st.afail, st.date ? 1 : 0, st.alphaBlend ? 1 : 0, st.pabe ? 1 : 0,
+		              st.blendA, st.blendB, st.blendC, st.blendD, st.blendFix, st.fst ? 1 : 0, st.textured ? 1 : 0, st.tbp, st.tbw, st.tpsm, st.tw, st.th, st.tfx, st.tcc ? 1 : 0, m_drawNothing ? 1 : 0, st.scax0, st.scay0, st.scax1, st.scay1,
+		              vertices[0].x / 16.0, vertices[0].y / 16.0, vertices[0].z, vertices[0].r, vertices[0].g, vertices[0].b, vertices[0].a, vertices[0].q, vertices[1].x / 16.0, vertices[1].y / 16.0, vertices[1].z, vertices[2].x / 16.0, vertices[2].y / 16.0, vertices[2].z);
+		m_diagPrims += text;
+	}
 	if(m_drawNothing) return;
 
 	GLenum mode = (kind == CSoftwareRasterizer::PRIMITIVE_POINT) ? GL_POINTS : (kind == CSoftwareRasterizer::PRIMITIVE_LINE) ? GL_LINES : GL_TRIANGLES;
@@ -1609,7 +1651,7 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 		{
 			char text[160];
 			const auto& s = m_state;
-			std::snprintf(text, sizeof(text), " [%X: %.4g,%.4g-%.4g,%.4g", m_currentTarget->fbp, a.x / 16.0, a.y / 16.0, b.x / 16.0, b.y / 16.0);
+			std::snprintf(text, sizeof(text), " [%X: %.4g,%.4g-%.4g,%.4g z%X zte%d zt%u zm%d zp%X/%X", m_currentTarget->fbp, a.x / 16.0, a.y / 16.0, b.x / 16.0, b.y / 16.0, b.z, s.zte ? 1 : 0, s.ztst, s.zmsk ? 1 : 0, s.zbp, s.zpsm);
 			m_diagPrims += text;
 			if(s.alphaBlend)
 			{
@@ -1864,6 +1906,22 @@ void CGSH_Hardware::WriteFlipDiagnostics(const DISPLAY_INFO& dispInfo)
 	m_diagDropped.clear();
 }
 
+void CGSH_Hardware::DumpTargets()
+{
+	char path[128];
+	for(const auto& target : m_targets)
+	{
+		std::vector<uint32> pixels(target->width * target->height);
+		glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
+		glReadPixels(0, 0, target->width, target->height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+		std::snprintf(path, sizeof(path), "%s/t_%X_%u_%X.ppm", m_targetDumpDirectory.c_str(), target->fbp, target->fbw, target->psm);
+		m_frameDumpPath = path;
+		WriteFrameDump(pixels.data(), target->width, target->height);
+	}
+	m_targetDumpDirectory.clear();
+	m_stateApplied = false;
+}
+
 void CGSH_Hardware::WriteFrameDump(const uint32* pixels, uint32 width, uint32 height)
 {
 	std::FILE* file = std::fopen(m_frameDumpPath.c_str(), "wb");
@@ -1889,7 +1947,9 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 {
 	CStageTimer stageTimer(GPU_STAGE_DISPLAY);
 	FlushBatch();
+	m_depthSceneValid = false;
 	WriteFlipDiagnostics(dispInfo);
+	if(!m_targetDumpDirectory.empty()) DumpTargets();
 	const auto& layer = dispInfo.layers[0];
 	// A skipped frame was not drawn: keep showing the last drawn one (double
 	// buffered games would otherwise flash an older frame).

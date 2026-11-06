@@ -166,7 +166,10 @@ private:
 	enum
 	{
 		PAGE_COUNT = 512,
-		MAX_TEXTURES = 24,
+		// A 3D scene uses far more than a menu (Resident Evil 4: 65 or more per
+		// frame). With too few, every texture is decoded again on every frame.
+		MAX_TEXTURES = 512,
+		MAX_TEXTURE_BYTES = 48 * 1024 * 1024,
 	};
 
 	bool IsValid(const CTexture&) const;
@@ -178,6 +181,7 @@ private:
 	std::array<uint32, PAGE_COUNT> m_pageStamps = {};
 	uint32 m_stamp = 1;
 	uint64 m_useCounter = 0;
+	size_t m_textureBytes = 0;
 	std::atomic<uint32> m_decodedTiles{0};
 	std::vector<std::unique_ptr<CTexture>> m_textures;
 	std::vector<std::unique_ptr<CTexture>> m_retired;
