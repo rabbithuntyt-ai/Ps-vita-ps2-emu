@@ -1,0 +1,25 @@
+diff --git a/Source/ee/PS2OS.cpp b/Source/ee/PS2OS.cpp
+index 5dc3fdc..f5bd842 100644
+--- a/Source/ee/PS2OS.cpp
++++ b/Source/ee/PS2OS.cpp
+@@ -3216,6 +3216,7 @@ void CPS2OS::HandleSyscall()
+ 		{
+ 			func = 0 - func;
+ 		}
++		g_syscallCounts[func & 0x7F]++;
+ 		//Save for custom handler
+ 		m_ee.m_State.nGPR[3].nV[0] = func;
+ 
+diff --git a/Source/ee/PS2OS.h b/Source/ee/PS2OS.h
+index 57bb252..277e211 100644
+--- a/Source/ee/PS2OS.h
++++ b/Source/ee/PS2OS.h
+@@ -62,6 +62,8 @@ public:
+ 	static inline HleHook g_hleSyscallHandler = nullptr;
+ 	static inline HleHook g_hleVBlankHook = nullptr;
+ 	static inline void* g_hleContext = nullptr;
++	//Profiling: kernel calls by number.
++	static inline uint32 g_syscallCounts[128] = {};
+ 
+ 	void HandleInterrupt(int32);
+ 	void HandleSyscall();

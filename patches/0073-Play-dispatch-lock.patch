@@ -1,0 +1,63 @@
+diff --git a/Source/ee/PS2OS.cpp b/Source/ee/PS2OS.cpp
+index f5bd842..201460c 100644
+--- a/Source/ee/PS2OS.cpp
++++ b/Source/ee/PS2OS.cpp
+@@ -1021,6 +1021,20 @@ void CPS2OS::ThreadShakeAndBake()
+ 		return;
+ 	}
+ 
++	if(g_dispatchLockAddress != 0)
++	{
++		auto lock = reinterpret_cast<uint32*>(m_ram + g_dispatchLockAddress);
++		if((*lock & 0xFFFF) != 0)
++		{
++			auto current = m_threads[m_currentThreadId];
++			if((m_currentThreadId != m_idleThreadId) && current && (current->status == THREAD_RUNNING))
++			{
++				*lock |= 0x10000;
++				return;
++			}
++		}
++	}
++
+ 	//Select thread to execute
+ 	{
+ 		uint32 nextThreadId = 0;
+@@ -3206,6 +3220,17 @@ void CPS2OS::HandleSyscall()
+ 	{
+ 		m_libMc2.HandleSyscall(m_ee);
+ 	}
++	else if((func == SYSCALL_DISPATCH_UNLOCK) && (g_dispatchLockAddress != 0))
++	{
++		//Leaving the lock with a switch held back, or a nested or unbalanced leave.
++		auto lock = reinterpret_cast<uint32*>(m_ram + g_dispatchLockAddress);
++		uint32 count = *lock & 0xFFFF;
++		if((*lock & 0x80000000) || (count == 0))
++		{
++			*lock = 0;
++			ThreadShakeAndBake();
++		}
++	}
+ 	else if((func >= HLE_SYSCALL_START) && (func < HLE_SYSCALL_END) && g_hleSyscallHandler)
+ 	{
+ 		g_hleSyscallHandler(g_hleContext, m_ee);
+diff --git a/Source/ee/PS2OS.h b/Source/ee/PS2OS.h
+index 277e211..88103c3 100644
+--- a/Source/ee/PS2OS.h
++++ b/Source/ee/PS2OS.h
+@@ -62,6 +62,15 @@ public:
+ 	static inline HleHook g_hleSyscallHandler = nullptr;
+ 	static inline HleHook g_hleVBlankHook = nullptr;
+ 	static inline void* g_hleContext = nullptr;
++	//A counter in guest memory that holds back thread switches while its low 16
++	//bits are not zero and the current thread can run. A switch held back sets
++	//bit 16; SYSCALL_DISPATCH_UNLOCK does it and clears the counter's bit. For
++	//games whose "disable interrupts" takes many kernel calls (0: not used).
++	static inline uint32 g_dispatchLockAddress = 0;
++	enum
++	{
++		SYSCALL_DISPATCH_UNLOCK = 0xA0F,
++	};
+ 	//Profiling: kernel calls by number.
+ 	static inline uint32 g_syscallCounts[128] = {};
+ 

@@ -411,9 +411,69 @@ void CTextureCache::CTexture::DecodeSpan(uint32* row, uint32 x0, uint32 x1, uint
 	}
 }
 
+void CTextureCache::CTexture::DecodeCt32PageRow(uint32 pageRow)
+{
+	// In memory order, one page after the other. A row of a CT32 page jumps all
+	// over its 8 KB, so going row by row misses the cache at every few texels
+	// (about 40 cycles per texel on the Vita, with large textures).
+	const uint8* ram = m_cache->m_ram;
+	uint32 tw = m_key.tw;
+	if(m_ct32Width != tw)
+	{
+		m_ct32Width = tw;
+		m_ct32Texel.resize(2048);
+		for(uint32 y = 0; y < 32; y++)
+		{
+			for(uint32 x = 0; x < 64; x++)
+			{
+				m_ct32Texel[m_surface.table[(y << 6) + x] / 4] = y * tw + x;
+			}
+		}
+	}
+	const uint32* positions = m_ct32Texel.data();
+	uint32 pagesWide = tw >> 6;
+	uint32 rowBase = m_surface.base + ((pageRow * m_surface.pagesPerRow) << GS_SURFACE::PAGE_SHIFT);
+	uint32* rowTexels = m_texels.data() + pageRow * 32 * tw;
+	for(uint32 page = 0; page < pagesWide; page++)
+	{
+		auto source = reinterpret_cast<const uint32*>(ram + ((rowBase + (page << GS_SURFACE::PAGE_SHIFT)) & GS_SURFACE::RAM_MASK));
+		uint32* destination = rowTexels + page * 64;
+		for(uint32 i = 0; i < 2048; i += 8)
+		{
+			destination[positions[i + 0]] = source[i + 0];
+			destination[positions[i + 1]] = source[i + 1];
+			destination[positions[i + 2]] = source[i + 2];
+			destination[positions[i + 3]] = source[i + 3];
+			destination[positions[i + 4]] = source[i + 4];
+			destination[positions[i + 5]] = source[i + 5];
+			destination[positions[i + 6]] = source[i + 6];
+			destination[positions[i + 7]] = source[i + 7];
+		}
+	}
+}
+
 void CTextureCache::CTexture::DecodeAll()
 {
 	uint32 tilesH = m_tileCount / m_tilesW;
+	bool ct32Pages = m_hasSurface && ((m_key.tpsm == CGSHandler::PSMCT32) || (m_key.tpsm == CGSHandler::PSMCT32_UNK)) &&
+	                 ((m_key.tbp & ((1u << GS_SURFACE::PAGE_SHIFT) - 1)) == 0) && ((m_key.tw & 63) == 0) && ((m_key.th & 31) == 0) &&
+	                 ((m_key.tw >> 6) <= m_surface.pagesPerRow);
+	if(ct32Pages)
+	{
+		for(uint32 pageRow = 0; pageRow < (m_key.th >> 5); pageRow++)
+		{
+			uint32 firstTile = pageRow * 4 * m_tilesW, lastTile = firstTile + 4 * m_tilesW;
+			bool allInvalid = true;
+			for(uint32 i = firstTile; allInvalid && (i < lastTile); i++)
+			{
+				allInvalid = !m_tileValid[i].load(std::memory_order_acquire);
+			}
+			if(!allInvalid) continue;
+			DecodeCt32PageRow(pageRow);
+			for(uint32 i = firstTile; i < lastTile; i++) m_tileValid[i].store(1, std::memory_order_release);
+			m_cache->m_decodedTiles += lastTile - firstTile;
+		}
+	}
 	for(uint32 ty = 0; ty < tilesH; ty++)
 	{
 		// A whole row of invalid tiles: one span per texel row, not one per tile.

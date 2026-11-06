@@ -55,6 +55,7 @@
 #include "Log.h"
 #include "GameProfiles.h"
 #include "JitCacheSetup.h"
+#include "ee/PS2OS.h"
 #include "Theme.h"
 #include "GSH_Hardware.h"
 #include "Gfx.h"
@@ -181,6 +182,7 @@ namespace
 		uint32_t eeCycleRate = 100; //0: auto
 		uint32_t eeSlice = 0;       //EE cycles per time slice, 0: the core's default
 		uint32_t iopRate = 100;     //IOP clock, percent of real speed
+		bool threadLockHle = false; //game's critical sections without kernel calls (needs mpeg_hle)
 		bool interlaced = false;
 		uint32_t frameSkip = 0;
 		bool showStats = true;
@@ -212,6 +214,7 @@ namespace
 		if(key == "ee_cycle_rate") settings.eeCycleRate = value;
 		else if(key == "ee_slice") settings.eeSlice = value;
 		else if(key == "iop_rate") settings.iopRate = value;
+		else if(key == "thread_lock_hle") settings.threadLockHle = value != 0;
 		else if(key == "interlaced") settings.interlaced = value != 0;
 		else if(key == "frame_skip") settings.frameSkip = value;
 		else if(key == "show_stats") settings.showStats = value != 0;
@@ -583,7 +586,7 @@ namespace
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",ps2_%s", EmuProfile::GetSectionName(i));
 				std::fprintf(perfFile, ",spu_full_waits,spu_read_waits,ipu_idec,ipu_bdec,ipu_out_kb,ipu_stalls,audio_underruns,audio_tempo");
 				std::fprintf(perfFile, ",jit_blocks,jit_writes,jit_write_ms,jit_alloc_ms,jit_free_ranges,jit_translate_ms,jit_finish_ms,jit_install_ms,jit_guest_instr,jit_code_kb,jit_opt_ms,jit_alloc_regs_ms,jit_codegen_ms,jit_statements");
-				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms\n");
+				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms\n");
 			}
 		}
 		const uint64_t runStart = sceKernelGetProcessTimeWide();
@@ -691,6 +694,7 @@ namespace
 			if(settings.iopRate != 100) session->GetVm()->SetIopRatePercent(static_cast<int>(settings.iopRate));
 			if(settings.movieHle)
 			{
+				if(settings.threadLockHle) mpegHle.EnableThreadLockHle();
 				// Native movie decoding (libmpeg 2.2 sceMpegGetPicture), decoder on
 				// core 2 (VU1 has little to do while the EE does not decode).
 				mpegHle.Enable(session->GetVm()->m_ee->m_ram, "ux0:data/VitaPS2/mpeghle.txt", []() {
@@ -1009,6 +1013,14 @@ namespace
 								session->WriteEeHotspots(hot, 80);
 								std::fclose(hot);
 							}
+							if(FILE* calls = std::fopen("ux0:data/VitaPS2/syscalls.txt", "w"))
+							{
+								for(unsigned int i = 0; i < 128; i++)
+								{
+									if(CPS2OS::g_syscallCounts[i] != 0) std::fprintf(calls, "%u %u\n", i, CPS2OS::g_syscallCounts[i]);
+								}
+								std::fclose(calls);
+							}
 						}
 						// The code behind the hotspots, for disassembly on a PC.
 						if(eeHotMovie && (eeHotSeconds == 30) && autostart && (autostart->settings.size() != 0))
@@ -1078,6 +1090,17 @@ namespace
 							std::fprintf(perfFile, ",%.1f,%.1f", (gpuTimes.texDecodeUs - lastDecodeUs) / 1000.0, (gpuTimes.texGlUs - lastGlUs) / 1000.0);
 							lastDecodeUs = gpuTimes.texDecodeUs;
 							lastGlUs = gpuTimes.texGlUs;
+							auto mpegStats = mpegHle.GetStats();
+							static double lastWaitMs = 0, lastDecodeMs = 0;
+							std::fprintf(perfFile, ",%.1f,%.1f,%u", mpegStats.waitMs - lastWaitMs, mpegStats.decodeMs - lastDecodeMs, mpegStats.starved);
+							static uint64_t lastDisc = 0, lastReads = 0, lastVuSync = 0;
+							uint64_t discNow = EmuProfile::g_discReadUs, readsNow = EmuProfile::g_discReads, vuNow = EmuProfile::g_vuSyncUs;
+							std::fprintf(perfFile, ",%.1f,%u,%.1f", (discNow - lastDisc) / 1000.0, static_cast<unsigned int>(readsNow - lastReads), (vuNow - lastVuSync) / 1000.0);
+							lastDisc = discNow;
+							lastReads = readsNow;
+							lastVuSync = vuNow;
+							lastWaitMs = mpegStats.waitMs;
+							lastDecodeMs = mpegStats.decodeMs;
 						}
 						std::fprintf(perfFile, "\n");
 						std::fflush(perfFile);

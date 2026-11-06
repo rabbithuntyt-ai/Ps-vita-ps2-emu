@@ -14,12 +14,14 @@ movie pictures handed to the game, not flips. A real 30 needs 60 emulated fps.
 
 | Scene | Before this work | Now | Goal |
 |---|---|---|---|
-| Title screen | 3.3 fps (Nov 3 run), 35 on the build this work started from | **53 emulated fps** (58.9 with `ee_cycle_rate=60 iop_rate=50`) | 60 emulated = 30 real |
-| Orange intro / attract movies | black, 3 pictures/s | **picture correct, 12 pictures/s**, 27 emulated fps at best | 30 pictures/s |
+| Title screen | 3.3 fps (Nov 3 run), 35 on the build this work started from | **55 emulated fps** (58.9 with `ee_cycle_rate=60 iop_rate=50`) | 60 emulated = 30 real |
+| Orange intro / attract movies | black, 3 pictures/s | **picture correct, 13 pictures/s** (peaks of 17), 27 emulated fps. The whole trailer plays and returns to the title | 30 pictures/s |
 | Gameplay | not reached yet | not reached yet | 30 |
 
 Not verified: gameplay, New Game, audio sync in movies, and the movie picture
-compared with a reference. Pictures looked right in frame dumps only.
+compared with a reference. Pictures looked right in frame dumps only, apart from one
+frame (t=317 of a run) that was mostly black with a blocky patch: maybe a scene cut,
+maybe a decoding problem.
 
 The game's real flow: logos, title animation, title menu (about 20 s), then with no
 input it plays attract movies. **The orange intro is an attract movie**, and Cross
@@ -63,23 +65,25 @@ Details of libmpeg 3.0 (RE4 addresses, found by code signature):
 
 ## How the time splits now (movie, per vblank at 25 emulated fps)
 
-EE about 20 ms, IOP 9 ms, other 7 ms: 36 ms against 16.6 ms for full speed, so **the
-movie needs more than 2x**. GPU thread 60%, not the limit any more. Decoder about 28 ms
-per picture on core 2 (35 pictures/s at most, on a core it shares with SPU2 mixing).
+EE about 18 ms, IOP 9 ms, other 6 ms, VIF to GS 3 ms: 36 ms against 16.6 ms for full
+speed, so **the movie needs more than 2x**. GPU thread 63%, not the limit any more.
+Decoder about 28 ms per picture on core 2; the EE waits for it only 0.3 ms per second.
+The PS2 thread is on the CPU only about 78% of the time. Disc reads explain 4%, VU1
+sync none; **the rest is not explained yet** and would be worth up to 25% more speed.
 
 EE samples in the movie (`ee_hot_after`):
 
 | Share | Code | Idea |
 |---|---|---|
-| 11.8% | 0x2DADC0: Sofdec scans for start codes byte by byte | Native replacement by signature |
-| 4.9% | 0x2AF420: byte-wise memcpy | Native replacement by signature |
-| 15.8% | 0x29Cxxx, 0x298xxx: kernel stubs | Look for spin waits |
-| 10% | 0x17Bxxx, 0x18Bxxx, 0x19Bxxx: game code | - |
+| 11.8% | 0x2DADC0: Sofdec scans for start codes byte by byte | Done: native (now 1%) |
+| About 25% | 0x17BEA8/0x17BF30: critical sections, about 5 kernel calls per pair, 2700 pairs/s | Done: a counter in guest code (`thread_lock_hle`) |
+| 6.9% | 0x2AF420: memcpy, byte-wise tail | Small calls: a syscall may cost more than it saves. Needs a JIT-level answer |
+| 6.6% | 0x19B000: looks like ADX audio decoding | Native ADX by signature |
 
 ## Ideas not done yet
 
-1. HLE by signature for the start-code scanner and memcpy (ROADMAP item 2).
-2. Native ADX audio decoding, if it shows up in the profile.
+1. Find the unexplained 22% the PS2 thread is off the CPU.
+2. Native ADX audio decoding; the IOP's 25% (it does not shrink with `iop_rate`).
 3. Convert pictures straight into a GL texture, skipping EE RAM and the GIF: each picture
    is copied to EE RAM, then to the GS in 16 pixel columns.
 4. Larger slices only while EE and IOP are both idle. 38400 broke RE4 but gave 58.5 fps.
@@ -97,10 +101,12 @@ Autostart keys, all per run:
 | `frame_dump_every=S` | Save the displayed picture to `ux0:data/VitaPS2/frames/` |
 | `mpeg_dump_mb=N` | Save the movie stream the decoder gets to `mpegstream.bin` |
 | `gs_diag_after=S` | Start `gs_diag` logging later (with `gs_diag=N`) |
-| `ee_hot_after=S` | Sample EE hotspots from this second on |
+| `ee_hot_after=S` | Sample EE hotspots from this second on; also writes `syscalls.txt` (kernel calls by number) |
+| `thread_lock_hle=1` | RE4 USA: critical sections without kernel calls (also a per-game setting) |
 
 `perf.csv` gained `jit_pool_kb`, `jit_flushes`, `mpeg_pictures`, `tex_decode_ms`,
-`tex_gl_ms`. `tests/mpeg2_decoder_tests FILE --es` replays a stream dump on a PC.
+`tex_gl_ms`, `mpeg_wait_ms`, `mpeg_decode_ms`, `mpeg_starved`, `disc_ms`, `disc_reads`,
+`vu_sync_ms`. `tests/mpeg2_decoder_tests FILE --es` replays a stream dump on a PC.
 
 ## Traps when testing
 
@@ -110,7 +116,10 @@ Autostart keys, all per run:
   a scene. Compare warm runs only.
 - `vitalab ls` wraps sizes at 4 GB, so large images look truncated.
 - `vitalab shot` and `stats` report SHELL at 0 fps in some sessions while the emulator
-  runs. Use `frame_dump_every`.
+  runs, and button presses then do not reach the game. Use `frame_dump_every`.
+- Builds in WSL must record patches applied by hand in the submodule's
+  `vitaps2-applied-patches`, or CMake's reconfigure fails. A failed build then tests the
+  previous program without any warning: check that it says `built:`.
 - Button presses on the Vita change the timeline of a run.
 - `ux0:data/VitaPS2/settings/Resident Evil 4 (USA).iso.ini` holds `ee_cycle_rate=130`,
   `safe_jit=1` and `interlaced=1` from an earlier experiment. They override the game

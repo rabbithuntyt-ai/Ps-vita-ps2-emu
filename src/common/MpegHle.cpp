@@ -87,6 +87,69 @@ namespace
 		for(uint32_t i = 0; i < stubWords; i++) stub[i] = (i < 12) ? words[i] : 0;
 	}
 
+	// Sofdec's scan for an MPEG start code of a given kind (a0 buffer, a1 size,
+	// a2 mask of kinds), byte by byte: 12% of the EE's time in Resident Evil 4's
+	// movies. Returns the start code's address or 0. RE4: 0x2DAD80.
+	constexpr uint32_t SYSCALL_SCAN = SYSCALL_BASE + 6;
+	const uint32_t g_codeScan[] = {
+	    0x27BDFFC0, 0x0000182D, 0xFFB10008, 0x0080882D, 0xFFB20010, 0x02259021, 0x0232102B, 0xFFB50028, 0xFFB00000, 0x00C0A82D, 0xFFB30018,
+	    0xFFB40020, 0xFFB60030, 0x10400029, 0xFFBF0038, 0x24140001, 0x24130002, 0x24160003, 0x82220000, 0x00000000, 0x1074000D, 0x26310001,
+	    0x10600007, 0x00000000, 0x1073000D, 0x00000000, 0x50760013, 0x2630FFFC, 0x10000018, 0x0232102B, 0x50400015, 0x24030001, 0x10000014,
+	    0x0232102B, 0x0260182D, 0x10000010, 0x0002180B, 0x00000000, 0x14540003, 0x00000000, 0x1000000B, 0x24030003, 0x1040000A, 0x0232102B,
+	    0x10000008, 0x0000182D, ANY, 0x0200202D, 0x02A21824, 0x14600006, 0x0200102D, 0x0000182D, 0x0232102B, 0x5440FFDE, 0x82220000,
+	    0x0000102D, 0xDFB00000, 0xDFB10008, 0xDFB20010, 0xDFB30018, 0xDFB40020, 0xDFB50028, 0xDFB60030, 0xDFBF0038, 0x03E00008, 0x27BD0040};
+	constexpr uint32_t SCAN_WORDS = sizeof(g_codeScan) / sizeof(g_codeScan[0]);
+	const uint32_t g_stubScan[] = {0x24030000 | SYSCALL_SCAN, 0x0000000C, 0x03E00008, 0x00000000};
+
+	// Resident Evil 4 (USA) enters and leaves its critical sections with about 5
+	// kernel calls per pair (priority up, a helper thread resumed, 2700 pairs a
+	// second in movies, a quarter of the EE's time). Matched exactly, all or nothing.
+	constexpr uint32_t RE4_LOCK_ENTER = 0x17BEA8;
+	constexpr uint32_t RE4_LOCK_LEAVE = 0x17BF30;
+	constexpr uint32_t RE4_LOCK_COUNT = 0x2F68F0;
+	const uint32_t g_codeLockEnter[] = {
+	    0x27BDFFE0, 0x3C02002F, 0xFFB20010, 0x245268F0, 0x8E420000, 0xFFB00000, 0xFFB10008, 0x14400011, 0xFFBF0018, 0x0C0A72C4, 0x3C10002F,
+	    0x0040882D, 0x3C02002F, 0x8C4568C0, 0x0220202D, 0x0C0A72AC, 0x26106948, 0x3C030030, 0xAC62E1E0, 0x3C050030, 0x8E040000, 0x0C05F144,
+	    0xACB1E1E4, 0x8E030000, 0x8E420000, 0x24420001, 0xDFB00000, 0xAE420000, 0xDFB10008, 0xDFB20010, 0xDFBF0018, 0x03E00008, 0x27BD0020};
+	const uint32_t g_codeLockLeave[] = {
+	    0x27BDFFE0, 0x3C03002F, 0xFFB10008, 0x247168F0, 0x8E220000, 0xFFB00000, 0x2442FFFF, 0xFFBF0010, 0x1440000B, 0xAE220000, 0x3C10002F,
+	    0x26106948, 0x0C05F15E, 0x8E040000, 0x0C0A72C4, 0x8E030000, 0x3C030030, 0x8C65E1E0, 0x0C0A72AC, 0x0040202D, 0x8E220000, 0x04420001,
+	    0xAE200000, 0xDFB00000, 0xDFB10008, 0xDFBF0010, 0x03E00008, 0x27BD0020};
+	const uint32_t g_stubLockEnter[] = {
+	    0x3C03002F, // lui   v1, 0x2F
+	    0x8C6268F0, // lw    v0, 0x68F0(v1)
+	    0x24420001, // addiu v0, v0, 1
+	    0xAC6268F0, // sw    v0, 0x68F0(v1)
+	    0x03E00008, // jr    ra
+	    0x00000000};
+	const uint32_t g_stubLockLeave[] = {
+	    0x3C03002F, // lui   v1, 0x2F
+	    0x8C6268F0, // lw    v0, 0x68F0(v1)
+	    0x2442FFFF, // addiu v0, v0, -1
+	    0xAC6268F0, // sw    v0, 0x68F0(v1)
+	    0x10400003, // beqz  v0, done: nothing was held back
+	    0x00000000, // nop
+	    0x24030A0F, // addiu v1, zero, SYSCALL_DISPATCH_UNLOCK
+	    0x0000000C, // syscall
+	    0x03E00008, // done: jr ra
+	    0x00000000};
+
+	// Kinds of the code after 00 00 01 (Sofdec's classifier, RE4 0x2DABE8).
+	uint32_t StartCodeKind(uint8_t code)
+	{
+		switch(code)
+		{
+		case 0x00: return 4;
+		case 0x01: return 3;
+		case 0xB2: return 32;
+		case 0xB3: return 64;
+		case 0xB5: return 16;
+		case 0xB7: return 128;
+		case 0xB8: return 8;
+		default: return ((code >= 0x02) && (code <= 0xAF)) ? 1 : 0;
+		}
+	}
+
 	// libmpeg 3.0's sys: entries of (function, data, gp), type 1 = no data;
 	// GetPictureAbort sets the flag (decoding fails while it is set).
 	constexpr uint32_t SYS30_NODATA_FUNCTION = 0x18;
@@ -131,6 +194,8 @@ void CMpegHle::Disable()
 {
 	if(!m_ram) return;
 	CPS2OS::SetHleHooks(nullptr, nullptr, nullptr);
+	CPS2OS::g_dispatchLockAddress = 0;
+	m_threadLockPatched = false;
 	CIPU::SetResetObserver(nullptr, nullptr);
 	CIPU::SetInputSink(nullptr, nullptr);
 	{
@@ -178,6 +243,8 @@ void CMpegHle::OnVBlank(void* context, CMIPS& ee)
 
 void CMpegHle::PatchCode(CMIPS& ee)
 {
+	PatchStartCodeScan(ee);
+	PatchThreadLock(ee);
 	auto matches = [&](uint32_t variant, uint32_t address) {
 		const auto& v = g_variants[variant];
 		for(uint32_t i = 0; i < v.words; i++)
@@ -247,10 +314,120 @@ void CMpegHle::PatchCode(CMIPS& ee)
 	}
 }
 
+void CMpegHle::PatchThreadLock(CMIPS& ee)
+{
+	if(!m_threadLockHle || m_threadLockPatched || ((m_vblanks % 60) != 1)) return;
+	auto same = [&](uint32_t address, const uint32_t* words, size_t count) {
+		for(size_t i = 0; i < count; i++)
+		{
+			if(Read32(m_ram, address + static_cast<uint32_t>(i) * 4) != words[i]) return false;
+		}
+		return true;
+	};
+	const size_t enterWords = sizeof(g_codeLockEnter) / 4, leaveWords = sizeof(g_codeLockLeave) / 4;
+	if(!same(RE4_LOCK_ENTER, g_codeLockEnter, enterWords) || !same(RE4_LOCK_LEAVE, g_codeLockLeave, leaveWords)) return;
+	// Only outside the lock, with the EE outside the code being replaced.
+	uint32_t pc = ee.m_State.nPC;
+	if((Read32(m_ram, RE4_LOCK_COUNT) != 0) || ((pc >= RE4_LOCK_ENTER) && (pc < RE4_LOCK_LEAVE + leaveWords * 4))) return;
+	for(size_t i = 0; i < sizeof(g_stubLockEnter) / 4; i++) Write32(m_ram, RE4_LOCK_ENTER + static_cast<uint32_t>(i) * 4, g_stubLockEnter[i]);
+	for(size_t i = 0; i < sizeof(g_stubLockLeave) / 4; i++) Write32(m_ram, RE4_LOCK_LEAVE + static_cast<uint32_t>(i) * 4, g_stubLockLeave[i]);
+	ee.m_executor->ClearActiveBlocksInRange(RE4_LOCK_ENTER, RE4_LOCK_LEAVE + leaveWords * 4, false);
+	CPS2OS::g_dispatchLockAddress = RE4_LOCK_COUNT;
+	m_threadLockPatched = true;
+	Log("patched the critical sections at 0x%08X and 0x%08X\n", RE4_LOCK_ENTER, RE4_LOCK_LEAVE);
+}
+
+void CMpegHle::PatchStartCodeScan(CMIPS& ee)
+{
+	auto matches = [&](uint32_t address) {
+		for(uint32_t i = 0; i < SCAN_WORDS; i++)
+		{
+			uint32_t mask = (g_codeScan[i] == ANY) ? 0xFC000000 : ~0u;
+			if((Read32(m_ram, address + i * 4) & mask) != g_codeScan[i]) return false;
+		}
+		return true;
+	};
+	if(m_scanAddress != 0)
+	{
+		bool patched = true;
+		for(uint32_t i = 0; patched && (i < 4); i++) patched = (Read32(m_ram, m_scanAddress + i * 4) == g_stubScan[i]);
+		if(patched) return;
+		if(!matches(m_scanAddress)) m_scanAddress = 0;
+	}
+	if((m_scanAddress == 0) && ((m_vblanks % 60) == 1))
+	{
+		for(uint32_t address = 0x100000; address < 0x1000000; address += 4)
+		{
+			if((Read32(m_ram, address) == g_codeScan[0]) && matches(address))
+			{
+				m_scanAddress = address;
+				Log("start code scan found at 0x%08X\n", address);
+				break;
+			}
+		}
+	}
+	if(m_scanAddress == 0) return;
+	uint32_t pc = ee.m_State.nPC;
+	if((pc >= m_scanAddress) && (pc < m_scanAddress + 16)) return;
+	for(uint32_t i = 0; i < 4; i++) Write32(m_ram, m_scanAddress + i * 4, g_stubScan[i]);
+	ee.m_executor->ClearActiveBlocksInRange(m_scanAddress, m_scanAddress + SCAN_WORDS * 4, false);
+	Log("patched the start code scan at 0x%08X\n", m_scanAddress);
+}
+
+void CMpegHle::HandleStartCodeScan(CMIPS& ee)
+{
+	auto& gpr = ee.m_State.nGPR;
+	uint32_t address = gpr[CMIPS::A0].nV0;
+	uint32_t size = gpr[CMIPS::A1].nV0;
+	uint32_t mask = gpr[CMIPS::A2].nV0;
+	uint32_t physical = address & 0x1FFFFFFF;
+	uint32_t result = 0;
+	// The game's buffers are in main memory (cached or not); anything else, or a
+	// buffer that wraps, is not something the original could find a code in here.
+	if((physical < 0x02000000) && (size <= (0x02000000 - physical)))
+	{
+		// Same state machine: after a hit of the wrong kind the search goes on
+		// behind that code, and a partial match restarts on the next byte.
+		const uint8_t* data = m_ram + physical;
+		uint32_t state = 0;
+		for(uint32_t i = 0; i < size; i++)
+		{
+			uint8_t byte = data[i];
+			switch(state)
+			{
+			case 0:
+				if(byte == 0) state = 1;
+				break;
+			case 1:
+				state = (byte == 0) ? 2 : 0;
+				break;
+			case 2:
+				if(byte == 1) state = 3;
+				else if(byte != 0) state = 0;
+				break;
+			default:
+				if(StartCodeKind(byte) & mask)
+				{
+					result = address + i - 3;
+					i = size;
+				}
+				state = 0;
+				break;
+			}
+		}
+	}
+	gpr[CMIPS::V0].nD0 = static_cast<int32_t>(result);
+}
+
 void CMpegHle::OnSyscall(void* context, CMIPS& ee)
 {
 	auto hle = static_cast<CMpegHle*>(context);
 	uint32_t func = ee.m_State.nGPR[CMIPS::V1].nV0;
+	if(func == SYSCALL_SCAN)
+	{
+		hle->HandleStartCodeScan(ee);
+		return;
+	}
 	hle->m_variant = std::min<uint32_t>((func - SYSCALL_BASE) / 2, VARIANT_COUNT - 1);
 	hle->HandleGetPicture(ee, ((func - SYSCALL_BASE) & 1) == 0);
 }
@@ -304,7 +481,9 @@ void CMpegHle::HandleGetPicture(CMIPS& ee, bool first)
 		// its picture. The callback is for when it really ran out.
 		if(variant.library30)
 		{
+			auto waitStart = std::chrono::steady_clock::now();
 			bool ready = m_pictureReady.wait_for(lock, std::chrono::seconds(3), [&]() { return !m_pictures.empty() || m_decoderStarved || m_quit; });
+			m_stats.waitMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStart).count();
 			if(!ready)
 			{
 				// Never freeze the game on a stuck decoder.
@@ -548,6 +727,7 @@ void CMpegHle::DecoderThread()
 			if(m_incoming.empty())
 			{
 				m_decoderStarved = true;
+				m_stats.starved++;
 				m_pictureReady.notify_all();
 			}
 			continue;

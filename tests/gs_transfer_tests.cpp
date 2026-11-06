@@ -6,6 +6,8 @@
 #include <cstring>
 #include <random>
 #include <vector>
+#include "GsMemory.h"
+#include "TextureCache.h"
 #include "gs/GsTransferWrite.h"
 
 namespace
@@ -183,6 +185,48 @@ namespace
 	}
 }
 
+// Whole texture decoding in memory order against one texel at a time.
+static unsigned int CheckCt32PageDecode()
+{
+	unsigned int failures = 0;
+	std::vector<uint8> ram(CGSHandler::RAMSIZE);
+	std::vector<uint16> clut(1024);
+	for(size_t i = 0; i < ram.size(); i++) ram[i] = static_cast<uint8>((i * 2654435761u) >> 13);
+	CTextureCache cache;
+	cache.SetMemory(ram.data(), clut.data());
+	const uint32 sizes[][3] = {{512, 512, 8}, {256, 256, 8}, {64, 32, 1}, {128, 64, 2}, {512, 336, 8}, {256, 128, 4}};
+	for(const auto& size : sizes)
+	{
+		CTextureCache::KEY key;
+		key.tbp = 0x1C0000;
+		key.tbw = size[2];
+		key.tpsm = CGSHandler::PSMCT32;
+		key.tw = size[0];
+		key.th = size[1];
+		key.cpsm = 0;
+		key.csa = 0;
+		key.clutHash = 0;
+		key.texa = 0;
+		auto texture = cache.Get(key);
+		texture->DecodeAll();
+		const uint32* texels = texture->Texels();
+		for(uint32 y = 0; y < size[1]; y++)
+		{
+			for(uint32 x = 0; x < size[0]; x++)
+			{
+				if(texels[y * size[0] + x] != GsMemory::ReadRaw(ram.data(), CGSHandler::PSMCT32, key.tbp, size[2], x, y))
+				{
+					failures++;
+					y = size[1];
+					break;
+				}
+			}
+		}
+	}
+	std::printf("CT32 page decode: %u failures\n", failures);
+	return failures;
+}
+
 int main(int argc, char** argv)
 {
 	if((argc > 1) && (std::strcmp(argv[1], "bench") == 0))
@@ -200,5 +244,6 @@ int main(int argc, char** argv)
 	failures += TestUnits<CGsPixelFormats::STORAGEPSMT8>("PSMT8", ramA, ramB);
 	failures += TestPsmt4(ramA, ramB, false);
 	failures += TestPsmt4(ramA, ramB, true);
+	failures += CheckCt32PageDecode();
 	return (failures == 0) ? 0 : 1;
 }

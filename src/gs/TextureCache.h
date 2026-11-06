@@ -112,6 +112,9 @@ public:
 		GS_SURFACE m_surface;
 		bool m_hasSurface = false;
 		std::vector<uint32> m_texels;
+		void DecodeCt32PageRow(uint32 pageRow);
+		std::vector<uint32> m_ct32Texel; //CT32 page: memory position -> texel position
+		uint32 m_ct32Width = 0;
 		std::unique_ptr<std::atomic<uint8>[]> m_tileValid;
 		uint32 m_tileCount = 0;
 		uint32 m_tilesW = 0;

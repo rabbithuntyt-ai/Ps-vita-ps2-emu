@@ -9,9 +9,6 @@ Only RE4 has been measured with this work. "All games" below means the code is n
 specific to RE4, not that other games were tested. The next step for all of it is a run
 of `tools/vitalab_compat.sh` across the test set.
 
-Not committed yet, while they are checked in RE4's menus: the critical sections, the
-start code scan, patches 0072-0074 and CT32 memory order decoding.
-
 ## Already general: helps any game, on by default
 
 | Change | What it does | Expected reach |
@@ -31,7 +28,7 @@ These need a per-game choice today. The job is to make that choice automatic.
 | `ee_slice` (default 4800) | 19200: title 35 to 53 fps. 38400: **no display output** | Too long breaks games, and how long depends on the game | Add it to `CAutoTuner`: step up on first boot, step back when output stops or fps falls, and store the result per game. A stopped display is easy to detect (`vm_fps` high, `out_fps` 0). Longer slices only while EE and IOP are both idle may be safe everywhere |
 | `iop_rate` | 50: small gain on the title, none in movies | Slow sound and disc drivers | Probably not worth automating: the IOP's cost barely moved in RE4. Try on other games first |
 | `ee_cycle_rate` | 60: title 53 to 57 fps | Game logic slows down in busy scenes | Auto EE rate exists. Check that it climbs back fast enough in gameplay |
-| `mpeg_hle` | 3 to 13 pictures/s | A stream the decoder cannot handle, or a library variant not recognised | Turn on by default once a few more games pass, with fallback to the IPU when the signature does not match (already the case) |
+| `mpeg_hle` | 3 to 13 pictures/s, a whole trailer plays through | A stream the decoder cannot handle, or a library variant not recognised | Turn on by default once a few more games pass, with fallback to the IPU when the signature does not match (already the case) |
 
 ## RE4 only today, and how each could generalise
 

@@ -36,6 +36,11 @@ public:
 	// decoderThreadInit runs first on the decoder thread (core affinity).
 	void Enable(uint8_t* eeRam, const char* logPath, std::function<void()> decoderThreadInit);
 	void Disable();
+	// Resident Evil 4 (USA): its critical sections become a counter in guest code.
+	void EnableThreadLockHle()
+	{
+		m_threadLockHle = true;
+	}
 	// Diagnostics: the first maxBytes the game feeds to the decoder, for replaying
 	// on a PC (tests/mpeg2_decoder_tests --es).
 	void SetInputDump(const char* path, size_t maxBytes);
@@ -46,6 +51,8 @@ public:
 		uint32_t waits = 0;       //no-data callbacks (no picture ready)
 		double decodeMs = 0;      //total native decoding time
 		uint32_t decoded = 0;
+		double waitMs = 0;        //EE thread blocked waiting for pictures
+		uint32_t starved = 0;     //times the decoder ran out of input
 	};
 	STATS GetStats();
 
@@ -75,6 +82,12 @@ private:
 	std::function<void()> m_decoderThreadInit;
 
 	// EE thread: code patch and the current sceMpegGetPicture call.
+	void PatchThreadLock(CMIPS&);
+	bool m_threadLockHle = false;
+	bool m_threadLockPatched = false;
+	void PatchStartCodeScan(CMIPS&);
+	void HandleStartCodeScan(CMIPS&);
+	uint32_t m_scanAddress = 0; //Sofdec's start code scan, replaced by native code
 	static constexpr uint32_t VARIANT_COUNT = 3;
 	uint32_t m_patchAddress[VARIANT_COUNT] = {};
 	uint32_t m_vblanks = 0;

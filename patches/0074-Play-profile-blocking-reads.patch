@@ -1,0 +1,73 @@
+diff --git a/Source/DiskUtils.cpp b/Source/DiskUtils.cpp
+index 60b0d34..2a5df0a 100644
+--- a/Source/DiskUtils.cpp
++++ b/Source/DiskUtils.cpp
+@@ -1,3 +1,5 @@
++#include <chrono>
++#include "EmuProfile.h"
+ #include <algorithm>
+ #include <cassert>
+ #include <cstring>
+@@ -97,7 +99,10 @@ public:
+ 				{
+ 					uint64 direct = length - (length % SECTOR_SIZE);
+ 					if(sceIoLseek(m_fd, m_position, SCE_SEEK_SET) != m_position) break;
++					auto readStart = std::chrono::steady_clock::now();
+ 					int result = sceIoRead(m_fd, output, static_cast<SceSize>(direct));
++					EmuProfile::g_discReadUs += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - readStart).count();
++					EmuProfile::g_discReads++;
+ 					if(result <= 0) break;
+ 					m_position += result;
+ 					output += result;
+@@ -107,7 +112,10 @@ public:
+ 				}
+ 				int64 start = m_position - (m_position % SECTOR_SIZE);
+ 				if(sceIoLseek(m_fd, start, SCE_SEEK_SET) != start) break;
++				auto readStart = std::chrono::steady_clock::now();
+ 				int result = sceIoRead(m_fd, m_buffer.data(), BUFFER_SIZE);
++				EmuProfile::g_discReadUs += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - readStart).count();
++				EmuProfile::g_discReads++;
+ 				if(result <= 0) break;
+ 				m_bufferStart = start;
+ 				m_bufferValid = result;
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+index 51e4b4c..465164f 100644
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -36,6 +36,10 @@ namespace EmuProfile
+ 	}
+ 
+ 	inline std::atomic<uint8> g_section{SECTION_OTHER};
++	// Time the emulation thread sleeps, in microseconds.
++	inline std::atomic<uint64_t> g_discReadUs{0};
++	inline std::atomic<uint64_t> g_discReads{0};
++	inline std::atomic<uint64_t> g_vuSyncUs{0};
+ 
+ 	//Block compilation cost by phase (all recompiler threads), microseconds.
+ 	struct JIT_STATS
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+index 99508d7..7580644 100644
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -1,3 +1,5 @@
++#include <chrono>
++#include "../EmuProfile.h"
+ #include "Vpu.h"
+ #include "../EmuProfile.h"
+ #include <algorithm>
+@@ -168,6 +170,15 @@ void CVpu::Sync()
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_VU1);
+ 	{
+ 		std::unique_lock<std::mutex> lock(m_workerMutex);
++		auto waitStart = std::chrono::steady_clock::now();
++		struct WAIT_TIMER
++		{
++			std::chrono::steady_clock::time_point start;
++			~WAIT_TIMER()
++			{
++				EmuProfile::g_vuSyncUs += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
++			}
++		} waitTimer{waitStart};
+ 		m_idleCondition.wait(lock, [this]() { return !m_workPending && (m_vuState != VU_STATE_RUNNING); });
+ 	}
+ 	FlushPendingXgKicks();

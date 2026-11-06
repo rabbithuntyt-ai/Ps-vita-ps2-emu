@@ -4,3 +4,4 @@ date,label,title_out_fps,movie_vm_fps,movie_out_fps,movie_pics,jit_ms_block,movi
 2026-11-05,"native movies (libmpeg 3.0), on-demand input",34.6,15.8,15.8,9.0,-,38,-,-,-,-
 2026-11-05,"EE slice 19200, decode ahead",53.4,23.5,23.6,11.0,-,46,-,-,-,-
 2026-11-05,GPU round trips removed,52.5,24.5,24.5,12.0,-,49,-,-,-,-
+2026-11-06,Critical sections and start code scan native,55.5,26.5,26.5,13.0,-,47,-,-,-,-

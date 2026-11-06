@@ -38,7 +38,7 @@ second. Full history: [docs/perf/vita_realworld.md](docs/perf/vita_realworld.md)
 <!-- vita-realworld-end -->
 
 Resident Evil 4 on the same Vita, per build. The orange intro and the attract movies
-need 30 new pictures per second, which takes 60 emulated fps: they are at 12. Status,
+need 30 new pictures per second, which takes 60 emulated fps: they are at 13. Status,
 findings and notes for other sessions: [docs/RE4.md](docs/RE4.md).
 
 ![Resident Evil 4 frame rates on a real PS Vita, per build](docs/perf/re4_vita.svg)
@@ -50,6 +50,7 @@ findings and notes for other sessions: [docs/RE4.md](docs/RE4.md).
 | native movies (libmpeg 3.0), on-demand input | 34.6 | 15.8 | 9 |
 | EE slice 19200, decode ahead | 53.4 | 23.5 | 11 |
 | GPU round trips removed | 52.5 | 24.5 | 12 |
+| Critical sections and start code scan native | 55.5 | 26.5 | 13 |
 
 ## Performance gap
 
@@ -137,7 +138,7 @@ scene repeatable, so a change can be measured on the exact same frames.
 | Software GS renderer (accuracy fallback) | Implemented and unit tested (see below) |
 | Vita frontend (game list, display, controls, audio, save states) | Running on hardware |
 | Silent Hill 2 (SLUS-20228) | Boots through the menus and plays the opening movie (below full speed) |
-| Resident Evil 4 (SLUS-21134) | Reaches the title menu and plays its movies with native decoding (12 of 30 pictures/s); gameplay not reached yet |
+| Resident Evil 4 (SLUS-21134) | Reaches the title menu and plays its movies with native decoding (13 of 30 pictures/s); gameplay not reached yet |
 | Host build + automated tests | Passing |
 | VPK build | CI with the official VitaSDK Docker image |
 
