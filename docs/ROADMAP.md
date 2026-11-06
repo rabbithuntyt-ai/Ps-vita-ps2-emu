@@ -22,7 +22,7 @@ common VU1 microprograms and common GS usage.
 2. **Library HLE by signature.** Find library functions by their code
    bytes (not addresses) and run native ARM/NEON versions; libmpeg's
    `sceMpegGetPicture` (`src/common/MpegHle.cpp`) is the template.
-   - [ ] Finish libmpeg on hardware (movies at full speed in every libmpeg game)
+   - [ ] Finish libmpeg on hardware (movies at full speed in every libmpeg game). libmpeg 3.0 under Sofdec added, 12 of 30 pictures/s in RE4 (docs/RE4.md)
    - [ ] Signature scanner shared by all HLE modules (masked code patterns, per-SDK-version variants)
    - [ ] memcpy/memset/strlen and math (sin/cos/sqrt/atan2) from the SDK's libc and libm
    - [ ] Criware (Sofdec/ADX) movies and audio
@@ -31,7 +31,7 @@ common VU1 microprograms and common GS usage.
    stores blocks (keyed by code hash), later plays load them: scene changes
    stop stalling after one pass, for every game. See docs/AOT_TRANSLATION.md.
    - [x] EE blocks stored with relocations in `ux0:data/VitaPS2/jitcache/<game>.jit` (patches 0064, 0065), loaded on later runs, JIT on a miss; tested end to end under qemu (ARM CI)
-   - [ ] Measure on the Vita (scene-change stalls on a second play); IOP and VU blocks
+   - [x] Measured on the Vita: RE4 reaches the title in half the time on a second play. IOP and VU blocks cached (0066). Blocks read from the file on demand (0069)
 4. **VU1 microprograms on the GPU.** Games reuse a small set of transform
    and lighting microprograms (SDK samples, middleware). Translate the common
    ones to GXM vertex programs, keyed by microcode hash, so the Vita's GPU

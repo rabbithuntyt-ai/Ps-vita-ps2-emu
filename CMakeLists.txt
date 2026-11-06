@@ -210,6 +210,7 @@ else()
 
 	add_executable(ipu_tests tests/ipu_tests.cpp)
 	target_link_libraries(ipu_tests PRIVATE PlayCore)
+	target_include_directories(ipu_tests PRIVATE src/common)
 	add_test(NAME ipu_tests COMMAND ipu_tests)
 
 	# Native MPEG-2 decoder (movie HLE): decodes a .pss given as argument

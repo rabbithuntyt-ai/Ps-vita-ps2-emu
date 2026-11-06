@@ -38,6 +38,9 @@ through **Vita Lab** (`vitalab` CLI + plugins; see the Vita-Lingo repo, `lab/`).
   README table). log.txt stays empty on the Vita (the stdout redirect does
   not work); uncaught exceptions write `ux0:data/VitaPS2/crash.txt`.
 
+**Start with [RE4.md](RE4.md):** the current focus (30 fps in Resident Evil 4), with
+findings, tools and traps that apply to every game.
+
 ## Open problems (Silent Hill 2, SLUS-20228)
 
 1. **Intro movie is a slideshow** (measured on hardware: ~0.8 pictures/s,

@@ -1,5 +1,8 @@
 # Native (HLE) MPEG movie decoding: notes
 
+libmpeg 3.0 and Sofdec (Resident Evil 4): see [RE4.md](RE4.md). Those fixes have not
+been tried on Silent Hill 2 yet.
+
 Goal: movies at full speed on the Vita. Emulated, Silent Hill 2's opening
 movie costs ~1.3 ms of Vita CPU per macroblock (EE player code, IPU commands,
 VIF unpack, VU, GS): ~0.8 pictures/s against 30. No single stage dominates, so

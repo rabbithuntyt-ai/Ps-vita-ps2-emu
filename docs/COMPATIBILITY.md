@@ -68,7 +68,7 @@ far.
 | 43 | Tony Hawk's Pro Skater 3 | in game | - |
 | 44 | Devil May Cry 3: Dante's Awakening | playable | - |
 | 45 | Madden NFL 2002 | untested | - |
-| 46 | Resident Evil 4 | playable | - |
+| 46 | Resident Evil 4 | playable | title menu 53 fps, attract movies 12 pictures/s, gameplay not reached ([notes](RE4.md)) |
 | 47 | Dynasty Warriors 3 | playable | - |
 | 48 | The Simpsons: Road Rage | playable | - |
 | 49 | Ratchet: Deadlocked | intro | - |

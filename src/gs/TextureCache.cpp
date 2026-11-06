@@ -50,9 +50,38 @@ bool CTextureCache::IsStale(const CTexture* texture) const
 
 void CTextureCache::Reset(CTexture& texture)
 {
-	for(uint32 i = 0; i < texture.m_tileCount; i++)
+	// Only rows stored in pages written since the decode go. A texture is often
+	// larger than what changes (Resident Evil 4 updates 336 rows of a 512 row
+	// texture for each movie picture). Tiles holding other pages stay decoded.
+	const auto& surface = texture.m_surface;
+	uint32 pagesPerRow = texture.m_hasSurface ? std::max<uint32>(surface.pagesPerRow, 1) : 0;
+	uint32 pageRowHeight = texture.m_hasSurface ? (surface.phMask + 1) : 0;
+	uint32 tilesH = texture.m_tileCount / texture.m_tilesW;
+	bool byRows = texture.m_hasSurface && !surface.nibbles && (pageRowHeight >= 8) && ((pageRowHeight % 8) == 0) &&
+	              ((texture.m_key.tbp & ((1u << GS_SURFACE::PAGE_SHIFT) - 1)) == 0) &&
+	              ((texture.m_key.tw >> surface.pwShift) <= pagesPerRow) && (texture.m_pageCount == pagesPerRow * ((texture.m_key.th + surface.phMask) >> surface.phShift));
+	if(byRows)
 	{
-		texture.m_tileValid[i].store(0, std::memory_order_relaxed);
+		uint32 tileRowsPerPageRow = pageRowHeight / 8;
+		for(uint32 pageRow = 0; (pageRow * tileRowsPerPageRow) < tilesH; pageRow++)
+		{
+			bool written = false;
+			for(uint32 page = 0; !written && (page < pagesPerRow); page++)
+			{
+				written = m_pageStamps[(texture.m_firstPage + pageRow * pagesPerRow + page) & (PAGE_COUNT - 1)] > texture.m_decodeStamp;
+			}
+			if(!written) continue;
+			uint32 tileBegin = pageRow * tileRowsPerPageRow * texture.m_tilesW;
+			uint32 tileEnd = std::min(tileBegin + tileRowsPerPageRow * texture.m_tilesW, texture.m_tileCount);
+			for(uint32 i = tileBegin; i < tileEnd; i++) texture.m_tileValid[i].store(0, std::memory_order_relaxed);
+		}
+	}
+	else
+	{
+		for(uint32 i = 0; i < texture.m_tileCount; i++)
+		{
+			texture.m_tileValid[i].store(0, std::memory_order_relaxed);
+		}
 	}
 	texture.m_decodeStamp = m_stamp;
 	texture.m_generation++;
@@ -387,6 +416,20 @@ void CTextureCache::CTexture::DecodeAll()
 	uint32 tilesH = m_tileCount / m_tilesW;
 	for(uint32 ty = 0; ty < tilesH; ty++)
 	{
+		// A whole row of invalid tiles: one span per texel row, not one per tile.
+		bool wholeRow = m_hasSurface;
+		for(uint32 tx = 0; wholeRow && (tx < m_tilesW); tx++)
+		{
+			wholeRow = !m_tileValid[ty * m_tilesW + tx].load(std::memory_order_acquire);
+		}
+		if(wholeRow)
+		{
+			uint32 v1 = std::min((ty + 1) * 8, m_key.th);
+			for(uint32 v = ty * 8; v < v1; v++) DecodeSpan(m_texels.data() + v * m_key.tw, 0, m_key.tw, v);
+			for(uint32 tx = 0; tx < m_tilesW; tx++) m_tileValid[ty * m_tilesW + tx].store(1, std::memory_order_release);
+			m_cache->m_decodedTiles += m_tilesW;
+			continue;
+		}
 		for(uint32 tx = 0; tx < m_tilesW; tx++)
 		{
 			if(!m_tileValid[ty * m_tilesW + tx].load(std::memory_order_acquire)) DecodeTile(tx, ty);

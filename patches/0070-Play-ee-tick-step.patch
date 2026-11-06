@@ -1,0 +1,40 @@
+diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
+index 20398e2..868103c 100755
+--- a/Source/PS2VM.cpp
++++ b/Source/PS2VM.cpp
+@@ -231,6 +231,12 @@ void CPS2VM::SetEeFrequencyScale(uint32 numerator, uint32 denominator)
+ 	ReloadFrameRateLimit();
+ }
+ 
++void CPS2VM::SetEeTickStep(int tickStep)
++{
++	m_eeTickStep = tickStep;
++	ReloadFrameRateLimit();
++}
++
+ void CPS2VM::ReloadFrameRateLimit()
+ {
+ 	uint32 hRefreshRate = PS2::GS_NTSC_HSYNC_FREQ;
+diff --git a/Source/PS2VM.h b/Source/PS2VM.h
+index 26eab83..1b1a5e4 100755
+--- a/Source/PS2VM.h
++++ b/Source/PS2VM.h
+@@ -83,6 +83,9 @@ public:
+ 	void CDROM0_Reset();
+ 
+ 	void SetEeFrequencyScale(uint32, uint32);
++	//EE cycles between hand-overs to the other units (timers, DMA, IOP): longer
++	//slices cost less per emulated second but sync the processors less often.
++	void SetEeTickStep(int);
+ 	void ReloadFrameRateLimit();
+ 
+ 	//SPU2 mixing on its own thread. The VM queues blocks to render; the IOP
+@@ -197,7 +200,7 @@ private:
+ 	int64 m_spuUpdateTicksTotal = 0;
+ 	int m_eeExecutionTicks = 0;
+ 	int m_iopExecutionTicks = 0;
+-	static const int m_eeTickStep = 4800;
++	int m_eeTickStep = 4800;
+ 	int m_iopTickStep = 0;
+ 	CFrameLimiter m_frameLimiter;
+ 

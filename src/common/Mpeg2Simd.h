@@ -21,6 +21,92 @@ namespace Mpeg2Simd
 		return static_cast<uint8_t>((value < 0) ? 0 : ((value > 255) ? 255 : value));
 	}
 
+	// YCbCr -> RGBA32, the IPU's CSC command with both alpha thresholds at 0.
+	// The IPU's 16.16 contributions are added to Y << 16, which has no fraction
+	// bits: only their integer parts count, once R, G and B are clamped.
+	struct CSC_OFFSETS
+	{
+		int16_t r[256], b[256];
+		int32_t gCb[256], gCr[256]; //16.16: G adds both before dropping the fraction
+		CSC_OFFSETS()
+		{
+			for(int i = 0; i < 256; i++)
+			{
+				int c = i - 128;
+				r[i] = static_cast<int16_t>(static_cast<int32_t>(1.402 * 65536.0 * c) >> 16);
+				b[i] = static_cast<int16_t>(static_cast<int32_t>(1.772 * 65536.0 * c) >> 16);
+				gCb[i] = static_cast<int32_t>(-0.34414 * 65536.0 * c);
+				gCr[i] = static_cast<int32_t>(-0.71414 * 65536.0 * c);
+			}
+		}
+	};
+
+	inline const CSC_OFFSETS& GetCscOffsets()
+	{
+		static const CSC_OFFSETS offsets;
+		return offsets;
+	}
+
+	// One 16x16 macroblock, 'y' and the 8x8 chroma blocks with their strides, to
+	// 256 RGBA pixels (bytes R, G, B, A, row by row).
+	inline void ConvertMacroblockScalar(const uint8_t* y, uint32_t yStride, const uint8_t* cb, const uint8_t* cr, uint32_t cStride, uint8_t* out)
+	{
+		const auto& t = GetCscOffsets();
+		for(unsigned int j = 0; j < 16; j++)
+		{
+			const uint8_t* cbRow = cb + (j / 2) * cStride;
+			const uint8_t* crRow = cr + (j / 2) * cStride;
+			for(unsigned int i = 0; i < 16; i++, out += 4)
+			{
+				int value = y[i];
+				uint8_t u = cbRow[i / 2], v = crRow[i / 2];
+				out[0] = Clamp8(value + t.r[v]);
+				out[1] = Clamp8(value + ((t.gCb[u] + t.gCr[v]) >> 16));
+				out[2] = Clamp8(value + t.b[u]);
+				out[3] = 0x80;
+			}
+			y += yStride;
+		}
+	}
+
+	inline void ConvertMacroblock(const uint8_t* y, uint32_t yStride, const uint8_t* cb, const uint8_t* cr, uint32_t cStride, uint8_t* out)
+	{
+#if defined(__ARM_NEON)
+		if(!g_neon) return ConvertMacroblockScalar(y, yStride, cb, cr, cStride, out);
+		const auto& t = GetCscOffsets();
+		for(unsigned int j = 0; j < 8; j++)
+		{
+			int16_t rOffset[8], gOffset[8], bOffset[8];
+			for(unsigned int i = 0; i < 8; i++)
+			{
+				uint8_t u = cb[i], v = cr[i];
+				rOffset[i] = t.r[v];
+				gOffset[i] = static_cast<int16_t>((t.gCb[u] + t.gCr[v]) >> 16);
+				bOffset[i] = t.b[u];
+			}
+			int16x8x2_t r = vzipq_s16(vld1q_s16(rOffset), vld1q_s16(rOffset));
+			int16x8x2_t g = vzipq_s16(vld1q_s16(gOffset), vld1q_s16(gOffset));
+			int16x8x2_t b = vzipq_s16(vld1q_s16(bOffset), vld1q_s16(bOffset));
+			for(unsigned int row = 0; row < 2; row++, y += yStride, out += 64)
+			{
+				uint8x16_t luma = vld1q_u8(y);
+				int16x8_t low = vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(luma)));
+				int16x8_t high = vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(luma)));
+				uint8x16x4_t pixels;
+				pixels.val[0] = vcombine_u8(vqmovun_s16(vaddq_s16(low, r.val[0])), vqmovun_s16(vaddq_s16(high, r.val[1])));
+				pixels.val[1] = vcombine_u8(vqmovun_s16(vaddq_s16(low, g.val[0])), vqmovun_s16(vaddq_s16(high, g.val[1])));
+				pixels.val[2] = vcombine_u8(vqmovun_s16(vaddq_s16(low, b.val[0])), vqmovun_s16(vaddq_s16(high, b.val[1])));
+				pixels.val[3] = vdupq_n_u8(0x80);
+				vst4q_u8(out, pixels);
+			}
+			cb += cStride;
+			cr += cStride;
+		}
+#else
+		ConvertMacroblockScalar(y, yStride, cb, cr, cStride, out);
+#endif
+	}
+
 	// 8x8 IDCT output to the picture: intra blocks replace, others add (both
 	// saturated to 0-255).
 	inline void AddBlockScalar(uint8_t* base, uint32_t stride, const int16_t* block, bool intra)
@@ -138,6 +224,16 @@ namespace Mpeg2Simd
 			PredictRowScalar(expected, source[0], source[1], width, hx, hy, average);
 			PredictRow(row, source[0], source[1], width, hx, hy, average);
 			if(std::memcmp(expected, row, sizeof(row)) != 0) failures++;
+		}
+		for(unsigned int test = 0; test < iterations / 20; test++)
+		{
+			uint8_t luma[16 * 16], cb[8 * 8], cr[8 * 8], pixels[256 * 4], expected[256 * 4];
+			for(auto& value : luma) value = static_cast<uint8_t>(random());
+			for(auto& value : cb) value = static_cast<uint8_t>(random());
+			for(auto& value : cr) value = static_cast<uint8_t>(random());
+			ConvertMacroblockScalar(luma, 16, cb, cr, 8, expected);
+			ConvertMacroblock(luma, 16, cb, cr, 8, pixels);
+			if(std::memcmp(expected, pixels, sizeof(pixels)) != 0) failures++;
 		}
 		if(failures != 0) g_neon = false;
 		return failures;

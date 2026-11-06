@@ -112,6 +112,14 @@ int main()
 		CJitCache::ENTRY a, b, unused;
 		Check(cache.Find(Key(0x100000, 1), a) && SameEntry(a, Entry(0xAA, 3)), "first entry intact");
 		Check(cache.Find(Key(0x100040, 2), b) && SameEntry(b, Entry(0xBB, 0)), "second entry intact, flags too (first store wins)");
+		// Read from the file each time: a block dropped from the JIT's memory
+		// (full pool) comes back without being compiled again.
+		Check(cache.Find(Key(0x100000, 1), unused) && SameEntry(unused, Entry(0xAA, 3)), "first entry found again");
+		Check(cache.Find(Key(0x100040, 2), unused) && SameEntry(unused, Entry(0xBB, 0)), "second entry found again");
+		cache.Store(Key(0x180000, 9), Entry(0x77, 2));
+		Check(cache.Find(Key(0x180000, 9), unused) && SameEntry(unused, Entry(0x77, 2)), "entry stored in this session found");
+		cache.Store(Key(0x180040, 10), Entry(0x78, 1));
+		Check(cache.Find(Key(0x180040, 10), unused) && SameEntry(unused, Entry(0x78, 1)), "entry appended after a read found");
 		Check(!cache.Find(Key(0x100000, 2), unused), "different hash: miss");
 		Check(!cache.Find(Key(0x100080, 1), unused), "different address: miss");
 		auto hinted = Key(0x100000, 1);
@@ -123,7 +131,7 @@ int main()
 		// Appending after reopening keeps the old entries.
 		cache.Store(Key(0x200000, 3), Entry(0xDD, 2));
 		cache.Close();
-		Check(cache.Open(path, 42, ranges) && (cache.GetStats().loaded == 3), "appended entry loaded");
+		Check(cache.Open(path, 42, ranges) && (cache.GetStats().loaded == 5), "appended entries loaded");
 		cache.Close();
 	}
 
@@ -139,10 +147,12 @@ int main()
 		file = std::fopen(path, "wb");
 		std::fwrite(data.data(), 1, size - 10, file);
 		std::fclose(file);
-		Check(cache.Open(path, 42, ranges) && (cache.GetStats().loaded == 2), "cut-off record dropped, others kept");
+		Check(cache.Open(path, 42, ranges) && (cache.GetStats().loaded == 4), "cut-off record dropped, others kept");
 		cache.Store(Key(0x300000, 4), Entry(0xEE, 1));
 		cache.Close();
-		Check(cache.Open(path, 42, ranges) && (cache.GetStats().loaded == 3), "appends after the last complete record");
+		Check(cache.Open(path, 42, ranges) && (cache.GetStats().loaded == 5), "appends after the last complete record");
+		CJitCache::ENTRY appended;
+		Check(cache.Find(Key(0x300000, 4), appended) && SameEntry(appended, Entry(0xEE, 1)), "appended entry intact");
 		cache.Close();
 	}
 

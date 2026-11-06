@@ -1,0 +1,48 @@
+diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
+index 868103c..c7328e5 100644
+--- a/Source/PS2VM.cpp
++++ b/Source/PS2VM.cpp
+@@ -237,6 +237,12 @@ void CPS2VM::SetEeTickStep(int tickStep)
+ 	ReloadFrameRateLimit();
+ }
+ 
++void CPS2VM::SetIopRatePercent(int percent)
++{
++	m_iopRatePercent = percent;
++	ReloadFrameRateLimit();
++}
++
+ void CPS2VM::ReloadFrameRateLimit()
+ {
+ 	uint32 hRefreshRate = PS2::GS_NTSC_HSYNC_FREQ;
+@@ -252,7 +258,7 @@ void CPS2VM::ReloadFrameRateLimit()
+ 	//At 1x scale, IOP runs 8 times slower than EE
+ 	//64-bit: EE_CLOCK_FREQ * numerator overflows 32 bits for ratios like 100/100
+ 	uint32 eeFreqScaled = static_cast<uint32>(static_cast<uint64>(PS2::EE_CLOCK_FREQ) * m_eeFreqScaleNumerator / m_eeFreqScaleDenominator);
+-	m_iopTickStep = (m_eeTickStep / 8) * m_eeFreqScaleDenominator / m_eeFreqScaleNumerator;
++	m_iopTickStep = (m_eeTickStep / 8) * m_eeFreqScaleDenominator / m_eeFreqScaleNumerator * m_iopRatePercent / 100;
+ 
+ 	m_hblankTicksTotal = eeFreqScaled / hRefreshRate;
+ 
+diff --git a/Source/PS2VM.h b/Source/PS2VM.h
+index 1b1a5e4..71223b9 100644
+--- a/Source/PS2VM.h
++++ b/Source/PS2VM.h
+@@ -86,6 +86,9 @@ public:
+ 	//EE cycles between hand-overs to the other units (timers, DMA, IOP): longer
+ 	//slices cost less per emulated second but sync the processors less often.
+ 	void SetEeTickStep(int);
++	//IOP clock relative to its real speed, percent (it may then finish its work
++	//late: sound and disc drivers are forgiving, up to a point).
++	void SetIopRatePercent(int);
+ 	void ReloadFrameRateLimit();
+ 
+ 	//SPU2 mixing on its own thread. The VM queues blocks to render; the IOP
+@@ -201,6 +204,7 @@ private:
+ 	int m_eeExecutionTicks = 0;
+ 	int m_iopExecutionTicks = 0;
+ 	int m_eeTickStep = 4800;
++	int m_iopRatePercent = 100;
+ 	int m_iopTickStep = 0;
+ 	CFrameLimiter m_frameLimiter;
+ 

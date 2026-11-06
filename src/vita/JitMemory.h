@@ -9,6 +9,10 @@
 // down to minSize (1MB granularity). Returns false if nothing could be
 // allocated; VitaJit_GetDiagnostics() then explains why.
 bool VitaJit_Init(size_t minSize, size_t maxSize);
+// Treat the pool as this small when deciding to drop EE code (scripted tests of
+// the flush path; 0 = the whole pool).
+void VitaJit_SetSoftLimit(size_t bytes);
+unsigned int VitaJit_GetFlushCount();
 std::string VitaJit_GetDiagnostics();
 size_t VitaJit_GetUsedBytes();
 size_t VitaJit_GetCapacity();

@@ -7,12 +7,15 @@
 // - The IPU input sink takes every DMA4 byte (up to a buffer limit), so the
 //   game's ring buffer bookkeeping (it reads DMA4 progress) works unchanged.
 // - The stub loops on a syscall: the handler either writes the next picture
-//   (RAW8 macroblocks, as Silent Hill 2 asks libmpeg for) and returns 1, or
-//   asks the stub to call the
-//   game's "no data" callback (it reads the disc and queues more DMA, and lets
-//   emulated time pass) and to ask again.
+//   and returns 1, or asks the stub to call the game's "no data" callback (it
+//   reads the disc and queues more DMA, and lets emulated time pass) and to ask
+//   again.
+// - Pictures are what the patched entry point returns: RAW8 macroblocks (Silent
+//   Hill 2, libmpeg 2.2) or RGB32 ones (Resident Evil 4, libmpeg 3.0 under
+//   Sofdec), which libmpeg would send back through the IPU to convert.
 // - An IPU reset (between movies) drops the stream and the pictures.
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -33,6 +36,9 @@ public:
 	// decoderThreadInit runs first on the decoder thread (core affinity).
 	void Enable(uint8_t* eeRam, const char* logPath, std::function<void()> decoderThreadInit);
 	void Disable();
+	// Diagnostics: the first maxBytes the game feeds to the decoder, for replaying
+	// on a PC (tests/mpeg2_decoder_tests --es).
+	void SetInputDump(const char* path, size_t maxBytes);
 
 	struct STATS
 	{
@@ -46,7 +52,7 @@ public:
 private:
 	struct PICTURE
 	{
-		std::vector<uint8_t> raw8; //RAW8 macroblocks (256 Y, 64 Cb, 64 Cr); empty: end of the stream
+		std::vector<uint8_t> macroblocks; //RAW8 (256 Y, 64 Cb, 64 Cr) or RGB32 (256 pixels); empty: end of the stream
 		uint32_t width = 0, height = 0; //sequence size in pixels
 		bool last = false;         //the sequence ends with this picture
 	};
@@ -63,11 +69,17 @@ private:
 
 	uint8_t* m_ram = nullptr;
 	std::FILE* m_log = nullptr;
+	std::FILE* m_inputDump = nullptr;
+	size_t m_inputDumpLeft = 0;
+	uint32_t m_errorsLogged = 0;
 	std::function<void()> m_decoderThreadInit;
 
 	// EE thread: code patch and the current sceMpegGetPicture call.
-	uint32_t m_patchAddress = 0;
+	static constexpr uint32_t VARIANT_COUNT = 3;
+	uint32_t m_patchAddress[VARIANT_COUNT] = {};
 	uint32_t m_vblanks = 0;
+	uint32_t m_variant = 0;  //of the current call
+	uint32_t m_callerGp = 0; //restored after a libmpeg 3.0 callback, which runs with its own gp
 	uint32_t m_mp = 0, m_buffer = 0, m_mbCount = 0;
 	uint32_t m_frameIndex = 0;
 	uint32_t m_waitsThisPicture = 0;
@@ -78,11 +90,18 @@ private:
 	// Shared with the decoder thread
 	std::mutex m_mutex;
 	std::condition_variable m_wake;
+	std::condition_variable m_pictureReady; //a picture is queued, or the decoder ran out of input
+	bool m_decoderStarved = false;
+	// Demand-driven input (libmpeg 3.0 under Sofdec): Sofdec's chain loops over
+	// its whole ring, and only an input as slow as the IPU's keeps behind what
+	// Sofdec has written there. The decoder holds a small window of the stream.
+	bool m_inputOnDemand = false;
 	std::vector<uint8_t> m_incoming; //from DMA4, not taken by the decoder yet
 	size_t m_working = 0;            //bytes the decoder holds
 	std::deque<PICTURE> m_pictures;
 	uint32_t m_generation = 0;       //bumped by resets
 	bool m_quit = false;
+	std::atomic<bool> m_outputRgb{false}; //set before the input sink is: read by the decoder thread
 	STATS m_stats;
 	std::thread m_thread;
 };

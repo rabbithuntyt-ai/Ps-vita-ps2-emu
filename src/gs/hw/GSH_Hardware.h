@@ -147,6 +147,7 @@ public:
 	{
 		uint64 pumpUs = 0; //everything done in Pump (the rest is primitive setup)
 		uint64 stageUs[GPU_STAGE_COUNT] = {};
+		uint64 texDecodeUs = 0, texGlUs = 0;         //texture misses: decoding, glTexImage2D
 		uint64 uploadGlUs = 0, uploadPixels = 0;     //render target uploads: glTexSubImage2D only
 		uint64 downloadGlUs = 0, downloadPixels = 0; //render target downloads: glReadPixels only
 	};
@@ -168,7 +169,18 @@ protected:
 	void OnStateChanged() override;
 	void OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND, const CSoftwareRasterizer::VERTEX*) override;
 
+public:
+	// Diagnostics: the picture of the next flip goes to this file (PPM). Same
+	// thread as the GS. Independent of any screen capture tool.
+	void RequestFrameDump(const std::string& path)
+	{
+		m_frameDumpPath = path;
+	}
+
 private:
+	void WriteFrameDump(const uint32* pixels, uint32 width, uint32 height);
+	std::string m_frameDumpPath;
+
 	struct TARGET
 	{
 		uint32 fbp = 0;  //bytes
@@ -181,6 +193,10 @@ private:
 		// Rows [0, validRows) of the GPU copy are current; more rows are
 		// filled from GS memory when drawing, display or sampling needs them.
 		uint32 validRows = 0;
+		// Rows below this were drawn by the GPU at least once. A target can
+		// reach further (heights are rounded up) into memory that belongs to
+		// something else, such as textures kept right after the frame.
+		uint32 drawnRows = 0;
 		// Rows [staleBegin, staleEnd) inside them are older than GS memory (a
 		// transfer in another layout wrote there): filled from it like rows past
 		// validRows, or never if an opaque sprite covers them first. Not dirty.

@@ -446,6 +446,34 @@ namespace
 		gs.Present();
 	}
 
+	// Resident Evil 4's movies: a scissor taller than the picture makes the
+	// frame's target reach past the rows drawn, and the texture, in the frame's
+	// own layout, lies in the memory right after them. It must be sampled from
+	// GS memory, not from those undrawn rows of the target.
+	void SceneTextureAfterDrawnRows(IDriver& gs)
+	{
+		Setup(gs);
+		gs.Write(GS_REG_SCISSOR_1, Scissor(0, 639, 0, 511));
+		gs.Write(GS_REG_PRIM, CGSHandler::PRIM_SPRITE);
+		Sprite(gs, 0, 0, 640, 448, Rgbaq(0x10, 0x10, 0x30, 0x80));
+		const uint32 texPtr = 140 * 8192; //first page after 448 lines of a 640 wide CT32 frame
+		std::vector<uint32> image(640 * 128);
+		for(uint32 i = 0; i < image.size(); i++) image[i] = 0x80000000 | ((i % 640) & 0xFF) | (((i / 640) * 2) << 8) | 0x400000;
+		gs.Write(GS_REG_BITBLTBUF, (static_cast<uint64>(texPtr / 256) << 32) | (static_cast<uint64>(FBW) << 48) | (static_cast<uint64>(CGSHandler::PSMCT32) << 56));
+		gs.Write(GS_REG_TRXPOS, 0);
+		gs.Write(GS_REG_TRXREG, 640 | (128ULL << 32));
+		gs.Write(GS_REG_TRXDIR, 0);
+		gs.Transfer(reinterpret_cast<const uint8*>(image.data()), static_cast<uint32>(image.size() * 4));
+		gs.Write(GS_REG_TEX0_1, Tex0(texPtr, FBW, CGSHandler::PSMCT32, 8, 7, true, CGSHandler::TEX0_FUNCTION_DECAL));
+		gs.Write(GS_REG_TEX1_1, 0);
+		gs.Write(GS_REG_PRIM, CGSHandler::PRIM_SPRITE | (1 << 4) | (1 << 8));
+		gs.Write(GS_REG_UV, Uv(0, 0));
+		gs.Write(GS_REG_XYZ2, Xyz(OffX(100), OffX(100), 0));
+		gs.Write(GS_REG_UV, Uv(256 << 4, 128 << 4));
+		gs.Write(GS_REG_XYZ2, Xyz(OffX(356), OffX(228), 0));
+		gs.Present();
+	}
+
 	// Rendering, then a host->local upload over part of the frame, then more
 	// rendering on top: GPU and memory copies must stay coherent.
 	void SceneTransfer(IDriver& gs)
@@ -758,6 +786,7 @@ int main(int argc, char** argv)
 	    {"render target alpha", SceneRenderTargetAlpha, 0.5},
 	    {"transfer", SceneTransfer, 0.5},
 	    {"textures after frame", SceneTexturesAfterFrame, 0.5},
+	    {"texture after drawn rows", SceneTextureAfterDrawnRows, 0.5},
 	    {"display inside target", SceneDisplayInsideTarget, 0.5},
 	    {"display readback", SceneDisplayReadback, 0.5},
 	    {"texture in frame", [](IDriver& gs) { SceneTextureInFrame(gs, true); }, 0.5},

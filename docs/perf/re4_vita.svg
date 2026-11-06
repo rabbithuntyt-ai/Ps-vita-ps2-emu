@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 400" width="760" height="400" role="img" aria-labelledby="t d" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
+<title id="t">VitaPS2 on PS Vita hardware: Resident Evil 4 frame rates</title>
+<desc id="d">Frame rates measured on a PS Vita for each build. Latest (GPU round trips removed): Title screen 52.5 fps, Opening movie 24.5 fps. Full speed shows 30 fps.</desc>
+<style>
+svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;
+--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a}
+@media (prefers-color-scheme: dark){svg{--surface:#1a1a19;--ink1:#f0efec;--ink2:#c3c2b7;--muted:#898781;
+--grid:#2c2c2a;--axis:#383835;--s1:#3987e5;--s2:#d95926;--s3:#199e70}}
+.bg{fill:var(--surface)} .h{fill:var(--ink1)} .t2{fill:var(--ink2)} .m{fill:var(--muted)}
+.grid{stroke:var(--grid);stroke-width:1} .axis{stroke:var(--axis);stroke-width:1}
+.ref{stroke:var(--ink2);stroke-width:1.5;stroke-dasharray:4 4}
+.line{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.dot{stroke:var(--surface);stroke-width:2}
+</style>
+<rect class="bg" width="760" height="400" rx="8"/>
+<text class="t2" x="56" y="30" font-size="13">Resident Evil 4 on a real PS Vita (higher is better, 30 fps = full speed)</text>
+<text class="h" x="56" y="66" font-size="30" font-weight="600">53.4 fps</text>
+<text class="t2" x="184" y="66" font-size="13">best title screen so far · 5 measured builds</text>
+<line class="axis" x1="56" x2="590" y1="360.0" y2="360.0"/>
+<text class="m" x="48" y="364.0" font-size="11" text-anchor="end">0</text>
+<line class="grid" x1="56" x2="590" y1="319.3" y2="319.3"/>
+<text class="m" x="48" y="323.3" font-size="11" text-anchor="end">10</text>
+<line class="grid" x1="56" x2="590" y1="278.7" y2="278.7"/>
+<text class="m" x="48" y="282.7" font-size="11" text-anchor="end">20</text>
+<line class="grid" x1="56" x2="590" y1="238.0" y2="238.0"/>
+<text class="m" x="48" y="242.0" font-size="11" text-anchor="end">30</text>
+<line class="grid" x1="56" x2="590" y1="197.3" y2="197.3"/>
+<text class="m" x="48" y="201.3" font-size="11" text-anchor="end">40</text>
+<line class="grid" x1="56" x2="590" y1="156.7" y2="156.7"/>
+<text class="m" x="48" y="160.7" font-size="11" text-anchor="end">50</text>
+<line class="grid" x1="56" x2="590" y1="116.0" y2="116.0"/>
+<text class="m" x="48" y="120.0" font-size="11" text-anchor="end">60</text>
+<line class="ref" x1="56" x2="590" y1="238.0" y2="238.0"/>
+<text class="t2" x="598" y="242.0" font-size="11">full speed</text>
+<text class="m" x="56" y="380" font-size="11">2026-11-03</text>
+<text class="m" x="590" y="380" font-size="11" text-anchor="end">2026-11-05</text>
+<polyline class="line" style="stroke:var(--s1)" points="56.0,346.6 189.5,218.5 323.0,219.3 456.5,142.8 590.0,146.5"/>
+<circle class="dot" style="fill:var(--s1)" cx="590.0" cy="146.5" r="4.5"/>
+<polyline class="line" style="stroke:var(--s2)" points="56.0,336.0 189.5,336.0 323.0,295.7 456.5,264.0 590.0,260.4"/>
+<circle class="dot" style="fill:var(--s2)" cx="590.0" cy="260.4" r="4.5"/>
+<path d="M595.0 146.5 L601.0 146.5" style="stroke:var(--s1);stroke-width:1;fill:none"/>
+<text class="h" x="604" y="150.5" font-size="12" font-weight="600">52.5 fps</text>
+<path d="M595.0 260.4 L601.0 260.4" style="stroke:var(--s2);stroke-width:1;fill:none"/>
+<text class="h" x="604" y="264.4" font-size="12" font-weight="600">24.5 fps</text>
+<line x1="56" x2="70" y1="90" y2="90" style="stroke:var(--s1);stroke-width:3;stroke-linecap:round"/>
+<text class="t2" x="76" y="94" font-size="11">Title screen</text>
+<line x1="256" x2="270" y1="90" y2="90" style="stroke:var(--s2);stroke-width:3;stroke-linecap:round"/>
+<text class="t2" x="276" y="94" font-size="11">Opening movie</text>
+</svg>

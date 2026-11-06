@@ -179,6 +179,8 @@ namespace
 	struct GAME_SETTINGS
 	{
 		uint32_t eeCycleRate = 100; //0: auto
+		uint32_t eeSlice = 0;       //EE cycles per time slice, 0: the core's default
+		uint32_t iopRate = 100;     //IOP clock, percent of real speed
 		bool interlaced = false;
 		uint32_t frameSkip = 0;
 		bool showStats = true;
@@ -208,6 +210,8 @@ namespace
 	{
 		uint32_t value = static_cast<uint32_t>(std::strtoul(text.c_str(), nullptr, 10));
 		if(key == "ee_cycle_rate") settings.eeCycleRate = value;
+		else if(key == "ee_slice") settings.eeSlice = value;
+		else if(key == "iop_rate") settings.iopRate = value;
 		else if(key == "interlaced") settings.interlaced = value != 0;
 		else if(key == "frame_skip") settings.frameSkip = value;
 		else if(key == "show_stats") settings.showStats = value != 0;
@@ -579,10 +583,16 @@ namespace
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",ps2_%s", EmuProfile::GetSectionName(i));
 				std::fprintf(perfFile, ",spu_full_waits,spu_read_waits,ipu_idec,ipu_bdec,ipu_out_kb,ipu_stalls,audio_underruns,audio_tempo");
 				std::fprintf(perfFile, ",jit_blocks,jit_writes,jit_write_ms,jit_alloc_ms,jit_free_ranges,jit_translate_ms,jit_finish_ms,jit_install_ms,jit_guest_instr,jit_code_kb,jit_opt_ms,jit_alloc_regs_ms,jit_codegen_ms,jit_statements");
-				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb\n");
+				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms\n");
 			}
 		}
 		const uint64_t runStart = sceKernelGetProcessTimeWide();
+		constexpr const char* GS_DIAG_PATH = "ux0:data/VitaPS2/gsdiag.txt";
+		int gsDiagFlips = 0;
+		uint32_t gsDiagAfterSeconds = 0;
+		uint32_t eeHotAfterSeconds = 0; //autostart: EE hotspots (eehot.txt) sampled from this second on
+		uint32_t frameDumpEverySeconds = 0; //autostart: displayed picture to ux0:data/VitaPS2/frames/ every N seconds
+		uint64_t nextFrameDump = 0;
 		uint32_t perfSpuFull = 0, perfSpuRead = 0;
 		CIPU::STATS perfIpu;
 		VITAJIT_STATS perfJit = VitaJit_GetStats();
@@ -677,6 +687,8 @@ namespace
 				std::printf("jit cache %s: %s\n", cachePath.c_str(), opened ? JitCacheSetup::Describe().c_str() : "not available");
 			}
 			session->Boot(path);
+			if(settings.eeSlice != 0) session->GetVm()->SetEeTickStep(static_cast<int>(settings.eeSlice));
+			if(settings.iopRate != 100) session->GetVm()->SetIopRatePercent(static_cast<int>(settings.iopRate));
 			if(settings.movieHle)
 			{
 				// Native movie decoding (libmpeg 2.2 sceMpegGetPicture), decoder on
@@ -703,8 +715,39 @@ namespace
 						if(value == "1") mpegShadow.Enable(session->GetVm()->m_ee->m_ram, 0x1213080, "ux0:data/VitaPS2/mpegshadow.txt");
 						continue;
 					}
+					if(key == "ee_hot_after")
+					{
+						eeHotAfterSeconds = static_cast<uint32_t>(std::atoi(value.c_str()));
+						continue;
+					}
+					if(key == "frame_dump_every")
+					{
+						frameDumpEverySeconds = static_cast<uint32_t>(std::atoi(value.c_str()));
+						continue;
+					}
+					if(key == "mpeg_dump_mb")
+					{
+						mpegHle.SetInputDump("ux0:data/VitaPS2/mpegstream.bin", static_cast<size_t>(std::atoi(value.c_str())) * 1024 * 1024);
+						continue;
+					}
+					if(key == "jit_limit_kb")
+					{
+						VitaJit_SetSoftLimit(static_cast<size_t>(std::atoi(value.c_str())) * 1024);
+						continue;
+					}
+					if(key == "gs_diag_after")
+					{
+						// Seconds to wait before gs_diag starts logging (a scene late in a run).
+						gsDiagAfterSeconds = static_cast<uint32_t>(std::atoi(value.c_str()));
+						continue;
+					}
 					if(key != "gs_diag") continue;
-					if(auto gs = GetHardwareGs(session.get())) gs->SetDiagnosticsFile("ux0:data/VitaPS2/gsdiag.txt", std::atoi(value.c_str()));
+					gsDiagFlips = std::atoi(value.c_str());
+				}
+				if(gsDiagFlips && (gsDiagAfterSeconds == 0))
+				{
+					if(auto gs = GetHardwareGs(session.get())) gs->SetDiagnosticsFile(GS_DIAG_PATH, gsDiagFlips);
+					gsDiagFlips = 0;
 				}
 			}
 		}
@@ -743,6 +786,20 @@ namespace
 			uint32_t buttons = pad ? pad->Poll() : 0;
 			uint32_t pressed = buttons & ~previousButtons;
 			previousButtons = buttons;
+			if(frameDumpEverySeconds && (sceKernelGetProcessTimeWide() - runStart >= nextFrameDump))
+			{
+				uint64_t seconds = (sceKernelGetProcessTimeWide() - runStart) / 1000000ULL;
+				nextFrameDump = (seconds + frameDumpEverySeconds) * 1000000ULL;
+				sceIoMkdir("ux0:data/VitaPS2/frames", 0777);
+				char path[96];
+				std::snprintf(path, sizeof(path), "ux0:data/VitaPS2/frames/f_%04u.ppm", static_cast<unsigned int>(seconds));
+				if(auto gs = GetHardwareGs(session.get())) gs->RequestFrameDump(path);
+			}
+			if(gsDiagFlips && (sceKernelGetProcessTimeWide() - runStart >= gsDiagAfterSeconds * 1000000ULL))
+			{
+				if(auto gs = GetHardwareGs(session.get())) gs->SetDiagnosticsFile(GS_DIAG_PATH, gsDiagFlips);
+				gsDiagFlips = 0;
+			}
 			if(autostart && autostart->seconds && (sceKernelGetProcessTimeWide() - runStart >= autostart->seconds * 1000000ULL))
 			{
 				std::printf("autostart: %u seconds done\n", autostart->seconds);
@@ -935,6 +992,11 @@ namespace
 						perfSpuRead = read;
 						// EE hotspots of MPEG playback: from the first second with
 						// BDEC activity on, written every 10 seconds.
+						if(!eeHotMovie && (eeHotAfterSeconds != 0) && (now - runStart >= eeHotAfterSeconds * 1000000ULL))
+						{
+							eeHotMovie = true;
+							session->ResetEeHotspots();
+						}
 						if(!eeHotMovie && (ipu.commands[2] != perfIpu.commands[2]))
 						{
 							eeHotMovie = true;
@@ -1008,7 +1070,15 @@ namespace
 						for(const auto& usage : threadUsage) std::fprintf(perfFile, "%s=%.1f;", usage.name.c_str(), usage.cpuPercent);
 						// Heap in use and free (newlib heap of _newlib_heap_size_user).
 						struct mallinfo heap = mallinfo();
-						std::fprintf(perfFile, ",%.1f,%.1f", heap.uordblks / 1048576.0, heap.fordblks / 1048576.0);
+						std::fprintf(perfFile, ",%.1f,%.1f,%u,%u,%u", heap.uordblks / 1048576.0, heap.fordblks / 1048576.0,
+						             static_cast<unsigned int>(VitaJit_GetUsedBytes() / 1024), VitaJit_GetFlushCount(), mpegHle.GetStats().pictures);
+						{
+							static uint64_t lastDecodeUs = 0, lastGlUs = 0;
+							const auto& gpuTimes = CGSH_Hardware::GetTimes();
+							std::fprintf(perfFile, ",%.1f,%.1f", (gpuTimes.texDecodeUs - lastDecodeUs) / 1000.0, (gpuTimes.texGlUs - lastGlUs) / 1000.0);
+							lastDecodeUs = gpuTimes.texDecodeUs;
+							lastGlUs = gpuTimes.texGlUs;
+						}
 						std::fprintf(perfFile, "\n");
 						std::fflush(perfFile);
 					}

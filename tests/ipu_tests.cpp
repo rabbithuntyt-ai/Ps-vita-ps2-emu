@@ -6,8 +6,10 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <random>
 #include "ee/IPU.h"
+#include "Mpeg2Simd.h"
 
 namespace
 {
@@ -37,8 +39,29 @@ namespace
 	}
 }
 
+// The movie HLE's colour conversion must give what the IPU's CSC command gives.
+static unsigned int CheckNativeConversion()
+{
+	std::mt19937 random(99);
+	unsigned int failures = 0;
+	for(unsigned int test = 0; test < 2000; test++)
+	{
+		uint8 block[0x180];
+		for(auto& value : block) value = static_cast<uint8>(random());
+		uint32 expected[256], pixels[256];
+		CIPU::ConvertMacroblockToRgba32(block, expected, 0, 0);
+		Mpeg2Simd::ConvertMacroblockScalar(block, 16, block + 0x100, block + 0x140, 8, reinterpret_cast<uint8*>(pixels));
+		if(std::memcmp(expected, pixels, sizeof(pixels)) != 0) failures++;
+		Mpeg2Simd::ConvertMacroblock(block, 16, block + 0x100, block + 0x140, 8, reinterpret_cast<uint8*>(pixels));
+		if(std::memcmp(expected, pixels, sizeof(pixels)) != 0) failures++;
+	}
+	std::printf("native CSC against the IPU: %u mismatches\n", failures);
+	return failures;
+}
+
 int main()
 {
+	if(CheckNativeConversion() != 0) return 1;
 	uint64 channelMismatches = 0, alphaMismatches = 0, pixels = 0;
 	uint8 block[0x180];
 	uint32 result[0x100];

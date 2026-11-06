@@ -4,7 +4,7 @@
 # build, against the 30 fps the game shows at full speed. Same look as
 # tools/perf_gap.py's chart (light and dark from the viewer's color scheme).
 #
-# Usage: realworld_svg.py [docs/perf/vita_realworld.csv] [docs/perf/vita_realworld.svg]
+# Usage: realworld_svg.py [docs/perf/vita_realworld.csv] [docs/perf/vita_realworld.svg] [game name]
 
 import csv
 import sys
@@ -14,6 +14,7 @@ SERIES = [
     ('movie_out_fps', 'Opening movie', 2),
 ]
 TARGET = 30.0
+GAME = sys.argv[3] if len(sys.argv) > 3 else 'Silent Hill 2'
 
 
 def number(value):
@@ -45,7 +46,7 @@ def render(rows, path):
     out = []
     out.append('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" width="%d" height="%d" role="img" '
                'aria-labelledby="t d" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">' % (W, H, W, H))
-    out.append('<title id="t">VitaPS2 on PS Vita hardware: Silent Hill 2 frame rates</title>')
+    out.append('<title id="t">VitaPS2 on PS Vita hardware: ' + GAME + ' frame rates</title>')
     out.append('<desc id="d">Frame rates measured on a PS Vita for each build. Latest (%s): %s. Full speed shows 30 fps.</desc>' %
                (latest['label'], ', '.join('%s %s fps' % (t, latest.get(k, '-')) for k, t, _ in SERIES)))
     out.append('''<style>
@@ -60,7 +61,7 @@ svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0
 .dot{stroke:var(--surface);stroke-width:2}
 </style>''')
     out.append('<rect class="bg" width="%d" height="%d" rx="8"/>' % (W, H))
-    out.append('<text class="t2" x="%d" y="30" font-size="13">Silent Hill 2 on a real PS Vita (higher is better, 30 fps = full speed)</text>' % left)
+    out.append('<text class="t2" x="%d" y="30" font-size="13">%s on a real PS Vita (higher is better, 30 fps = full speed)</text>' % (left, GAME))
     out.append('<text class="h" x="%d" y="66" font-size="30" font-weight="600">%.1f fps</text>' % (left, best_title))
     out.append('<text class="t2" x="%d" y="66" font-size="13">best title screen so far · %d measured builds</text>' % (left + 128, n))
     v = 0.0

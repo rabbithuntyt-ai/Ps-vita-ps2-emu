@@ -4,7 +4,9 @@
 // decoding speed. Without an argument (ctest) there is nothing to decode.
 // --yuv writes every picture (output order) as planar 4:2:0 to OUT, to compare
 // with a reference decoder (ffmpeg -f rawvideo -pix_fmt yuv420p); --ipu
-// selects the emulated IPU's quantisation.
+// selects the emulated IPU's quantisation. --es: the file is an elementary
+// stream (mpeg_dump_mb on the Vita), and errors skip ahead like the movie HLE;
+// --size WxH supplies the sequence size of a stream without a sequence header.
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -86,8 +88,12 @@ int main(int argc, char** argv)
 	unsigned int maxPictures = ((argc > 2) && (argv[2][0] != '-')) ? static_cast<unsigned int>(std::atoi(argv[2])) : 300;
 	FILE* yuv = nullptr;
 	bool ipu = false;
+	bool rawStream = false;
+	uint32_t forcedWidth = 0, forcedHeight = 0;
 	for(int i = 2; i < argc; i++)
 	{
+		if(!std::strcmp(argv[i], "--es")) rawStream = true;
+		if(!std::strcmp(argv[i], "--size") && (i + 1 < argc)) std::sscanf(argv[i + 1], "%ux%u", &forcedWidth, &forcedHeight);
 		if(!std::strcmp(argv[i], "--yuv") && (i + 1 < argc)) yuv = std::fopen(argv[++i], "wb");
 		else if(!std::strcmp(argv[i], "--ipu")) ipu = true;
 	}
@@ -101,8 +107,16 @@ int main(int argc, char** argv)
 		ps.resize(read);
 		std::fclose(file);
 	}
-	auto es = DemuxVideo(ps);
-	std::printf("program stream %zu bytes, video %zu bytes\n", ps.size(), es.size());
+	auto es = rawStream ? ps : DemuxVideo(ps);
+	std::printf("input %zu bytes, video %zu bytes\n", ps.size(), es.size());
+	if(forcedWidth != 0)
+	{
+		// Sequence header + extension (MPEG-2 main profile, 4:2:0, progressive) in front.
+		const uint8_t header[] = {0x00, 0x00, 0x01, 0xB3, static_cast<uint8_t>(forcedWidth >> 4), static_cast<uint8_t>((forcedWidth << 4) | (forcedHeight >> 8)), static_cast<uint8_t>(forcedHeight), 0x14, 0xFF, 0xFF, 0xE0, 0x00,
+		                          0x00, 0x00, 0x01, 0xB5, 0x14, 0x8A, 0x00, 0x01, 0x00, 0x00};
+		es.insert(es.begin(), std::begin(header), std::end(header));
+	}
+	unsigned int errors = 0;
 
 	CMpeg2Decoder decoder;
 	decoder.SetIpuCompatibleQuantisation(ipu);
@@ -135,11 +149,18 @@ int main(int argc, char** argv)
 			pictures++;
 			continue;
 		}
+		if(rawStream && (result == CMpeg2Decoder::RESULT_ERROR) && (position + 4 < es.size()))
+		{
+			if(errors++ < 12) std::printf("error at byte %zu after %u pictures (next bytes %02X %02X %02X %02X)\n", position, pictures, es[position], es[position + 1], es[position + 2], es[position + 3]);
+			position += 4;
+			continue;
+		}
 		const char* names[] = {"picture", "need data", "end", "unsupported", "error"};
 		std::printf("stopped: %s at byte %zu\n", names[result], position);
 		if((result != CMpeg2Decoder::RESULT_END) || (consumed == 0)) break;
 	}
 	double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+	std::printf("%u errors\n", errors);
 	std::printf("%u pictures (%s...) in %.2f s: %.1f pictures/s\n", pictures, order.c_str(), seconds, pictures / seconds);
 	if(yuv) std::fclose(yuv);
 	return (pictures != 0) ? 0 : 1;

@@ -494,6 +494,7 @@ void CGSH_Hardware::ShrinkTarget(TARGET& target, uint32 rows)
 	glDeleteTextures(1, &oldColor);
 	glDeleteRenderbuffers(1, &oldDepth);
 	target.validRows = std::min(target.validRows, rows);
+	target.drawnRows = std::min(target.drawnRows, rows);
 	target.staleEnd = std::min(target.staleEnd, rows);
 	if(target.staleBegin >= target.staleEnd) target.staleBegin = target.staleEnd = 0;
 	m_stats.targetsShrunk++;
@@ -580,6 +581,12 @@ void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 wi
 	if((width == 0) || (height == 0)) return;
 	FlushBatch();
 
+	if(m_diagFile && (m_diagUploads.size() < 3000))
+	{
+		char text[64];
+		std::snprintf(text, sizeof(text), " U%X:%u,%u+%ux%u", target.fbp, x0, y0, width, height);
+		m_diagUploads += text;
+	}
 	GS_SURFACE surface;
 	surface.Init(target.psm, target.fbp, target.fbw);
 	bool is16 = IsPsm16(target.psm);
@@ -629,6 +636,7 @@ void CGSH_Hardware::MarkTargetDirty(TARGET& target, int32 x0, int32 y0, int32 x1
 	x1 = std::min<int32>({x1, s.scax1 + 1, static_cast<int32>(target.width)});
 	y1 = std::min<int32>({y1, s.scay1 + 1, static_cast<int32>(target.validRows)});
 	if((x0 >= x1) || (y0 >= y1)) return;
+	target.drawnRows = std::max<uint32>(target.drawnRows, y1);
 	if(!target.gpuDirty)
 	{
 		target.gpuDirty = true;
@@ -663,7 +671,7 @@ void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEn
 	FlushBatch();
 	uint32 x0 = target.dirtyX0;
 	uint32 width = target.dirtyX1 - x0, height = y1 - y0;
-	if(m_diagFile && (m_diagUploads.size() < 600))
+	if(m_diagFile && (m_diagUploads.size() < 3000))
 	{
 		char text[64];
 		std::snprintf(text, sizeof(text), " D%X:%u,%u+%ux%u(%u-%u)", target.fbp, x0, y0, width, height, rowBegin, rowEnd);
@@ -804,6 +812,13 @@ void CGSH_Hardware::BeginTransferWrite()
 	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
 	auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
 	auto [start, size] = GsTransfer::GetDstRange(bltBuf, trxReg, trxPos);
+	if(m_diagFile && (m_diagUploads.size() < 3000) && !((trxReg.nRRW == 16) && (trxReg.nRRH == 336)))
+	{
+		char text[80];
+		std::snprintf(text, sizeof(text), " B%X/%u/%X@%u,%u+%ux%u[%X+%X]", bltBuf.GetDstPtr(), static_cast<uint32>(bltBuf.nDstWidth), static_cast<uint32>(bltBuf.nDstPsm),
+		              static_cast<uint32>(trxPos.nDSAX), static_cast<uint32>(trxPos.nDSAY), static_cast<uint32>(trxReg.nRRW), static_cast<uint32>(trxReg.nRRH), start, size);
+		m_diagUploads += text;
+	}
 	// Keep pixels the GPU rendered around the transferred rectangle. A
 	// rectangle spanning whole pages of its buffer (textures uploaded into
 	// framebuffer memory, every frame in some games) overwrites its whole
@@ -844,7 +859,7 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 		return;
 	}
 	m_textureCache.MarkBytesWritten(start, size);
-	if(m_diagFile && (m_diagUploads.size() < 600))
+	if(m_diagFile && (m_diagUploads.size() < 3000) && !((trxReg.nRRW == 16) && (trxReg.nRRH == 336)))
 	{
 		char text[64];
 		std::snprintf(text, sizeof(text), " %X/%u/%X@%u,%u+%ux%u", bltBuf.GetDstPtr(), static_cast<uint32>(bltBuf.nDstWidth),
@@ -1002,7 +1017,18 @@ void CGSH_Hardware::BindTexture()
 		uint32 offsetX = (page % pagesPerRow) << surface.pwShift;
 		uint32 offsetY = (page / pagesPerRow) << surface.phShift;
 		if(offsetY >= target->height) continue;
-		EnsureValidRows(*target, offsetY + s.th);
+		// Past everything drawn in this target: the texture only lies inside it
+		// because the target's height was rounded up (Resident Evil 4 uploads
+		// its movie pictures right after a 448 row back buffer whose target has
+		// 512 rows). It is not a render target: decode it from GS memory.
+		// (drawnRows can be 2 too high: dirty rectangles of primitives are padded.)
+		if((offsetY != 0) && (offsetY + 2 >= target->drawnRows)) continue;
+		// TH is a power of 2 and often more than the buffer has (448 rows sampled
+		// as 512). Rows past what was drawn are other data, and filling them in
+		// would stall the GPU on every frame for rows no draw reads.
+		uint32 sampledRows = offsetY + s.th;
+		if(target->drawnRows > 2) sampledRows = std::min(sampledRows, std::max(target->drawnRows - 2, offsetY + 1));
+		EnsureValidRows(*target, sampledRows);
 
 		GLuint texture = target->colorTexture;
 		if(target.get() == m_currentTarget)
@@ -1026,6 +1052,15 @@ void CGSH_Hardware::BindTexture()
 			texture = m_feedbackTexture;
 		}
 		glBindTexture(GL_TEXTURE_2D, texture);
+		if(m_diagFile && (m_diagUploads.size() < 3000))
+		{
+			char text[64];
+			if(m_diagUploads.find(" T") == std::string::npos)
+			{
+				std::snprintf(text, sizeof(text), " T%X/%u/%X:%ux%u@%X", s.tbp, s.tbw, s.tpsm, s.tw, s.th, target->fbp);
+				m_diagUploads += text;
+			}
+		}
 		m_textureAlphaDoubled = true;
 		m_texScaleS = static_cast<float>(s.tw) / static_cast<float>(target->width);
 		m_texScaleT = static_cast<float>(s.th) / static_cast<float>(target->height);
@@ -1052,6 +1087,12 @@ void CGSH_Hardware::BindTexture()
 
 	uint32 firstPage = 0, pageCount = 0;
 	CTextureCache::GetPageRange(key, firstPage, pageCount);
+	if(m_diagFile && (m_diagUploads.size() < 3000))
+	{
+		char text[64];
+		std::snprintf(text, sizeof(text), " M%X/%u/%X:%ux%u", s.tbp, s.tbw, s.tpsm, s.tw, s.th);
+		if(m_diagUploads.find(text) == std::string::npos) m_diagUploads += text;
+	}
 	DownloadTargetsOverlapping(firstPage * 8192, pageCount * 8192);
 
 	auto texture = m_textureCache.Get(key);
@@ -1062,7 +1103,9 @@ void CGSH_Hardware::BindTexture()
 	auto& glTexture = m_glTextures[{texture->GetUniqueId(), regionKey}];
 	if(!glTexture.texture || (glTexture.generation != texture->GetGeneration()))
 	{
+		uint64 decodeStart = NowUs();
 		texture->DecodeAll();
+		GetTimes().texDecodeUs += NowUs() - decodeStart;
 		if(!glTexture.texture) glGenTextures(1, &glTexture.texture);
 		glBindTexture(GL_TEXTURE_2D, glTexture.texture);
 		const void* texels = texture->Texels();
@@ -1078,7 +1121,9 @@ void CGSH_Hardware::BindTexture()
 		}
 		// Always new storage: draws queued earlier in the frame may still
 		// sample the previous contents.
+		uint64 glStart = NowUs();
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, regionU.size, regionV.size, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+		GetTimes().texGlUs += NowUs() - glStart;
 		glTexture.generation = texture->GetGeneration();
 		m_stats.textureUploads++;
 	}
@@ -1819,6 +1864,27 @@ void CGSH_Hardware::WriteFlipDiagnostics(const DISPLAY_INFO& dispInfo)
 	m_diagDropped.clear();
 }
 
+void CGSH_Hardware::WriteFrameDump(const uint32* pixels, uint32 width, uint32 height)
+{
+	std::FILE* file = std::fopen(m_frameDumpPath.c_str(), "wb");
+	m_frameDumpPath.clear();
+	if(!file) return;
+	std::fprintf(file, "P6\n%u %u\n255\n", width, height);
+	std::vector<uint8> row(width * 3);
+	for(uint32 y = 0; y < height; y++)
+	{
+		for(uint32 x = 0; x < width; x++)
+		{
+			uint32 pixel = pixels[y * width + x];
+			row[x * 3 + 0] = static_cast<uint8>(pixel);
+			row[x * 3 + 1] = static_cast<uint8>(pixel >> 8);
+			row[x * 3 + 2] = static_cast<uint8>(pixel >> 16);
+		}
+		std::fwrite(row.data(), 1, row.size(), file);
+	}
+	std::fclose(file);
+}
+
 void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 {
 	CStageTimer stageTimer(GPU_STAGE_DISPLAY);
@@ -1859,6 +1925,13 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 			m_display.y = y;
 			m_display.width = std::min(width, target->width - std::min(x, target->width));
 			m_display.height = std::min(height, target->height - std::min(y, target->height));
+			if(!m_frameDumpPath.empty())
+			{
+				std::vector<uint32> dump(m_display.width * m_display.height);
+				glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
+				glReadPixels(m_display.x, m_display.y, m_display.width, m_display.height, GL_RGBA, GL_UNSIGNED_BYTE, dump.data());
+				WriteFrameDump(dump.data(), m_display.width, m_display.height);
+			}
 			if(m_options.readbackFrames && m_options.frameSink)
 			{
 				m_frameBuffer.resize(m_display.width * m_display.height);
@@ -1904,6 +1977,7 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 					for(uint32 x = 0; x < width; x++)
 						m_frameBuffer[x + y * width] = CSoftwareRasterizer::ReadColor32(m_pRAM, layer.psm, layer.bufPtr, bufWidth, layer.offsetX + x, layer.offsetY + y) | 0xFF000000;
 			}
+			if(!m_frameDumpPath.empty()) WriteFrameDump(m_frameBuffer.data(), width, height);
 			glBindTexture(GL_TEXTURE_2D, m_displayUploadTexture);
 			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, m_frameBuffer.data());
 			m_display.texture = m_displayUploadTexture;

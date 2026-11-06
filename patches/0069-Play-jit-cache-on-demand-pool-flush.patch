@@ -1,0 +1,315 @@
+diff --git a/Source/JitCache.cpp b/Source/JitCache.cpp
+index cbb72cc..128c68a 100755
+--- a/Source/JitCache.cpp
++++ b/Source/JitCache.cpp
+@@ -81,11 +81,10 @@ bool CJitCache::Open(const std::string& path, uint64 fingerprint, const std::vec
+ 	m_fingerprint = fingerprint;
+ 	m_ranges = ranges;
+ 	m_maxFileSize = maxFileSize;
+-	m_entries.clear();
+-	m_known.clear();
++	m_index.clear();
+ 	m_stats = STATS();
+-	ReadEntries();
+-	if(m_entries.empty() && (m_fileSize == 0))
++	ReadIndex();
++	if(m_index.empty() && (m_fileSize == 0))
+ 	{
+ 		// New or discarded file.
+ 		m_file = std::fopen(m_path.c_str(), "wb");
+@@ -103,6 +102,14 @@ bool CJitCache::Open(const std::string& path, uint64 fingerprint, const std::vec
+ 		// Append after the last complete record (drops a cut-off one).
+ 		std::fseek(m_file, static_cast<long>(m_fileSize), SEEK_SET);
+ 	}
++	m_readFile = std::fopen(m_path.c_str(), "rb");
++	if(m_readFile)
++	{
++		// Blocks tend to come back in the order they were compiled in: one read
++		// from the memory card serves many of them.
++		m_readBuffer.resize(64 * 1024);
++		std::setvbuf(m_readFile, m_readBuffer.data(), _IOFBF, m_readBuffer.size());
++	}
+ 	return true;
+ }
+ 
+@@ -114,9 +121,12 @@ void CJitCache::Close()
+ 		std::fflush(m_file);
+ 		std::fclose(m_file);
+ 	}
++	if(m_readFile) std::fclose(m_readFile);
+ 	m_file = nullptr;
+-	m_entries.clear();
+-	m_known.clear();
++	m_readFile = nullptr;
++	m_index.clear();
++	m_record = std::vector<uint8>();
++	m_readBuffer = std::vector<char>();
+ 	m_unflushed = 0;
+ }
+ 
+@@ -131,87 +141,106 @@ bool CJitCache::WriteHeader()
+ 	return std::fwrite(header.data(), 1, header.size(), m_file) == header.size();
+ }
+ 
+-void CJitCache::ReadEntries()
++void CJitCache::ReadIndex()
+ {
+ 	m_fileSize = 0;
+ 	std::FILE* file = std::fopen(m_path.c_str(), "rb");
+ 	if(!file) return;
++	std::vector<char> buffer(64 * 1024);
++	std::setvbuf(file, buffer.data(), _IOFBF, buffer.size());
+ 	std::fseek(file, 0, SEEK_END);
+ 	long length = std::ftell(file);
+ 	std::fseek(file, 0, SEEK_SET);
+-	std::vector<uint8> data((length > 0) ? static_cast<size_t>(length) : 0);
+-	bool read = data.empty() || (std::fread(data.data(), 1, data.size(), file) == data.size());
+-	std::fclose(file);
+-	if(!read) return;
+ 
+-	READER reader{data.data(), data.size()};
++	auto read = [&](void* out, size_t count) { return std::fread(out, 1, count, file) == count; };
+ 	char magic[8];
+ 	uint64 fingerprint = 0;
+ 	uint32 rangeCount = 0;
+-	if(!reader.Read(magic, 8) || std::memcmp(magic, MAGIC, 8) || !reader.Read(&fingerprint, 8) || (fingerprint != m_fingerprint) ||
+-	   !reader.Read32(rangeCount) || (rangeCount != m_ranges.size()))
++	bool valid = read(magic, 8) && !std::memcmp(magic, MAGIC, 8) && read(&fingerprint, 8) && (fingerprint == m_fingerprint) &&
++	             read(&rangeCount, 4) && (rangeCount == m_ranges.size());
++	for(size_t i = 0; valid && (i < m_ranges.size()); i++)
+ 	{
+-		return; //another build or format: start over
++		uint32 size = 0;
++		valid = read(&size, 4) && (size == m_ranges[i].size);
+ 	}
+-	for(const auto& range : m_ranges)
++	if(!valid)
+ 	{
+-		uint32 size = 0;
+-		if(!reader.Read32(size) || (size != range.size)) return; //segments changed: another build
++		std::fclose(file); //another build or format: start over
++		return;
+ 	}
+-	m_fileSize = reader.position;
++	size_t position = 8 + 8 + 4 + (m_ranges.size() * 4);
++	m_fileSize = position;
+ 	while(true)
+ 	{
+ 		uint32 recordSize = 0;
+-		size_t recordStart = reader.position;
+-		if(!reader.Read32(recordSize) || (reader.position + recordSize > reader.size)) break;
+-		READER record{data.data() + reader.position, recordSize};
+ 		KEY key;
+-		ENTRY entry;
+-		uint32 codeSize = 0, relocCount = 0;
+-		bool ok = record.Read(&key, sizeof(key)) && record.Read32(entry.linkEntryOffset) && record.Read32(entry.trampolineOffset[0]) &&
+-		          record.Read32(entry.trampolineOffset[1]) && record.Read32(entry.flags) && record.Read32(codeSize) && (codeSize <= recordSize);
+-		if(ok)
+-		{
+-			entry.code.resize(codeSize);
+-			ok = record.Read(entry.code.data(), codeSize) && record.Read32(relocCount) && (relocCount * RELOC_SIZE <= recordSize);
+-		}
+-		for(uint32 i = 0; ok && (i < relocCount); i++)
+-		{
+-			RELOC reloc;
+-			uint8 type = 0;
+-			ok = record.Read32(reloc.offset) && record.Read(&type, 1) && record.Read(&reloc.range, 1) && record.Read32(reloc.rangeOffset) &&
+-			     (type <= RELOC_THUNK) && (reloc.range < m_ranges.size()) && (reloc.offset + 8 <= codeSize);
+-			reloc.type = static_cast<RELOC_TYPE>(type);
+-			entry.relocs.push_back(reloc);
+-		}
+-		if(!ok) break;
+-		reader.position += recordSize;
+-		m_fileSize = reader.position;
+-		m_entries[key] = std::move(entry);
+-		(void)recordStart;
++		if(!read(&recordSize, 4) || (recordSize < sizeof(KEY)) || (position + 4 + recordSize > static_cast<size_t>(length))) break;
++		if(!read(&key, sizeof(key))) break;
++		LOCATION location;
++		location.offset = static_cast<uint32>(position + 4);
++		location.size = recordSize;
++		m_index[key] = location;
++		position += 4 + recordSize;
++		m_fileSize = position;
++		if(std::fseek(file, static_cast<long>(position), SEEK_SET) != 0) break;
+ 	}
+-	m_stats.loaded = static_cast<uint32>(m_entries.size());
++	std::fclose(file);
++	m_stats.loaded = static_cast<uint32>(m_index.size());
++}
++
++bool CJitCache::ParseRecord(const uint8* data, size_t size, KEY& key, ENTRY& entry) const
++{
++	READER record{data, size};
++	uint32 codeSize = 0, relocCount = 0;
++	bool ok = record.Read(&key, sizeof(key)) && record.Read32(entry.linkEntryOffset) && record.Read32(entry.trampolineOffset[0]) &&
++	          record.Read32(entry.trampolineOffset[1]) && record.Read32(entry.flags) && record.Read32(codeSize) && (codeSize <= size);
++	if(ok)
++	{
++		entry.code.resize(codeSize);
++		ok = record.Read(entry.code.data(), codeSize) && record.Read32(relocCount) && (relocCount * RELOC_SIZE <= size);
++	}
++	entry.relocs.clear();
++	for(uint32 i = 0; ok && (i < relocCount); i++)
++	{
++		RELOC reloc;
++		uint8 type = 0;
++		ok = record.Read32(reloc.offset) && record.Read(&type, 1) && record.Read(&reloc.range, 1) && record.Read32(reloc.rangeOffset) &&
++		     (type <= RELOC_THUNK) && (reloc.range < m_ranges.size()) && (reloc.offset + 8 <= codeSize);
++		reloc.type = static_cast<RELOC_TYPE>(type);
++		entry.relocs.push_back(reloc);
++	}
++	return ok;
+ }
+ 
+ bool CJitCache::Find(const KEY& key, ENTRY& entry)
+ {
+ 	std::lock_guard<std::mutex> lock(m_mutex);
+-	if(!m_file) return false;
+-	auto iterator = m_entries.find(key);
+-	if(iterator == m_entries.end()) return false;
+-	// Taken out: the block's code now lives in the JIT's memory (a second copy
+-	// held here cost the Vita's heap ~10 MB per game). Its key stays known so
+-	// that a recompile does not append it to the file again.
+-	entry = std::move(iterator->second);
+-	m_entries.erase(iterator);
+-	m_known.insert(key);
++	if(!m_file || !m_readFile) return false;
++	auto iterator = m_index.find(key);
++	if(iterator == m_index.end()) return false;
++	if(m_unflushed != 0)
++	{
++		std::fflush(m_file); //the record may have been stored in this session
++		m_unflushed = 0;
++	}
++	m_record.resize(iterator->second.size);
++	KEY storedKey;
++	bool ok = (std::fseek(m_readFile, static_cast<long>(iterator->second.offset), SEEK_SET) == 0) &&
++	          (std::fread(m_record.data(), 1, m_record.size(), m_readFile) == m_record.size()) &&
++	          ParseRecord(m_record.data(), m_record.size(), storedKey, entry) && (storedKey == key);
++	if(!ok)
++	{
++		// Damaged record: compile the block again, and store it again.
++		m_index.erase(iterator);
++		return false;
++	}
+ 	return true;
+ }
+ 
+ void CJitCache::Store(const KEY& key, ENTRY&& entry)
+ {
+ 	std::lock_guard<std::mutex> lock(m_mutex);
+-	if(!m_file || (m_entries.find(key) != m_entries.end()) || (m_known.find(key) != m_known.end())) return;
++	if(!m_file || (m_index.find(key) != m_index.end())) return;
+ 	std::vector<uint8> record;
+ 	Append(record, &key, sizeof(key));
+ 	Append32(record, entry.linkEntryOffset);
+@@ -238,8 +267,11 @@ void CJitCache::Store(const KEY& key, ENTRY&& entry)
+ 		m_file = nullptr;
+ 		return;
+ 	}
++	LOCATION location;
++	location.offset = static_cast<uint32>(m_fileSize + 4);
++	location.size = recordSize;
++	m_index[key] = location;
+ 	m_fileSize += 4 + record.size();
+-	m_known.insert(key); //in the file now; the code itself is not needed here
+ 	m_stats.stored++;
+ 	if(++m_unflushed >= FLUSH_EVERY)
+ 	{
+diff --git a/Source/JitCache.h b/Source/JitCache.h
+index bbd0820..0d27216 100755
+--- a/Source/JitCache.h
++++ b/Source/JitCache.h
+@@ -18,7 +18,6 @@
+ #include <mutex>
+ #include <string>
+ #include <unordered_map>
+-#include <unordered_set>
+ #include <vector>
+ #include "Types.h"
+ #include "uint128.h"
+@@ -73,7 +72,7 @@ public:
+ 
+ 	struct STATS
+ 	{
+-		uint32 loaded = 0;      //entries read from the file
++		uint32 loaded = 0;      //entries found in the file
+ 		uint32 hits = 0;        //blocks taken from the cache
+ 		uint32 stored = 0;      //blocks written this run
+ 		uint32 uncacheable = 0; //blocks with a pointer outside the ranges
+@@ -95,7 +94,7 @@ public:
+ 		return m_file != nullptr;
+ 	}
+ 
+-	// Copies the entry out: blocks are compiled on several threads (VU1).
++	// Reads the entry from the file: blocks are compiled on several threads (VU1).
+ 	bool Find(const KEY&, ENTRY&);
+ 	void Store(const KEY&, ENTRY&&);
+ 	void CountHit();
+@@ -121,18 +120,31 @@ private:
+ 		}
+ 	};
+ 
+-	void ReadEntries();
++	// Where a block's record lies in the file: blocks are read when they are
++	// needed, so the heap only holds this index (VitaStation2: ~60 bytes per
++	// block instead of its code), and a block dropped from the JIT's memory can
++	// come back from the file instead of being compiled again.
++	struct LOCATION
++	{
++		uint32 offset = 0; //of the record's data, after its size
++		uint32 size = 0;
++	};
++
++	void ReadIndex();
++	bool ParseRecord(const uint8* data, size_t size, KEY&, ENTRY&) const;
+ 	bool WriteHeader();
+ 
+ 	std::mutex m_mutex;
+-	std::FILE* m_file = nullptr;
++	std::FILE* m_file = nullptr;     //appending
++	std::FILE* m_readFile = nullptr; //blocks read on demand
++	std::vector<char> m_readBuffer;
++	std::vector<uint8> m_record;
+ 	std::string m_path;
+ 	uint64 m_fingerprint = 0;
+ 	std::vector<RANGE> m_ranges;
+ 	size_t m_maxFileSize = 0;
+ 	size_t m_fileSize = 0;
+-	std::unordered_map<KEY, ENTRY, KEY_HASH> m_entries; //loaded from the file, not used yet
+-	std::unordered_set<KEY, KEY_HASH> m_known;          //used or stored in this session
++	std::unordered_map<KEY, LOCATION, KEY_HASH> m_index;
+ 	STATS m_stats;
+ 	uint32 m_unflushed = 0;
+ };
+diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
+index 7ae19fe..20398e2 100755
+--- a/Source/PS2VM.cpp
++++ b/Source/PS2VM.cpp
+@@ -8,6 +8,9 @@
+ #include "string_format.h"
+ #include "PS2VM.h"
+ #include "EmuProfile.h"
++#ifdef __vita__
++extern "C" int vitaps2_jit_should_flush();
++#endif
+ #include "PS2VM_Preferences.h"
+ #include "ee/PS2OS.h"
+ #include "ee/EeExecutor.h"
+@@ -1083,6 +1086,15 @@ void CPS2VM::EmuThread()
+ 		}
+ 		if(m_nStatus == RUNNING)
+ 		{
++#ifdef __vita__
++			// The JIT's memory is nearly full. Nothing runs from it here (the EE
++			// and IOP are between slices), so EE code can be dropped; what stays
++			// in use comes back from the persistent JIT cache at no compile cost.
++			if(vitaps2_jit_should_flush())
++			{
++				static_cast<CEeExecutor*>(m_ee->m_EE.m_executor.get())->DiscardCompiledCode();
++			}
++#endif
+ 			if(m_spuUpdateTicks <= 0)
+ 			{
+ 				EmuProfile::CScope profileScope(EmuProfile::SECTION_SPU);
