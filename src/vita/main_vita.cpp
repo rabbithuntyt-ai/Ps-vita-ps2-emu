@@ -182,6 +182,7 @@ namespace
 		uint32_t eeCycleRate = 100; //0: auto
 		uint32_t eeSlice = 0;       //EE cycles per time slice, 0: the core's default
 		uint32_t iopRate = 100;     //IOP clock, percent of real speed
+		uint32_t mpegCore = 2;      //core of the movie decoder
 		bool threadLockHle = false; //game's critical sections without kernel calls (needs mpeg_hle)
 		bool interlaced = false;
 		uint32_t frameSkip = 0;
@@ -214,6 +215,7 @@ namespace
 		if(key == "ee_cycle_rate") settings.eeCycleRate = value;
 		else if(key == "ee_slice") settings.eeSlice = value;
 		else if(key == "iop_rate") settings.iopRate = value;
+		else if(key == "mpeg_core") settings.mpegCore = value;
 		else if(key == "thread_lock_hle") settings.threadLockHle = value != 0;
 		else if(key == "interlaced") settings.interlaced = value != 0;
 		else if(key == "frame_skip") settings.frameSkip = value;
@@ -586,7 +588,7 @@ namespace
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",ps2_%s", EmuProfile::GetSectionName(i));
 				std::fprintf(perfFile, ",spu_full_waits,spu_read_waits,ipu_idec,ipu_bdec,ipu_out_kb,ipu_stalls,audio_underruns,audio_tempo");
 				std::fprintf(perfFile, ",jit_blocks,jit_writes,jit_write_ms,jit_alloc_ms,jit_free_ranges,jit_translate_ms,jit_finish_ms,jit_install_ms,jit_guest_instr,jit_code_kb,jit_opt_ms,jit_alloc_regs_ms,jit_codegen_ms,jit_statements");
-				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms\n");
+				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms\n");
 			}
 		}
 		const uint64_t runStart = sceKernelGetProcessTimeWide();
@@ -649,7 +651,14 @@ namespace
 		// register reads and audio DMA that wait for the mixer took ~7ms each
 		// (a quarter of the emulation thread during movies). A higher priority
 		// fixed that but took the core from the GS (GS waits went 0 -> 14%).
-		config.spuThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */); };
+		// On core 2 the movie decoder has the same problem: at equal priority a woken
+		// mixer waited for a whole picture, and the emulation thread for the mixer
+		// (335 ms per second in Resident Evil 4's intro). Mixing is short, and nothing
+		// here is as urgent: it goes first. (Threads start at 191, the lowest.)
+		config.spuThreadInit = []() {
+			sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */);
+			sceKernelChangeThreadPriority(sceKernelGetThreadId(), 160);
+		};
 		config.profilerThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */); };
 		config.soundFactory = &CSH_Vita::HandlerFactory;
 		config.interlacedRendering = settings.interlaced;
@@ -698,8 +707,9 @@ namespace
 				if(settings.threadLockHle) mpegHle.EnableThreadLockHle();
 				// Native movie decoding (libmpeg 2.2 sceMpegGetPicture), decoder on
 				// core 2 (VU1 has little to do while the EE does not decode).
-				mpegHle.Enable(session->GetVm()->m_ee->m_ram, "ux0:data/VitaPS2/mpeghle.txt", []() {
-					sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */);
+				uint32_t mpegCoreMask = 0x10000u << std::min<uint32_t>(settings.mpegCore, 2);
+				mpegHle.Enable(session->GetVm()->m_ee->m_ram, "ux0:data/VitaPS2/mpeghle.txt", [mpegCoreMask]() {
+					sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mpegCoreMask);
 				});
 			}
 			// Scripted runs: gs_diag=N logs N flips (buffers, targets) to gsdiag.txt.
@@ -1132,6 +1142,12 @@ namespace
 							lastDisc = discNow;
 							lastReads = readsNow;
 							lastVuSync = vuNow;
+							static uint64_t lastSpu = 0, lastMail = 0, lastLimiter = 0;
+							uint64_t spuNow = EmuProfile::g_spuWaitUs, mailNow = EmuProfile::g_mailboxWaitUs, limiterNow = EmuProfile::g_limiterUs;
+							std::fprintf(perfFile, ",%.1f,%.1f,%.1f", (spuNow - lastSpu) / 1000.0, (mailNow - lastMail) / 1000.0, (limiterNow - lastLimiter) / 1000.0);
+							lastSpu = spuNow;
+							lastMail = mailNow;
+							lastLimiter = limiterNow;
 							lastWaitMs = mpegStats.waitMs;
 							lastDecodeMs = mpegStats.decodeMs;
 						}

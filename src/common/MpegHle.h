@@ -83,6 +83,9 @@ private:
 
 	// EE thread: code patch and the current sceMpegGetPicture call.
 	void PatchThreadLock(CMIPS&);
+	void PatchMemcpy(CMIPS&);
+	void HandleMemcpyBytes(CMIPS&);
+	uint32_t m_memcpyAddress = 0;
 	bool m_threadLockHle = false;
 	bool m_threadLockPatched = false;
 	void PatchStartCodeScan(CMIPS&);
@@ -94,7 +97,7 @@ private:
 	uint32_t m_variant = 0;  //of the current call
 	uint32_t m_callerGp = 0; //restored after a libmpeg 3.0 callback, which runs with its own gp
 	uint32_t m_starvedSince = 0; //vblank + 1 since the decoder has had no data for this call
-	uint32_t m_graceCalls = 0;
+	uint32_t m_loggedEnd = 0;
 	uint32_t m_mp = 0, m_buffer = 0, m_mbCount = 0;
 	uint32_t m_frameIndex = 0;
 	uint32_t m_waitsThisPicture = 0;
@@ -111,6 +114,7 @@ private:
 	// its whole ring, and only an input as slow as the IPU's keeps behind what
 	// Sofdec has written there. The decoder holds a small window of the stream.
 	bool m_inputOnDemand = false;
+	uint32_t m_viBuf = 0; //the ring's bookkeeping, when known
 	std::vector<uint8_t> m_incoming; //from DMA4, not taken by the decoder yet
 	size_t m_working = 0;            //bytes the decoder holds
 	std::deque<PICTURE> m_pictures;

@@ -15,7 +15,9 @@ movie pictures handed to the game, not flips. A real 30 needs 60 emulated fps.
 | Scene | Before this work | Now | Goal |
 |---|---|---|---|
 | Title screen | 3.3 fps (Nov 3 run), 35 on the build this work started from | **55 emulated fps** (58.9 with `ee_cycle_rate=60 iop_rate=50`) | 60 emulated = 30 real |
-| Orange intro / attract movies | black, 3 pictures/s | **picture correct, 13 pictures/s** (peaks of 17), 27 emulated fps. The whole trailer plays and returns to the title | 30 pictures/s |
+| Orange intro (New Game) | black, 3 pictures/s | **picture correct, 14.2 pictures/s**, 30.6 emulated fps. Plays through, "Six years later", then Leon's car cutscene | 30 pictures/s |
+| Leon's car cutscene | never reached | picture correct, 13.9 pictures/s | 30 pictures/s |
+| Attract trailer (idle at the title) | black, 3 pictures/s | picture correct, 13 pictures/s (peaks of 17), 27 emulated fps. Plays through and returns to the title | 30 pictures/s |
 | Gameplay | not reached yet | not reached yet | 30 |
 
 Not verified: gameplay, New Game, audio sync in movies, and the movie picture
@@ -24,9 +26,10 @@ frame (t=317 of a run) that was mostly black with a blocky patch: maybe a scene 
 maybe a decoding problem.
 
 The game's real flow: logos, title animation, title menu (about 20 s), then with no
-input it plays attract movies. **The orange intro is an attract movie**, and Cross
-does not skip it. A "Loading..." hang with no output was seen once after someone
-pressed through the menus by hand; it has not been reproduced on purpose.
+input it plays attract movies. Pressing START and Cross at the title starts a new game:
+memory card, "Loading...", the orange intro, "Six years later", Leon's car cutscene.
+Cross does not skip these. The two movies differ a lot in speed, so **always say which
+one a number comes from**.
 
 ## What was wrong, and which games it affects
 
@@ -62,28 +65,47 @@ Details of libmpeg 3.0 (RE4 addresses, found by code signature):
   previous `GetPicture` call (the input window, 24 KB).
 - A picture can be larger than the window: a starved decoder always gets more, or it
   deadlocks with "no picture (5001 waits)".
+- **It is Sony's ezmpeg `ViBuf`** (HLE_MPEG.md), at player +4376: ring, tags, units,
+  first queued unit, units queued. Input never goes past the units queued, so the decoder
+  can read ahead safely. A fixed window without this read old data at the end of a movie:
+  50 decoder errors and timeouts.
+- The no-data callback also refreshes the DMA feed, so it has to keep running. It can
+  only end the movie while a flag set by its caller is on (player +4264 +20). At the start
+  of a stream the decoder runs dry while the disc catches up: ending the movie then left
+  the game on a black screen after "Six years later". The flag now stays off for 120
+  vblanks of no data.
 
-## How the time splits now (movie, per vblank at 25 emulated fps)
+## How the time splits now (orange intro, 30.6 emulated fps)
 
-EE about 18 ms, IOP 9 ms, other 6 ms, VIF to GS 3 ms: 36 ms against 16.6 ms for full
-speed, so **the movie needs more than 2x**. GPU thread 63%, not the limit any more.
-Decoder about 28 ms per picture on core 2; the EE waits for it only 0.3 ms per second.
-The PS2 thread is on the CPU only about 78% of the time. Disc reads explain 4%, VU1
-sync none; **the rest is not explained yet** and would be worth up to 25% more speed.
+The PS2 thread is on the CPU 94% of the time, so what is left is real work: **about 33 ms
+per vblank against 16.6 ms for full speed, 2x**. By the profiler: EE 73%, IOP 17%, other
+7%. GPU thread 69%, decoder about 45 ms per picture of wall time on core 2 and the EE does
+not wait for it.
 
-EE samples in the movie (`ee_hot_after`):
+**The largest gain was not a CPU cost.** The PS2 thread slept a third of the time, with
+spare CPU on every core: 335 ms per second waiting for SPU2 mixing on register reads,
+because the mixer shared core 2 with the decoder at equal priority (threads start at 191,
+the lowest). Mixer at priority 160: 10.2 to 14.2 pictures/s. Found by timing every wait
+(`spu_wait_ms`, `mailbox_wait_ms`, `limiter_ms`, `disc_ms`, `vu_sync_ms`, `mpeg_wait_ms` in
+`perf.csv`). The section profiler showed 1.3% for it, so do not trust that one for waits.
 
-| Share | Code | Idea |
+EE samples (`ee_hot_after`), done and left:
+
+| Share | Code | Status |
 |---|---|---|
-| 11.8% | 0x2DADC0: Sofdec scans for start codes byte by byte | Done: native (now 1%) |
 | About 25% | 0x17BEA8/0x17BF30: critical sections, about 5 kernel calls per pair, 2700 pairs/s | Done: a counter in guest code (`thread_lock_hle`) |
-| 6.9% | 0x2AF420: memcpy, byte-wise tail | Small calls: a syscall may cost more than it saves. Needs a JIT-level answer |
-| 6.6% | 0x19B000: looks like ADX audio decoding | Native ADX by signature |
+| 12.8% | 0x2AF400: memcpy's byte loop (Sofdec copying video out of sectors) | Done: native |
+| 11.8% | 0x2DADC0: Sofdec scans for start codes byte by byte | Done: native (now 2%) |
+| About 7% | 0x264000-0x2643FF | Not looked at (0x2643C0 is called in a loop per 10 items) |
+| About 5% | 0x298200-0x2984FF: a list of callbacks walked | Not looked at |
+| About 5% | 0x19B000: looks like ADX audio decoding | Native ADX by signature |
 
 ## Ideas not done yet
 
-1. Find the unexplained 22% the PS2 thread is off the CPU.
-2. Native ADX audio decoding; the IOP's 25% (it does not shrink with `iop_rate`).
+1. 0x264xxx and 0x298xxx above; native ADX; the IOP's 17-25% (it does not shrink with
+   `iop_rate`).
+2. Tier 2 recompilation (AOT_TRANSLATION.md). After the items above it is probably what
+   stands between about 20 and 30 pictures/s.
 3. Convert pictures straight into a GL texture, skipping EE RAM and the GIF: each picture
    is copied to EE RAM, then to the GS in 16 pixel columns.
 4. Larger slices only while EE and IOP are both idle. 38400 broke RE4 but gave 58.5 fps.
@@ -98,15 +120,17 @@ Autostart keys, all per run:
 | `ee_slice=N` | EE cycles per time slice (also a per-game setting) |
 | `iop_rate=N` | IOP clock in percent (also a per-game setting) |
 | `jit_limit_kb=N` | Treat the JIT pool as this small, to test the flush |
+| `pad_script=T:btn,T:btn` | Hold a button for the game 400 ms at second T (start, cross, up...). Works when Vita Lab's presses do not reach it |
 | `frame_dump_every=S` | Save the displayed picture to `ux0:data/VitaPS2/frames/` |
 | `mpeg_dump_mb=N` | Save the movie stream the decoder gets to `mpegstream.bin` |
 | `gs_diag_after=S` | Start `gs_diag` logging later (with `gs_diag=N`) |
 | `ee_hot_after=S` | Sample EE hotspots from this second on; also writes `syscalls.txt` (kernel calls by number) |
+| `mpeg_core=N` | Core of the movie decoder (default 2) |
 | `thread_lock_hle=1` | RE4 USA: critical sections without kernel calls (also a per-game setting) |
 
 `perf.csv` gained `jit_pool_kb`, `jit_flushes`, `mpeg_pictures`, `tex_decode_ms`,
 `tex_gl_ms`, `mpeg_wait_ms`, `mpeg_decode_ms`, `mpeg_starved`, `disc_ms`, `disc_reads`,
-`vu_sync_ms`. `tests/mpeg2_decoder_tests FILE --es` replays a stream dump on a PC.
+`vu_sync_ms`, `spu_wait_ms`, `mailbox_wait_ms`, `limiter_ms`. `tests/mpeg2_decoder_tests FILE --es` replays a stream dump on a PC.
 
 ## Traps when testing
 
@@ -124,5 +148,7 @@ Autostart keys, all per run:
 - `ux0:data/VitaPS2/settings/Resident Evil 4 (USA).iso.ini` holds `ee_cycle_rate=130`,
   `safe_jit=1` and `interlaced=1` from an earlier experiment. They override the game
   profile and slow the game down.
+- `mpeg_dump_mb` slows a run (it writes to the card on the emulation thread). Do not
+  measure speed with it on.
 - Uncommitted, on purpose: the "60 frame" change to `FindTarget` from HLE_MPEG.md item 3
   is still only in the working tree. All numbers here were measured with it in the build.

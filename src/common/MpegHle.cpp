@@ -138,6 +138,24 @@ namespace
 	    0x03E00008, // done: jr ra
 	    0x00000000};
 
+	// memcpy of Sony's C library (position independent, so it can match any game on
+	// this SDK; RE4: 0x2AF3AC). Sizes under 32 and unaligned copies go through a
+	// loop of one byte at a time: 13% of the EE's time in RE4's intro, where
+	// Sofdec copies video out of disc sectors. That loop becomes native code; the
+	// aligned 128 bit path stays as it is.
+	constexpr uint32_t SYSCALL_MEMCPY_BYTES = SYSCALL_BASE + 7;
+	const uint32_t g_codeMemcpy[] = {0x0080402D, 0x2CC20020, 0x1440001C, 0x0100182D, 0x00A81025, 0x3042000F, 0x54400019, 0x24C6FFFF, 0x0100382D, 0x78A30000, 0x24C6FFE0, 0x24A50010, 0x2CC40020, 0x7CE30000, 0x24E70010, 0x78A20000, 0x24A50010, 0x7CE20000, 0x1080FFF6, 0x24E70010, 0x2CC20008, 0x14400009, 0x00E0182D, 0xDCA30000, 0x24C6FFF8, 0x24A50008, 0x2CC20008, 0xFCE30000, 0x1040FFFA, 0x24E70008, 0x00E0182D, 0x24C6FFFF, 0x2402FFFF, 0x10C20007, 0x0040202D, 0x90A20000, 0x24C6FFFF, 0x24A50001, 0xA0620000, 0x14C4FFFB, 0x24630001, 0x03E00008, 0x0100102D};
+	constexpr uint32_t MEMCPY_WORDS = sizeof(g_codeMemcpy) / sizeof(g_codeMemcpy[0]);
+	constexpr uint32_t MEMCPY_UNALIGNED_DELAY = (0x2AF3C8 - 0x2AF3AC) / 4; //addiu a2, a2, -1 in a branch delay slot
+	constexpr uint32_t MEMCPY_UNALIGNED_BRANCH = (0x2AF3C4 - 0x2AF3AC) / 4;
+	constexpr uint32_t MEMCPY_LOOP = (0x2AF428 - 0x2AF3AC) / 4;
+	const uint32_t g_stubMemcpyLoop[] = {
+	    0x0060202D,                         // move  a0, v1 (where the bytes go)
+	    0x24030000 | SYSCALL_MEMCPY_BYTES,  // addiu v1, zero, id
+	    0x0000000C,                         // syscall (a0, a1, a2)
+	    0x03E00008,                         // jr    ra
+	    0x0100102D};                        // move  v0, t0
+
 	// Kinds of the code after 00 00 01 (Sofdec's classifier, RE4 0x2DABE8).
 	uint32_t StartCodeKind(uint8_t code)
 	{
@@ -165,15 +183,26 @@ namespace
 	// out of data gets this long first (a stream that has just started is still
 	// coming from the disc).
 	constexpr uint32_t STARVED_GRACE_VBLANKS = 120;
+	// The callback also refreshes the DMA feed, so it has to run during that time.
+	// In this Sofdec build (RE4: 0x2CE3F0) it can only end the movie while a flag
+	// set by its caller is on: data + 8120 -> player, +4264 + 20.
+	const uint32_t g_sofdecNoData[] = {0x27BDFFE0, 0xFFB00000, 0xFFB10008, 0xFFB20010, 0x24120001, 0xFFBF0018, 0x8CC21FB8, 0x245110A8, 0x244410D0, 0x8E230018, 0x14720005, 0x24501118, 0x0C0B9D16, 0x00000000, 0x10000014, 0x24020001, 0x0C0B3664, 0x0200202D, 0x8E230014, 0x1060000F, 0x24020001, 0x8E020010, 0x1440000C, 0x24020001, 0xAE320018, 0x3C05003D, 0x0200202D, 0x24A58338, 0x0C0B38D4, 0x24060010, 0x8E030018, 0x0200202D, 0x0C0B3664, 0xAE030014, 0x24020001, 0xDFB00000, 0xDFB10008, 0xDFB20010, 0xDFBF0018, 0x03E00008, 0x27BD0020};
+	constexpr uint32_t SOFDEC_NODATA_WORDS = sizeof(g_sofdecNoData) / sizeof(g_sofdecNoData[0]);
+	// Sony's ezmpeg ViBuf (docs/HLE_MPEG.md), inside this Sofdec's player: ring start,
+	// tags, units, first queued unit, units queued. RE4: 2 KB units, 512 KB.
+	constexpr uint32_t SOFDEC_VIBUF = 4376;
+	constexpr uint32_t VIBUF_UNIT = 2048;
 
 	constexpr size_t MAX_BUFFERED_INPUT = 1024 * 1024;
 	constexpr size_t MAX_QUEUED_PICTURES = 3;
 	// Input on demand (Sofdec asks for a picture once 3 are buffered in its ring,
 	// about 11 KB each in Resident Evil 4): the decoder stays within those.
-	constexpr size_t MAX_QUEUED_PICTURES_ON_DEMAND = 2;
+	constexpr size_t MAX_QUEUED_PICTURES_ON_DEMAND = 3;
 	// Sofdec stops DMA4 between pictures, so what the decoder works on while the
-	// game runs has to arrive during the call before: about 2 pictures.
-	constexpr size_t INPUT_WINDOW = 24 * 1024;
+	// game runs has to arrive during the call before. RE4's intro has 13.5 KB per
+	// picture on average. Well under its 512 KB ring, but check that no input is
+	// stale when changing this (docs/RE4.md).
+	constexpr size_t INPUT_WINDOW = 96 * 1024;
 	// No picture after this many no-data callbacks: give up on the movie
 	// (sceMpegGetPicture fails, the game ends it).
 	constexpr uint32_t MAX_WAITS = 5000;
@@ -253,6 +282,7 @@ void CMpegHle::PatchCode(CMIPS& ee)
 {
 	PatchStartCodeScan(ee);
 	PatchThreadLock(ee);
+	PatchMemcpy(ee);
 	auto matches = [&](uint32_t variant, uint32_t address) {
 		const auto& v = g_variants[variant];
 		for(uint32_t i = 0; i < v.words; i++)
@@ -320,6 +350,64 @@ void CMpegHle::PatchCode(CMIPS& ee)
 		ee.m_executor->ClearActiveBlocksInRange(address, address + g_variants[variant].words * 4, false);
 		Log("patched sceMpegGetPicture (%s) at 0x%08X\n", g_variants[variant].name, address);
 	}
+}
+
+void CMpegHle::PatchMemcpy(CMIPS& ee)
+{
+	auto matches = [&](uint32_t address) {
+		for(uint32_t i = 0; i < MEMCPY_WORDS; i++)
+		{
+			if(Read32(m_ram, address + i * 4) != g_codeMemcpy[i]) return false;
+		}
+		return true;
+	};
+	if(m_memcpyAddress != 0)
+	{
+		if(Read32(m_ram, m_memcpyAddress + MEMCPY_LOOP * 4) == g_stubMemcpyLoop[0]) return;
+		if(!matches(m_memcpyAddress)) m_memcpyAddress = 0;
+	}
+	if((m_memcpyAddress == 0) && ((m_vblanks % 60) == 1))
+	{
+		for(uint32_t address = 0x100000; address < 0x1000000; address += 4)
+		{
+			if((Read32(m_ram, address) == g_codeMemcpy[0]) && matches(address))
+			{
+				m_memcpyAddress = address;
+				Log("memcpy found at 0x%08X\n", address);
+				break;
+			}
+		}
+	}
+	if(m_memcpyAddress == 0) return;
+	uint32_t pc = ee.m_State.nPC;
+	if((pc >= m_memcpyAddress) && (pc < m_memcpyAddress + MEMCPY_WORDS * 4)) return;
+	// The unaligned branch: to the loop's first word, without touching the size.
+	Write32(m_ram, m_memcpyAddress + MEMCPY_UNALIGNED_BRANCH * 4, (Read32(m_ram, m_memcpyAddress + MEMCPY_UNALIGNED_BRANCH * 4) & 0xFFFF0000) | ((MEMCPY_LOOP - MEMCPY_UNALIGNED_BRANCH - 1) & 0xFFFF));
+	Write32(m_ram, m_memcpyAddress + MEMCPY_UNALIGNED_DELAY * 4, 0);
+	for(uint32_t i = 0; i < 5; i++) Write32(m_ram, m_memcpyAddress + (MEMCPY_LOOP + i) * 4, g_stubMemcpyLoop[i]);
+	ee.m_executor->ClearActiveBlocksInRange(m_memcpyAddress, m_memcpyAddress + MEMCPY_WORDS * 4, false);
+	Log("patched memcpy at 0x%08X\n", m_memcpyAddress);
+}
+
+void CMpegHle::HandleMemcpyBytes(CMIPS& ee)
+{
+	auto& gpr = ee.m_State.nGPR;
+	uint32_t destination = gpr[CMIPS::A0].nV0;
+	uint32_t source = gpr[CMIPS::A1].nV0;
+	uint32_t size = gpr[CMIPS::A2].nV0;
+	uint32_t physicalDestination = destination & 0x1FFFFFFF, physicalSource = source & 0x1FFFFFFF;
+	bool inRam = (physicalDestination < 0x02000000) && (physicalSource < 0x02000000) && (size <= (0x02000000 - physicalDestination)) && (size <= (0x02000000 - physicalSource));
+	bool separate = ((physicalDestination + size) <= physicalSource) || ((physicalSource + size) <= physicalDestination);
+	if(inRam && separate)
+	{
+		std::memcpy(m_ram + physicalDestination, m_ram + physicalSource, size);
+	}
+	else
+	{
+		// Scratchpad, hardware, or overlapping: byte by byte, upwards, as the loop.
+		for(uint32_t i = 0; i < size; i++) ee.m_pMemoryMap->SetByte(destination + i, ee.m_pMemoryMap->GetByte(source + i));
+	}
+	gpr[CMIPS::A1].nD0 = static_cast<int32_t>(source + size);
 }
 
 void CMpegHle::PatchThreadLock(CMIPS& ee)
@@ -431,6 +519,11 @@ void CMpegHle::OnSyscall(void* context, CMIPS& ee)
 {
 	auto hle = static_cast<CMpegHle*>(context);
 	uint32_t func = ee.m_State.nGPR[CMIPS::V1].nV0;
+	if(func == SYSCALL_MEMCPY_BYTES)
+	{
+		hle->HandleMemcpyBytes(ee);
+		return;
+	}
 	if(func == SYSCALL_SCAN)
 	{
 		hle->HandleStartCodeScan(ee);
@@ -459,6 +552,17 @@ void CMpegHle::HandleGetPicture(CMIPS& ee, bool first)
 			{
 				std::lock_guard<std::mutex> lock(m_mutex);
 				m_inputOnDemand = variant.library30;
+				// The ring's bookkeeping, to stay within what has been written.
+				m_viBuf = 0;
+				if(variant.library30)
+				{
+					uint32_t sysAddress = Read32(m_ram, m_mp + 0x40);
+					uint32_t noDataFunction = Read32(m_ram, sysAddress + SYS30_NODATA_FUNCTION);
+					bool known = (noDataFunction != 0);
+					for(uint32_t i = 0; known && (i < SOFDEC_NODATA_WORDS); i++) known = (Read32(m_ram, noDataFunction + i * 4) == g_sofdecNoData[i]);
+					if(known) m_viBuf = Read32(m_ram, Read32(m_ram, sysAddress + SYS30_NODATA_DATA) + 8120) + SOFDEC_VIBUF;
+					Log("ViBuf at 0x%08X\n", m_viBuf);
+				}
 			}
 			m_sinkEnabled = true;
 			CIPU::SetInputSink(&CMpegHle::OnInput, this);
@@ -555,20 +659,27 @@ void CMpegHle::HandleGetPicture(CMIPS& ee, bool first)
 		return;
 	}
 
-	if(variant.library30)
-	{
-		if(m_starvedSince == 0) m_starvedSince = m_vblanks + 1;
-		if((m_vblanks + 1 - m_starvedSince) < STARVED_GRACE_VBLANKS)
-		{
-			m_graceCalls++;
-			gpr[CMIPS::V0].nD0 = 0;
-			gpr[CMIPS::T9].nD0 = static_cast<int32_t>(m_patchAddress[m_variant] + 12 * 4);
-			m_callerGp = gpr[CMIPS::GP].nV0;
-			return;
-		}
-		Log("decoder out of data for %u vblanks, %u calls: no-data callback\n", m_vblanks + 1 - m_starvedSince, m_graceCalls);
-	}
 	uint32_t noData = Read32(m_ram, sys + (variant.library30 ? SYS30_NODATA_FUNCTION : 0x14));
+	if(variant.library30 && (noData != 0))
+	{
+		// Hold back the end of the movie for a while, while the callback runs.
+		bool known = true;
+		for(uint32_t i = 0; known && (i < SOFDEC_NODATA_WORDS); i++) known = (Read32(m_ram, noData + i * 4) == g_sofdecNoData[i]);
+		if(known)
+		{
+			if(m_starvedSince == 0) m_starvedSince = m_vblanks + 1;
+			uint32_t player = Read32(m_ram, Read32(m_ram, sys + SYS30_NODATA_DATA) + 8120);
+			uint32_t mayEnd = ((m_vblanks + 1 - m_starvedSince) >= STARVED_GRACE_VBLANKS) ? 1 : 0;
+			if(mayEnd && (m_loggedEnd != m_starvedSince))
+			{
+				m_loggedEnd = m_starvedSince;
+				Log("decoder out of data for %u vblanks: the callback may end the movie\n", STARVED_GRACE_VBLANKS);
+			}
+			Write32(m_ram, player + 4264 + 20, mayEnd);
+		}
+		// Waits only end a movie through the callback here.
+		m_waitsThisPicture = 0;
+	}
 	if((noData == 0) || (++m_waitsThisPicture > MAX_WAITS))
 	{
 		Log("no picture (%u waits): sceMpegGetPicture fails\n", m_waitsThisPicture);
@@ -604,6 +715,23 @@ uint32_t CMpegHle::OnInput(void* context, const uint8_t* data, uint32_t size)
 			size_t room = (held < INPUT_WINDOW) ? (INPUT_WINDOW - held) : 0;
 			if(hle->m_decoderStarved) room = std::max<size_t>(room, 8 * 1024);
 			size = static_cast<uint32_t>(std::min<size_t>(size, room & ~static_cast<size_t>(0xF)));
+			if(hle->m_viBuf != 0)
+			{
+				// Never past the units queued: the DMA chain runs on around the whole
+				// ring, over old data (at the end of a movie, nothing new comes).
+				uint32_t ring = Read32(hle->m_ram, hle->m_viBuf + 0x00) & 0x01FFFFFF;
+				uint32_t units = Read32(hle->m_ram, hle->m_viBuf + 0x08);
+				uint32_t first = Read32(hle->m_ram, hle->m_viBuf + 0x0C);
+				uint32_t queued = Read32(hle->m_ram, hle->m_viBuf + 0x10);
+				const uint8_t* ringStart = hle->m_ram + ring;
+				if((units != 0) && (data >= ringStart) && (data < ringStart + units * VIBUF_UNIT))
+				{
+					uint32_t offset = static_cast<uint32_t>(data - ringStart);
+					uint32_t unitsFromFirst = ((offset / VIBUF_UNIT) + units - (first % units)) % units;
+					uint32_t allowed = (unitsFromFirst < queued) ? ((queued - unitsFromFirst) * VIBUF_UNIT - (offset % VIBUF_UNIT)) : 0;
+					size = std::min<uint32_t>(size, allowed);
+				}
+			}
 			if(size == 0) return 0;
 		}
 		if((data != hle->m_lastInputEnd) && (hle->m_inputJumps++ < 300))

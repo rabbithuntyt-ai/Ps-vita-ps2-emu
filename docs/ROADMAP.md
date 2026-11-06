@@ -23,7 +23,7 @@ produced so far, and how it extends to other games: [LIBRARY_WIDE.md](LIBRARY_WI
 2. **Library HLE by signature.** Find library functions by their code
    bytes (not addresses) and run native ARM/NEON versions; libmpeg's
    `sceMpegGetPicture` (`src/common/MpegHle.cpp`) is the template.
-   - [ ] Finish libmpeg on hardware (movies at full speed in every libmpeg game). libmpeg 3.0 under Sofdec added, 13 of 30 pictures/s in RE4 (docs/RE4.md)
+   - [ ] Finish libmpeg on hardware (movies at full speed in every libmpeg game). libmpeg 3.0 under Sofdec added, 14 of 30 pictures/s in RE4 (docs/RE4.md)
    - [ ] Signature scanner shared by all HLE modules (masked code patterns, per-SDK-version variants)
    - [ ] memcpy/memset/strlen and math (sin/cos/sqrt/atan2) from the SDK's libc and libm
    - [ ] Criware (Sofdec/ADX) movies and audio

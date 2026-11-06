@@ -1,0 +1,97 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+index 465164f..1897ee9 100644
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <chrono>
+ #include <atomic>
+ #include "Types.h"
+ 
+@@ -40,6 +41,22 @@ namespace EmuProfile
+ 	inline std::atomic<uint64_t> g_discReadUs{0};
+ 	inline std::atomic<uint64_t> g_discReads{0};
+ 	inline std::atomic<uint64_t> g_vuSyncUs{0};
++	inline std::atomic<uint64_t> g_spuWaitUs{0};
++	inline std::atomic<uint64_t> g_mailboxWaitUs{0};
++	inline std::atomic<uint64_t> g_limiterUs{0};
++	struct WAIT_TIMER
++	{
++		std::atomic<uint64_t>& total;
++		std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
++		explicit WAIT_TIMER(std::atomic<uint64_t>& counter)
++		    : total(counter)
++		{
++		}
++		~WAIT_TIMER()
++		{
++			total += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
++		}
++	};
+ 
+ 	//Block compilation cost by phase (all recompiler threads), microseconds.
+ 	struct JIT_STATS
+diff --git a/Source/FrameLimiter.cpp b/Source/FrameLimiter.cpp
+index 0d050fa..3cd084d 100644
+--- a/Source/FrameLimiter.cpp
++++ b/Source/FrameLimiter.cpp
+@@ -1,3 +1,4 @@
++#include "EmuProfile.h"
+ #include "FrameLimiter.h"
+ #include <cassert>
+ #include <thread>
+@@ -65,11 +66,15 @@ void CFrameLimiter::EndFrame()
+ 		auto targetTime = currentTime + delay;
+ 		while(currentTime < targetTime)
+ 		{
++			EmuProfile::WAIT_TIMER waitTimer(EmuProfile::g_limiterUs);
+ 			std::this_thread::sleep_for(std::chrono::microseconds(250));
+ 			currentTime = std::chrono::high_resolution_clock::now();
+ 		}
+ #else
+-		std::this_thread::sleep_for(delay);
++		{
++			EmuProfile::WAIT_TIMER waitTimer(EmuProfile::g_limiterUs);
++			std::this_thread::sleep_for(delay);
++		}
+ #endif
+ 	}
+ 	m_frameStarted = false;
+diff --git a/Source/MailBox.cpp b/Source/MailBox.cpp
+index b9c9498..13e5c5e 100644
+--- a/Source/MailBox.cpp
++++ b/Source/MailBox.cpp
+@@ -1,3 +1,4 @@
++#include "EmuProfile.h"
+ #include "MailBox.h"
+ 
+ bool CMailBox::IsPending() const
+@@ -48,6 +49,7 @@ void CMailBox::SendCall(const FunctionType& function, bool waitForCompletion)
+ 
+ 	if(waitForCompletion)
+ 	{
++		EmuProfile::WAIT_TIMER waitTimer(EmuProfile::g_mailboxWaitUs);
+ 		future.wait();
+ 	}
+ }
+diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
+index c7328e5..28a4e54 100644
+--- a/Source/PS2VM.cpp
++++ b/Source/PS2VM.cpp
+@@ -908,6 +908,7 @@ void CPS2VM::SyncSpu()
+ 	if(m_spuWork.empty() && !m_spuRendering) return;
+ 	m_spuFullSyncs++;
+ 	m_spuIdleWaiters++;
++	EmuProfile::WAIT_TIMER waitTimer(EmuProfile::g_spuWaitUs);
+ 	m_spuIdleCondition.wait(lock, [this]() { return m_spuWork.empty() && !m_spuRendering; });
+ 	m_spuIdleWaiters--;
+ }
+@@ -924,6 +925,7 @@ void CPS2VM::AccessSpuForRead(const std::function<void()>& access)
+ 	{
+ 		m_spuReadAccesses++;
+ 		m_spuIdleWaiters++;
++		EmuProfile::WAIT_TIMER waitTimer(EmuProfile::g_spuWaitUs);
+ 		m_spuIdleCondition.wait(lock, ready);
+ 		m_spuIdleWaiters--;
+ 	}
