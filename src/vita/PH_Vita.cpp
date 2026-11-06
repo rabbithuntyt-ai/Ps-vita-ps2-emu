@@ -57,7 +57,7 @@ uint32 CPH_Vita::Poll()
 		}
 	}
 
-	uint32 b = pad.buttons;
+	uint32 b = pad.buttons | m_injectedButtons;
 	std::lock_guard<std::mutex> lock(m_mutex);
 	m_buttons[CControllerInfo::DPAD_UP] = b & SCE_CTRL_UP;
 	m_buttons[CControllerInfo::DPAD_DOWN] = b & SCE_CTRL_DOWN;
@@ -79,7 +79,7 @@ uint32 CPH_Vita::Poll()
 	m_axes[1] = ApplyDeadzone(pad.ly);
 	m_axes[2] = ApplyDeadzone(pad.rx);
 	m_axes[3] = ApplyDeadzone(pad.ry);
-	return b;
+	return pad.buttons; //the frontend's own shortcuts only see real buttons
 }
 
 void CPH_Vita::Update(uint8* ram)

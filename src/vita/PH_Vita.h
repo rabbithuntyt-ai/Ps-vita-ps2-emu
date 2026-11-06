@@ -24,6 +24,11 @@ public:
 	// Polls the hardware. Called from the UI thread once per presented frame.
 	// Returns the raw Vita button mask so the frontend can detect hotkeys.
 	uint32 Poll();
+	// Scripted runs: buttons the game sees as held (SCE_CTRL_ masks).
+	void SetInjectedButtons(uint32 buttons)
+	{
+		m_injectedButtons = buttons;
+	}
 
 	// Called by the VM at every vblank.
 	void Update(uint8*) override;
@@ -31,6 +36,7 @@ public:
 	static FactoryFunction GetFactoryFunction(CPH_Vita** instance);
 
 private:
+	uint32 m_injectedButtons = 0;
 	std::mutex m_mutex;
 	std::array<bool, PS2::CControllerInfo::MAX_BUTTONS> m_buttons = {};
 	std::array<uint8, 4> m_axes = {0x7F, 0x7F, 0x7F, 0x7F};

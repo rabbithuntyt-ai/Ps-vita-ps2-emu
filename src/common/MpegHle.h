@@ -93,6 +93,8 @@ private:
 	uint32_t m_vblanks = 0;
 	uint32_t m_variant = 0;  //of the current call
 	uint32_t m_callerGp = 0; //restored after a libmpeg 3.0 callback, which runs with its own gp
+	uint32_t m_starvedSince = 0; //vblank + 1 since the decoder has had no data for this call
+	uint32_t m_graceCalls = 0;
 	uint32_t m_mp = 0, m_buffer = 0, m_mbCount = 0;
 	uint32_t m_frameIndex = 0;
 	uint32_t m_waitsThisPicture = 0;

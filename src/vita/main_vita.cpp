@@ -593,6 +593,7 @@ namespace
 		constexpr const char* GS_DIAG_PATH = "ux0:data/VitaPS2/gsdiag.txt";
 		int gsDiagFlips = 0;
 		uint32_t gsDiagAfterSeconds = 0;
+		std::vector<std::pair<uint64_t, uint32_t>> padScript; //autostart: time (us), button held for the game
 		uint32_t eeHotAfterSeconds = 0; //autostart: EE hotspots (eehot.txt) sampled from this second on
 		uint32_t frameDumpEverySeconds = 0; //autostart: displayed picture to ux0:data/VitaPS2/frames/ every N seconds
 		uint64_t nextFrameDump = 0;
@@ -719,6 +720,28 @@ namespace
 						if(value == "1") mpegShadow.Enable(session->GetVm()->m_ee->m_ram, 0x1213080, "ux0:data/VitaPS2/mpegshadow.txt");
 						continue;
 					}
+					if(key == "pad_script")
+					{
+						// seconds:button,seconds:button...: held 400 ms for the game.
+						size_t position = 0;
+						while(position < value.size())
+						{
+							size_t comma = value.find(',', position);
+							if(comma == std::string::npos) comma = value.size();
+							std::string entry = value.substr(position, comma - position);
+							position = comma + 1;
+							size_t colon = entry.find(':');
+							if(colon == std::string::npos) continue;
+							std::string name = entry.substr(colon + 1);
+							static const std::pair<const char*, uint32_t> names[] = {{"start", SCE_CTRL_START}, {"select", SCE_CTRL_SELECT}, {"cross", SCE_CTRL_CROSS}, {"circle", SCE_CTRL_CIRCLE},
+							    {"square", SCE_CTRL_SQUARE}, {"triangle", SCE_CTRL_TRIANGLE}, {"up", SCE_CTRL_UP}, {"down", SCE_CTRL_DOWN}, {"left", SCE_CTRL_LEFT}, {"right", SCE_CTRL_RIGHT}, {"l1", SCE_CTRL_L1}, {"r1", SCE_CTRL_R1}};
+							for(const auto& button : names)
+							{
+								if(name == button.first) padScript.emplace_back(static_cast<uint64_t>(std::atoi(entry.c_str())) * 1000000ULL, button.second);
+							}
+						}
+						continue;
+					}
 					if(key == "ee_hot_after")
 					{
 						eeHotAfterSeconds = static_cast<uint32_t>(std::atoi(value.c_str()));
@@ -787,6 +810,16 @@ namespace
 
 		while(true)
 		{
+			if(pad && !padScript.empty())
+			{
+				uint64_t elapsed = sceKernelGetProcessTimeWide() - runStart;
+				uint32_t injected = 0;
+				for(const auto& entry : padScript)
+				{
+					if((elapsed >= entry.first) && (elapsed < entry.first + 400000)) injected |= entry.second;
+				}
+				pad->SetInjectedButtons(injected);
+			}
 			uint32_t buttons = pad ? pad->Poll() : 0;
 			uint32_t pressed = buttons & ~previousButtons;
 			previousButtons = buttons;

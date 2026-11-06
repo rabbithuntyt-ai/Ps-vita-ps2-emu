@@ -85,6 +85,10 @@ namespace
 		    0x1000FFF9,                 // b     loop
 		    0x00000000};                // nop
 		for(uint32_t i = 0; i < stubWords; i++) stub[i] = (i < 12) ? words[i] : 0;
+		// Word 12: an empty function, called instead of the no-data callback to
+		// let the EE run while a starved decoder waits for DMA and the disc.
+		stub[12] = 0x03E00008; // jr ra
+		stub[13] = 0x00000000; // nop
 	}
 
 	// Sofdec's scan for an MPEG start code of a given kind (a0 buffer, a1 size,
@@ -157,6 +161,10 @@ namespace
 	constexpr uint32_t SYS30_NODATA_GP = 0x20;
 	constexpr uint32_t SYS30_ABORT = 0x878;
 	constexpr uint32_t MAX_STUB_WORDS = 15;
+	// Sofdec's no-data callback ends the movie, so it is the last resort: a decoder
+	// out of data gets this long first (a stream that has just started is still
+	// coming from the disc).
+	constexpr uint32_t STARVED_GRACE_VBLANKS = 120;
 
 	constexpr size_t MAX_BUFFERED_INPUT = 1024 * 1024;
 	constexpr size_t MAX_QUEUED_PICTURES = 3;
@@ -504,6 +512,7 @@ void CMpegHle::HandleGetPicture(CMIPS& ee, bool first)
 	}
 	if(havePicture)
 	{
+		m_starvedSince = 0;
 		m_wake.notify_all();
 		if(!picture.macroblocks.empty())
 		{
@@ -546,6 +555,19 @@ void CMpegHle::HandleGetPicture(CMIPS& ee, bool first)
 		return;
 	}
 
+	if(variant.library30)
+	{
+		if(m_starvedSince == 0) m_starvedSince = m_vblanks + 1;
+		if((m_vblanks + 1 - m_starvedSince) < STARVED_GRACE_VBLANKS)
+		{
+			m_graceCalls++;
+			gpr[CMIPS::V0].nD0 = 0;
+			gpr[CMIPS::T9].nD0 = static_cast<int32_t>(m_patchAddress[m_variant] + 12 * 4);
+			m_callerGp = gpr[CMIPS::GP].nV0;
+			return;
+		}
+		Log("decoder out of data for %u vblanks, %u calls: no-data callback\n", m_vblanks + 1 - m_starvedSince, m_graceCalls);
+	}
 	uint32_t noData = Read32(m_ram, sys + (variant.library30 ? SYS30_NODATA_FUNCTION : 0x14));
 	if((noData == 0) || (++m_waitsThisPicture > MAX_WAITS))
 	{
@@ -611,6 +633,7 @@ void CMpegHle::OnIpuReset(void* context)
 	CIPU::SetInputSink(nullptr, nullptr);
 	hle->m_sinkEnabled = false;
 	hle->m_frameIndex = 0;
+	hle->m_starvedSince = 0;
 	{
 		std::lock_guard<std::mutex> lock(hle->m_mutex);
 		hle->m_incoming.clear();
