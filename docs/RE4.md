@@ -4,6 +4,9 @@ Goal set by the owner: **a smooth 30 fps in menus, cutscenes and gameplay**, RE4
 first. Silent Hill 2's movies are tested with these fixes only once RE4's movie
 reaches a real 30 pictures per second.
 
+RE4 is the test case for an emulator meant for every PS2 game: what is specific to it
+and how each finding could reach other games is in [LIBRARY_WIDE.md](LIBRARY_WIDE.md).
+
 ## Where it stands
 
 Measured on a real Vita, 2026-11-05 (warm JIT cache). "Pictures/s" counts new

@@ -5,6 +5,9 @@ frontend. Work so far was done in a cloud session without access to the Vita;
 this note is for a session running on the owner's PC, which can reach the Vita
 through **Vita Lab** (`vitalab` CLI + plugins; see the Vita-Lingo repo, `lab/`).
 
+This is an emulator for every PS2 game. Whatever is learned from one game goes in
+[LIBRARY_WIDE.md](LIBRARY_WIDE.md), with how it could help the others.
+
 ## Build
 
 - Play! is a submodule (`external/Play`); our changes are `patches/NNNN-*.patch`,

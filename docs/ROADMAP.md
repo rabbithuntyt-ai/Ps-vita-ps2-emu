@@ -9,7 +9,8 @@ Goal: most of the PS2 library functional, starting with the **top 50 PS2
 games that have no Vita version**. Work that helps one game only (hand
 ports, per-game rewrites) comes last; everything here targets code that many
 games share: Sony's SDK libraries, middleware (RenderWare, Criware, Havok),
-common VU1 microprograms and common GS usage.
+common VU1 microprograms and common GS usage. What single-game work has
+produced so far, and how it extends to other games: [LIBRARY_WIDE.md](LIBRARY_WIDE.md).
 
 1. **Compatibility harness first.** Vita Lab runs each game unattended
    (autostart, a few minutes, button presses to get past menus) and collects
