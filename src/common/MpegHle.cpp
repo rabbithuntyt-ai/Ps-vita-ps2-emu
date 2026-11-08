@@ -992,12 +992,16 @@ void CMpegHle::HandleGetPicture(CMIPS& ee, bool first)
 	{
 		m_starvedSince = 0;
 		m_wake.notify_all();
+		// Decided before the buffer goes back to the decoder (it is empty then).
+		const bool endOfMovie = picture.macroblocks.empty() || picture.last;
 		if(!picture.macroblocks.empty())
 		{
 			//Silent Hill 2 gets RAW8 macroblocks (it converts the colours on VU1),
 			//Resident Evil 4 RGB32 ones (columns of them go to the GS as textures).
 			size_t bytes = std::min<size_t>(picture.macroblocks.size(), static_cast<size_t>(m_mbCount) * (variant.rgb ? 0x400 : 0x180));
+			auto copyStart = std::chrono::steady_clock::now();
 			if((m_buffer + bytes) <= 0x02000000) std::memcpy(m_ram + m_buffer, picture.macroblocks.data(), bytes);
+			m_stats.copyMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - copyStart).count();
 			if(m_frameIndex < 3) Log("give picture %u after %u waits\n", m_frameIndex, m_waitsThisPicture);
 			// The buffer goes back to the decoder: no new 688 KB to clear per picture.
 			{
@@ -1029,7 +1033,7 @@ void CMpegHle::HandleGetPicture(CMIPS& ee, bool first)
 			}
 			m_frameIndex++;
 		}
-		if(picture.macroblocks.empty() || picture.last)
+		if(endOfMovie)
 		{
 			Write32(m_ram, sys + 0x00, 1);
 			Log("end of the movie after %u pictures\n", m_frameIndex);
@@ -1290,9 +1294,9 @@ void CMpegHle::DecoderThread()
 				m_stats.decodeMs += ms;
 				if((m_stats.decoded % 60) == 1)
 				{
-					Log("picture %u: %.1f ms (avg %.1f), %u returned, %u waits, input %u bytes; all calls %.0f ms, %u short of data (%.0f ms)\n", m_stats.decoded, ms,
+					Log("picture %u: %.1f ms (avg %.1f), %u returned, %u waits, input %u bytes; all calls %.0f ms, %u short of data (%.0f ms); EE thread copying %.0f ms\n", m_stats.decoded, ms,
 					    m_stats.decodeMs / m_stats.decoded, m_stats.pictures, m_stats.waits,
-					    static_cast<unsigned int>(m_working + m_incoming.size()), m_stats.allCallsMs, m_stats.needDataCalls, m_stats.needDataMs);
+					    static_cast<unsigned int>(m_working + m_incoming.size()), m_stats.allCallsMs, m_stats.needDataCalls, m_stats.needDataMs, m_stats.copyMs);
 					uint32_t samples[Mpeg2Profile::STAGE_COUNT], total = 0;
 					for(unsigned int i = 0; i < Mpeg2Profile::STAGE_COUNT; i++) total += (samples[i] = Mpeg2Profile::g_samples[i].load(std::memory_order_relaxed));
 					total = std::max<uint32_t>(total, 1);

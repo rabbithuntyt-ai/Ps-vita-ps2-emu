@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -57,6 +58,7 @@ public:
 		double decodeMs = 0;      //total native decoding time
 		uint32_t decoded = 0;
 		double waitMs = 0;        //EE thread blocked waiting for pictures
+		double copyMs = 0;        //EE thread copying pictures into EE RAM
 		uint32_t starved = 0;     //times the decoder ran out of input
 		double allCallsMs = 0;    //every Decode call, including those short of data
 		uint32_t needDataCalls = 0;
