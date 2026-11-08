@@ -166,20 +166,50 @@ EE samples (`ee_hot_after`), done and left:
 | About 25% | 0x17BEA8/0x17BF30: critical sections, about 5 kernel calls per pair, 2700 pairs/s | Done: a counter in guest code (`thread_lock_hle`) |
 | 12.8% | 0x2AF400: memcpy's byte loop (Sofdec copying video out of sectors) | Done: native |
 | 11.8% | 0x2DADC0: Sofdec scans for start codes byte by byte | Done: native (now 2%) |
-| About 7% | 0x264000-0x2643FF | Not looked at (0x2643C0 is called in a loop per 10 items) |
-| About 5% | 0x298200-0x2984FF: a list of callbacks walked | Not looked at |
-| About 5% | 0x19B000: looks like ADX audio decoding | Native ADX by signature |
+| About 9% | 0x264038: room item flag slot (`GetEtcFlgPtr`, `SceAtItemFindFlgCk`...), counts entries in 10 room tables through `checkRoomRange` | Tried native: **no gain** (see below), reverted |
+| About 6% | 0x298200-0x2984FF: `PS2OT` exec, reset, create (ordering tables) | Not looked at |
+| About 5% | `IdCalcVertex` (0x21D790) | Not looked at |
+| About 2% | `ADX_DecodeSte4AsSte`: CRI ADX audio decoding | Not looked at |
+
+### Cutting EE work does not raise the movie rate (2026-11-07)
+
+Measured warm on the Vita, intro window 60-110 s. Pictures/s is always half the emulated
+fps (Sofdec shows one picture per 2 vblanks), so the goal is 60 emulated fps.
+
+| Change | Pictures/s | Emulated fps | What moved |
+|---|---|---|---|
+| Baseline | 14.1 | 29.3 | EE 0.71, IOP 0.15 of the PS2 thread |
+| Room flag lookup native (9% of EE samples) | 14.1 | 29.3 | Its samples went to CRI's servers (`ADX_DecodeSte4AsSte`, `SJRBF_*`, `SJX_Destroy`): the EE still runs its whole cycle budget per frame |
+| CRI MW idle thread (`adxm_mwidle_proc`, 0x17C318) limited to 2400 cycles per slice, the rest idle | 14.1 | 29.4 | EE 0.71 to 0.63, **IOP 0.15 to 0.24**: the same 32 ms per emulated frame |
+| Same with `iop_rate=50` | 13.8 | 30.7 | IOP still 0.2 |
+| `ee_cycle_rate=60` | 13.7 | 31.0 | The game's frame work does not fit: fewer pictures per vblank |
+| Decoder on core 1 (`mpeg_core=1`) | 11.6 | 24.1 | Decoder 88 ms per picture, EE waits 230 ms/s for pictures |
+
+What this means:
+- The PS2 thread costs about 32 ms per emulated frame whatever is removed from the EE.
+  Time saved on the EE shows up in the IOP. That transfer is **not explained yet**, and
+  it is the next thing to understand: profile the IOP (which modules, which loops) with
+  and without the MW idle rule.
+- **The native decoder is the next limit after that.** It takes about 55 ms of wall time
+  per picture on core 2, which it shares with the SPU2 mixer (17%). That is 78% of the
+  core at 14 pictures/s, so it caps out near 18. 30 pictures/s needs under 33 ms per
+  picture: faster IDCT/motion compensation in NEON, or the two fields of a picture on two
+  cores.
+- Neither code change was kept: no measured gain, and the room lookup is game code that
+  gameplay depends on.
 
 ## Ideas not done yet
 
-1. 0x264xxx and 0x298xxx above; native ADX; the IOP's 17-25% (it does not shrink with
-   `iop_rate`).
-2. Tier 2 recompilation (AOT_TRANSLATION.md). After the items above it is probably what
+1. Find where the IOP's time goes in movies (above): it grows when the EE gets cheaper,
+   and does not shrink with `iop_rate`.
+2. A faster native MPEG decoder (above). Helps every movie game.
+3. 0x298xxx (`PS2OT`), `IdCalcVertex`, native ADX.
+4. Tier 2 recompilation (AOT_TRANSLATION.md). After the items above it is probably what
    stands between about 20 and 30 pictures/s.
-3. Convert pictures straight into a GL texture, skipping EE RAM and the GIF: each picture
+5. Convert pictures straight into a GL texture, skipping EE RAM and the GIF: each picture
    is copied to EE RAM, then to the GS in 16 pixel columns.
-4. Larger slices only while EE and IOP are both idle. 38400 broke RE4 but gave 58.5 fps.
-5. Reach gameplay, then make a save state for repeatable measurements.
+6. Larger slices only while EE and IOP are both idle. 38400 broke RE4 but gave 58.5 fps.
+7. Reach gameplay, then make a save state for repeatable measurements.
 
 ## Tools added
 

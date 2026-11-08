@@ -96,5 +96,12 @@ class that is on for every game, with each replacement still behind its own sign
   shorter, the game is waiting for time (IOP, disc), not working. Find the poll loop with
   `ee_hot_after` and end the slice there. If `vm_fps` is near full speed instead, the load
   is real EE work: look for a library routine to make native (RE4: the DLL linker).
+- **Less EE work is not always more speed.** In RE4's movie, removing 9% of the EE's work
+  changed nothing: CRI's MW idle thread used the freed cycles, and when that thread was
+  made idle the IOP took the time instead. Before replacing a routine, check that the EE's
+  share of the PS2 thread falls *and* `vm_fps` rises (an A/B run, warm JIT cache).
+- **The native MPEG decoder is close to its limit.** About 55 ms of wall time per 512x336
+  picture on core 2, next to the SPU2 mixer. Any movie game above about 18 pictures/s will
+  need it faster.
 - **Check for sleeping before optimising.** In RE4's intro a third of the time was a wait,
   with idle CPU on all three cores, and no hotspot pointed to it.
