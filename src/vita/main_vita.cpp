@@ -663,7 +663,13 @@ namespace
 			sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */);
 			sceKernelChangeThreadPriority(sceKernelGetThreadId(), 160);
 		};
-		config.profilerThreadInit = []() { sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */); };
+		// The profiler samples every 1 ms and does almost nothing: above the decoder
+		// and the mixer, or it only samples while they sleep (a decoder at equal
+		// priority kept it off core 2 for a whole picture).
+		config.profilerThreadInit = []() {
+			sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */);
+			sceKernelChangeThreadPriority(sceKernelGetThreadId(), 150);
+		};
 		config.soundFactory = &CSH_Vita::HandlerFactory;
 		config.interlacedRendering = settings.interlaced;
 		config.frameSkip = settings.frameSkip;
@@ -715,6 +721,7 @@ namespace
 				uint32_t mpegCoreMask = 0x10000u << std::min<uint32_t>(settings.mpegCore, 2);
 				mpegHle.Enable(session->GetVm()->m_ee->m_ram, "ux0:data/VitaPS2/mpeghle.txt", [mpegCoreMask]() {
 					sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mpegCoreMask);
+					ThreadProfiler::RegisterCurrentThread("MPEG decoder");
 				});
 			}
 			// Scripted runs: gs_diag=N logs N flips (buffers, targets) to gsdiag.txt.

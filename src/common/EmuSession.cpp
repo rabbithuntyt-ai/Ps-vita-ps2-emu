@@ -23,6 +23,7 @@
 #include "iop/Iop_SubSystem.h"
 #include "GSH_Software.h"
 #include "ThreadProfiler.h"
+#include "Mpeg2Decoder.h"
 #include "EmuProfile.h"
 
 namespace
@@ -313,9 +314,11 @@ void CEmuSession::ProfilerProc()
 {
 	while(!m_stopProfiler)
 	{
-		std::this_thread::sleep_for(std::chrono::microseconds(500));
+		std::this_thread::sleep_for(std::chrono::microseconds(1000));
 		unsigned int section = EmuProfile::g_section.load(std::memory_order_relaxed);
 		if(section < EmuProfile::SECTION_COUNT) m_profileCounts[section]++;
+		unsigned int stage = Mpeg2Profile::g_stage.load(std::memory_order_relaxed);
+		if(stage < Mpeg2Profile::STAGE_COUNT) Mpeg2Profile::g_samples[stage].fetch_add(1, std::memory_order_relaxed);
 		// Racy reads of the PC: blocks store it when they exit, so it points
 		// at (or just past) the code that is running.
 		if((section == EmuProfile::SECTION_EE) && m_vm)

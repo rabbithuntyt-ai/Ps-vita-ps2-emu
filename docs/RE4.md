@@ -217,6 +217,27 @@ is worth a native replacement for the movie. CSE is in other Capcom games of 200
 a signature if one of them is IOP bound). Why the IOP's time grew when the EE's MW idle
 thread was cut is still open.
 
+### The native decoder, faster (2026-11-07)
+
+Measured over the same 22 s of the intro (warm), the decoder thread now in `threads`
+(`MPEG decoder`) and its stages in `mpeghle.txt` (`stages`, sampled by the profiler,
+which now runs above the decoder: at equal priority it could not sample it at all).
+
+| Build | Decoder CPU per picture | Wall time per picture |
+|---|---|---|
+| Before | 35 ms | 52-56 ms |
+| + NEON IDCT, bit reader with one load, no 688 KB clear and no log line per picture | 31.8 ms | 45 ms |
+| + MPEG-2 escape codes decoded directly (about 2000 per picture took the bit by bit table search) | **30.9 ms** | **42 ms** |
+
+- The NEON IDCT gives exactly the integer IDCT's results: the start-up self-test compares
+  them on the Vita (0 mismatches), `idct_tests` compares the scalar copy with
+  Framework's on 200000 blocks, and a whole stream decodes to the same bytes as before.
+- Stage split of the decoder's busy time: parsing about 45%, output (CSC into libmpeg's
+  layout) about 20%, IDCT and prediction about 15% each.
+- Core 2 also runs the SPU2 mixer (17%), so the decoder can now keep up with about 26
+  pictures/s. **It is no longer the next limit; the emulation thread (14) is.** For 30:
+  parsing (a cheaper bit reader in `DecodeMacroblock`) and the CSC.
+
 ### What a real 30 pictures/s needs
 
 The emulation thread costs about 32 ms per emulated frame against 16.6. It is spread out:
@@ -225,8 +246,8 @@ servers, Capcom's IOP mixer, kernel calls. The largest single item left is under
 cutting EE work alone has not raised the frame rate. Two big pieces would:
 1. **Faster EE and IOP code for every game**: tier 2 recompilation (AOT_TRANSLATION.md)
    or JIT work on block linking and register allocation. Roughly 2x is needed.
-2. **A faster native MPEG decoder** (about 55 ms per picture now, under 33 needed).
-   Without it, a faster emulation thread stops near 18 pictures/s.
+2. **A faster native MPEG decoder**: done in part, 42 ms of wall time per picture (was
+   55). Enough for about 26 pictures/s; 30 needs under about 28 ms of CPU.
 
 ## Ideas not done yet
 

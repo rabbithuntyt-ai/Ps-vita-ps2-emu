@@ -9,6 +9,9 @@
 #include <algorithm>
 #include <initializer_list>
 #include "idct/IEEE1180.h"
+#include <cstring>
+#include <random>
+#include "../src/common/Mpeg2Simd.h"
 
 namespace
 {
@@ -133,6 +136,24 @@ int main()
 	int16 zero[64] = {}, out[64];
 	IDCT::CIEEE1180::GetInstance()->Transform(zero, out);
 	for(int16 v : out) ok &= (v == 0);
+
+	// The native MPEG decoder's copy (Mpeg2Simd::IdctScalar, checked against its
+	// NEON version on the Vita at start-up) must match this IDCT exactly.
+	{
+		std::mt19937 random(99);
+		unsigned int mismatches = 0;
+		for(int test = 0; test < 200000; test++)
+		{
+			int16 block[64] = {}, expected[64], result[64];
+			unsigned int count = (random() % 8 == 0) ? 64 : (1 + random() % 12);
+			for(unsigned int i = 0; i < count; i++) block[random() % 64] = static_cast<int16>(static_cast<int>(random() % 4096) - 2048);
+			IDCT::CIEEE1180::GetInstance()->Transform(block, expected);
+			Mpeg2Simd::IdctScalar(block, result);
+			if(std::memcmp(expected, result, sizeof(result)) != 0) mismatches++;
+		}
+		std::printf("decoder IDCT copy: %u mismatches in 200000 blocks\n", mismatches);
+		ok &= (mismatches == 0);
+	}
 
 	// Speed (informational).
 	int16 coeffs[64];

@@ -134,6 +134,16 @@ struct CMpeg2Decoder::BITS : public Framework::CBitStream
 			return true;
 		}
 		size_t byte = bitPosition >> 3;
+		if((count <= 25) && (byte + 4 <= size))
+		{
+			// One unaligned big endian word holds up to 25 bits at any bit offset
+			// (one load instead of eight on 32 bit ARM).
+			uint32_t word;
+			std::memcpy(&word, data + byte, 4);
+			word = __builtin_bswap32(word);
+			result = (word << (bitPosition & 7)) >> (32 - count);
+			return true;
+		}
 		if(byte + 8 <= size)
 		{
 			// 8 bytes big endian hold the 32 bits wanted at any bit offset.
@@ -868,6 +878,21 @@ bool CMpeg2Decoder::DecodeBlock(BITS& bits, int component, bool intra, int16_t* 
 			index++;
 			continue;
 		}
+		// MPEG-2 escape (both tables): 000001, 6 bit run, 12 bit signed level. About
+		// 2000 per picture in RE4's intro, each a bit by bit table search otherwise.
+		if(m_isMpeg2 && ((code >> (BITS::LUT_BITS - 6)) == 1))
+		{
+			uint32_t escape = bits.Peek(24);
+			bits.bitPosition += 24;
+			index += (escape >> 12) & 0x3F;
+			if(index >= 64) return false;
+			int level = static_cast<int>(escape & 0xFFF);
+			if(level & 0x800) level -= 0x1000;
+			coefficients[index] = level;
+			used[usedCount++] = static_cast<uint8_t>(index);
+			index++;
+			continue;
+		}
 		bool eob = false;
 		check(table.TryIsEndOfBlock(&bits, eob));
 		if(eob)
@@ -921,7 +946,9 @@ bool CMpeg2Decoder::DecodeBlock(BITS& bits, int component, bool intra, int16_t* 
 	}
 	// MPEG-2 mismatch control (the emulated IPU does not apply it).
 	if(!m_ipuCompatibleQuantisation && ((sum & 1) == 0)) input[63] += (input[63] & 1) ? -1 : 1;
-	IDCT::CIEEE1180::GetInstance()->Transform(input, raster);
+	Mpeg2Profile::Set(Mpeg2Profile::STAGE_IDCT);
+	Mpeg2Simd::Idct(input, raster); //same results as IDCT::CIEEE1180 (tests/mpeg2_simd_tests.cpp)
+	Mpeg2Profile::Set(Mpeg2Profile::STAGE_PARSE);
 	return true;
 }
 
@@ -979,6 +1006,13 @@ namespace
 }
 
 void CMpeg2Decoder::PredictMacroblock(uint32_t mbx, uint32_t mby, int mbType, int motionType)
+{
+	Mpeg2Profile::Set(Mpeg2Profile::STAGE_PREDICT);
+	PredictMacroblockPlanes(mbx, mby, mbType, motionType);
+	Mpeg2Profile::Set(Mpeg2Profile::STAGE_PARSE);
+}
+
+void CMpeg2Decoder::PredictMacroblockPlanes(uint32_t mbx, uint32_t mby, int mbType, int motionType)
 {
 	FRAME& dst = *m_current;
 	uint32_t width = m_width, chromaWidth = m_width / 2;
@@ -1054,7 +1088,9 @@ void CMpeg2Decoder::AddBlock(const int16_t* block, uint32_t mbx, uint32_t mby, i
 		base = &plane[(mby * 8) * (m_width / 2) + mbx * 8];
 		stride = m_width / 2;
 	}
+	Mpeg2Profile::Set(Mpeg2Profile::STAGE_ADD);
 	Mpeg2Simd::AddBlock(base, stride, block, intra);
+	Mpeg2Profile::Set(Mpeg2Profile::STAGE_PARSE);
 }
 
 void CMpeg2Decoder::FinishPicture()

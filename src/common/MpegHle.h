@@ -58,6 +58,9 @@ public:
 		uint32_t decoded = 0;
 		double waitMs = 0;        //EE thread blocked waiting for pictures
 		uint32_t starved = 0;     //times the decoder ran out of input
+		double allCallsMs = 0;    //every Decode call, including those short of data
+		uint32_t needDataCalls = 0;
+		double needDataMs = 0;    //work thrown away: pictures decoded in part, then short of data
 		uint32_t adxPolls = 0;    //ADXM_ExecMain calls that ended the EE's slice (polling for a file)
 		uint32_t dllLookups = 0;  //SN DLL symbol scans done natively
 	};
@@ -139,6 +142,7 @@ private:
 	std::vector<uint8_t> m_incoming; //from DMA4, not taken by the decoder yet
 	size_t m_working = 0;            //bytes the decoder holds
 	std::deque<PICTURE> m_pictures;
+	std::vector<std::vector<uint8_t>> m_freeBuffers; //macroblock buffers given back by the EE thread
 	uint32_t m_generation = 0;       //bumped by resets
 	bool m_quit = false;
 	std::atomic<bool> m_outputRgb{false}; //set before the input sink is: read by the decoder thread

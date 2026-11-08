@@ -101,8 +101,9 @@ class that is on for every game, with each replacement still behind its own sign
   changed nothing: CRI's MW idle thread used the freed cycles, and when that thread was
   made idle the IOP took the time instead. Before replacing a routine, check that the EE's
   share of the PS2 thread falls *and* `vm_fps` rises (an A/B run, warm JIT cache).
-- **The native MPEG decoder is close to its limit.** About 55 ms of wall time per 512x336
-  picture on core 2, next to the SPU2 mixer. Any movie game above about 18 pictures/s will
-  need it faster.
+- **The native MPEG decoder is faster for every movie game**: NEON IDCT (bit exact),
+  a one-load bit reader, MPEG-2 escape codes without the table search, recycled picture
+  buffers. 512x336 pictures: 35 to 31 ms of CPU, 55 to 42 ms of wall time on core 2.
+  Enough for about 26 pictures/s next to the SPU2 mixer.
 - **Check for sleeping before optimising.** In RE4's intro a third of the time was a wait,
   with idle CPU on all three cores, and no hotspot pointed to it.

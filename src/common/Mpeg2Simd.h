@@ -191,6 +191,210 @@ namespace Mpeg2Simd
 
 namespace Mpeg2Simd
 {
+	// 8x8 inverse DCT: Chen-Wang in integers, exactly Framework's
+	// IDCT::CIEEE1180::Transform (mpeg2decode's idct.c). The zero-row shortcuts
+	// there give the same values as the full formula, so none are needed here.
+	namespace IdctConstants
+	{
+		enum
+		{
+			W1 = 2841,
+			W2 = 2676,
+			W3 = 2408,
+			W5 = 1609,
+			W6 = 1108,
+			W7 = 565,
+		};
+	}
+
+	inline void IdctScalar(const int16_t* in, int16_t* out)
+	{
+		using namespace IdctConstants;
+		int b[64];
+		for(int i = 0; i < 64; i++) b[i] = in[i];
+		for(int r = 0; r < 8; r++)
+		{
+			int* blk = b + 8 * r;
+			int x0 = (blk[0] * 2048) + 128, x1 = blk[4] * 2048, x2 = blk[6], x3 = blk[2], x4 = blk[1], x5 = blk[7], x6 = blk[5], x7 = blk[3], x8;
+			x8 = W7 * (x4 + x5);
+			x4 = x8 + (W1 - W7) * x4;
+			x5 = x8 - (W1 + W7) * x5;
+			x8 = W3 * (x6 + x7);
+			x6 = x8 - (W3 - W5) * x6;
+			x7 = x8 - (W3 + W5) * x7;
+			x8 = x0 + x1;
+			x0 -= x1;
+			x1 = W6 * (x3 + x2);
+			x2 = x1 - (W2 + W6) * x2;
+			x3 = x1 + (W2 - W6) * x3;
+			x1 = x4 + x6;
+			x4 -= x6;
+			x6 = x5 + x7;
+			x5 -= x7;
+			x7 = x8 + x3;
+			x8 -= x3;
+			x3 = x0 + x2;
+			x0 -= x2;
+			x2 = (181 * (x4 + x5) + 128) >> 8;
+			x4 = (181 * (x4 - x5) + 128) >> 8;
+			blk[0] = (x7 + x1) >> 8;
+			blk[1] = (x3 + x2) >> 8;
+			blk[2] = (x0 + x4) >> 8;
+			blk[3] = (x8 + x6) >> 8;
+			blk[4] = (x8 - x6) >> 8;
+			blk[5] = (x0 - x4) >> 8;
+			blk[6] = (x3 - x2) >> 8;
+			blk[7] = (x7 - x1) >> 8;
+		}
+		auto clip = [](int value) { return static_cast<int16_t>((value < -256) ? -256 : ((value > 255) ? 255 : value)); };
+		for(int c = 0; c < 8; c++)
+		{
+			const int* blk = b + c;
+			int x0 = (blk[0] * 256) + 8192, x1 = blk[32] * 256, x2 = blk[48], x3 = blk[16], x4 = blk[8], x5 = blk[56], x6 = blk[40], x7 = blk[24], x8;
+			x8 = W7 * (x4 + x5) + 4;
+			x4 = (x8 + (W1 - W7) * x4) >> 3;
+			x5 = (x8 - (W1 + W7) * x5) >> 3;
+			x8 = W3 * (x6 + x7) + 4;
+			x6 = (x8 - (W3 - W5) * x6) >> 3;
+			x7 = (x8 - (W3 + W5) * x7) >> 3;
+			x8 = x0 + x1;
+			x0 -= x1;
+			x1 = W6 * (x3 + x2) + 4;
+			x2 = (x1 - (W2 + W6) * x2) >> 3;
+			x3 = (x1 + (W2 - W6) * x3) >> 3;
+			x1 = x4 + x6;
+			x4 -= x6;
+			x6 = x5 + x7;
+			x5 -= x7;
+			x7 = x8 + x3;
+			x8 -= x3;
+			x3 = x0 + x2;
+			x0 -= x2;
+			x2 = (181 * (x4 + x5) + 128) >> 8;
+			x4 = (181 * (x4 - x5) + 128) >> 8;
+			out[c + 0] = clip((x7 + x1) >> 14);
+			out[c + 8] = clip((x3 + x2) >> 14);
+			out[c + 16] = clip((x0 + x4) >> 14);
+			out[c + 24] = clip((x8 + x6) >> 14);
+			out[c + 32] = clip((x8 - x6) >> 14);
+			out[c + 40] = clip((x0 - x4) >> 14);
+			out[c + 48] = clip((x3 - x2) >> 14);
+			out[c + 56] = clip((x7 - x1) >> 14);
+		}
+	}
+
+#if defined(__ARM_NEON)
+	inline void Transpose4(int32x4_t& a, int32x4_t& b, int32x4_t& c, int32x4_t& d)
+	{
+		int32x4x2_t ab = vtrnq_s32(a, b), cd = vtrnq_s32(c, d);
+		a = vcombine_s32(vget_low_s32(ab.val[0]), vget_low_s32(cd.val[0]));
+		b = vcombine_s32(vget_low_s32(ab.val[1]), vget_low_s32(cd.val[1]));
+		c = vcombine_s32(vget_high_s32(ab.val[0]), vget_high_s32(cd.val[0]));
+		d = vcombine_s32(vget_high_s32(ab.val[1]), vget_high_s32(cd.val[1]));
+	}
+
+	// One pass over 4 lanes: v[k] is coefficient k of each lane's row (or column).
+	// rowPass: the first pass's rounding; otherwise the second's.
+	template <bool rowPass>
+	inline void IdctPass(int32x4_t* v)
+	{
+		using namespace IdctConstants;
+		int32x4_t x0, x1, x2 = v[6], x3 = v[2], x4 = v[1], x5 = v[7], x6 = v[5], x7 = v[3], x8;
+		if(rowPass)
+		{
+			x0 = vaddq_s32(vshlq_n_s32(v[0], 11), vdupq_n_s32(128));
+			x1 = vshlq_n_s32(v[4], 11);
+			x8 = vmulq_n_s32(vaddq_s32(x4, x5), W7);
+			x4 = vmlaq_n_s32(x8, x4, W1 - W7);
+			x5 = vmlsq_n_s32(x8, x5, W1 + W7);
+			x8 = vmulq_n_s32(vaddq_s32(x6, x7), W3);
+			x6 = vmlsq_n_s32(x8, x6, W3 - W5);
+			x7 = vmlsq_n_s32(x8, x7, W3 + W5);
+		}
+		else
+		{
+			x0 = vaddq_s32(vshlq_n_s32(v[0], 8), vdupq_n_s32(8192));
+			x1 = vshlq_n_s32(v[4], 8);
+			x8 = vmlaq_n_s32(vdupq_n_s32(4), vaddq_s32(x4, x5), W7);
+			x4 = vshrq_n_s32(vmlaq_n_s32(x8, x4, W1 - W7), 3);
+			x5 = vshrq_n_s32(vmlsq_n_s32(x8, x5, W1 + W7), 3);
+			x8 = vmlaq_n_s32(vdupq_n_s32(4), vaddq_s32(x6, x7), W3);
+			x6 = vshrq_n_s32(vmlsq_n_s32(x8, x6, W3 - W5), 3);
+			x7 = vshrq_n_s32(vmlsq_n_s32(x8, x7, W3 + W5), 3);
+		}
+		x8 = vaddq_s32(x0, x1);
+		x0 = vsubq_s32(x0, x1);
+		if(rowPass)
+		{
+			x1 = vmulq_n_s32(vaddq_s32(x3, x2), W6);
+			x2 = vmlsq_n_s32(x1, x2, W2 + W6);
+			x3 = vmlaq_n_s32(x1, x3, W2 - W6);
+		}
+		else
+		{
+			x1 = vmlaq_n_s32(vdupq_n_s32(4), vaddq_s32(x3, x2), W6);
+			x2 = vshrq_n_s32(vmlsq_n_s32(x1, x2, W2 + W6), 3);
+			x3 = vshrq_n_s32(vmlaq_n_s32(x1, x3, W2 - W6), 3);
+		}
+		x1 = vaddq_s32(x4, x6);
+		x4 = vsubq_s32(x4, x6);
+		x6 = vaddq_s32(x5, x7);
+		x5 = vsubq_s32(x5, x7);
+		x7 = vaddq_s32(x8, x3);
+		x8 = vsubq_s32(x8, x3);
+		x3 = vaddq_s32(x0, x2);
+		x0 = vsubq_s32(x0, x2);
+		const int32x4_t round = vdupq_n_s32(128);
+		x2 = vshrq_n_s32(vmlaq_n_s32(round, vaddq_s32(x4, x5), 181), 8);
+		x4 = vshrq_n_s32(vmlaq_n_s32(round, vsubq_s32(x4, x5), 181), 8);
+		int32x4_t r[8] = {vaddq_s32(x7, x1), vaddq_s32(x3, x2), vaddq_s32(x0, x4), vaddq_s32(x8, x6),
+		                  vsubq_s32(x8, x6), vsubq_s32(x0, x4), vsubq_s32(x3, x2), vsubq_s32(x7, x1)};
+		for(int k = 0; k < 8; k++) v[k] = rowPass ? vshrq_n_s32(r[k], 8) : vshrq_n_s32(r[k], 14);
+	}
+#endif
+
+	inline void Idct(const int16_t* in, int16_t* out)
+	{
+#if defined(__ARM_NEON)
+		if(!g_neon) return IdctScalar(in, out);
+		// a: rows 0-3, b: rows 4-7; a[k] holds coefficient k of each row.
+		int32x4_t a[8], b[8];
+		for(int k = 0; k < 2; k++)
+		{
+			for(int r = 0; r < 4; r++)
+			{
+				a[k * 4 + r] = vmovl_s16(vld1_s16(in + 8 * r + 4 * k));
+				b[k * 4 + r] = vmovl_s16(vld1_s16(in + 8 * (r + 4) + 4 * k));
+			}
+			Transpose4(a[k * 4], a[k * 4 + 1], a[k * 4 + 2], a[k * 4 + 3]);
+			Transpose4(b[k * 4], b[k * 4 + 1], b[k * 4 + 2], b[k * 4 + 3]);
+		}
+		IdctPass<true>(a);
+		IdctPass<true>(b);
+		// Back to rows: lo[r] columns 0-3 of row r, hi[r] columns 4-7.
+		int32x4_t lo[8] = {a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]};
+		int32x4_t hi[8] = {a[4], a[5], a[6], a[7], b[4], b[5], b[6], b[7]};
+		Transpose4(lo[0], lo[1], lo[2], lo[3]);
+		Transpose4(lo[4], lo[5], lo[6], lo[7]);
+		Transpose4(hi[0], hi[1], hi[2], hi[3]);
+		Transpose4(hi[4], hi[5], hi[6], hi[7]);
+		IdctPass<false>(lo);
+		IdctPass<false>(hi);
+		const int32x4_t low = vdupq_n_s32(-256), high = vdupq_n_s32(255);
+		for(int r = 0; r < 8; r++)
+		{
+			int16x4_t left = vmovn_s32(vminq_s32(vmaxq_s32(lo[r], low), high));
+			int16x4_t right = vmovn_s32(vminq_s32(vmaxq_s32(hi[r], low), high));
+			vst1q_s16(out + 8 * r, vcombine_s16(left, right));
+		}
+#else
+		IdctScalar(in, out);
+#endif
+	}
+}
+
+namespace Mpeg2Simd
+{
 	// Runs the kernels against the scalar versions on random data; returns the
 	// number of mismatches and turns the NEON kernels off if there are any.
 	inline unsigned int SelfTest(unsigned int iterations = 4000)
@@ -234,6 +438,16 @@ namespace Mpeg2Simd
 			ConvertMacroblockScalar(luma, 16, cb, cr, 8, expected);
 			ConvertMacroblock(luma, 16, cb, cr, 8, pixels);
 			if(std::memcmp(expected, pixels, sizeof(pixels)) != 0) failures++;
+		}
+		for(unsigned int test = 0; test < iterations; test++)
+		{
+			int16_t block[64] = {}, expected[64], result[64];
+			// Sparse like real blocks, sometimes full, the whole range of values.
+			unsigned int count = (random() % 8 == 0) ? 64 : (1 + random() % 12);
+			for(unsigned int i = 0; i < count; i++) block[random() % 64] = static_cast<int16_t>(static_cast<int>(random() % 4096) - 2048);
+			IdctScalar(block, expected);
+			Idct(block, result);
+			if(std::memcmp(expected, result, sizeof(result)) != 0) failures++;
 		}
 		if(failures != 0) g_neon = false;
 		return failures;

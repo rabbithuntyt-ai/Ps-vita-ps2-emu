@@ -11,9 +11,31 @@
 // The stream is given as a contiguous buffer; Decode() consumes whole pictures
 // only, so a caller can retry with more data when a picture is incomplete.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+
+// Profiling: the decoder thread's current stage, sampled by the profiler thread.
+namespace Mpeg2Profile
+{
+	enum STAGE
+	{
+		STAGE_IDLE,    //waiting for input or room for pictures
+		STAGE_PARSE,   //headers, VLC, inverse quantisation
+		STAGE_IDCT,
+		STAGE_PREDICT, //motion compensation
+		STAGE_ADD,     //residual added to the prediction
+		STAGE_OUTPUT,  //pictures copied/converted to libmpeg's macroblock layout
+		STAGE_COUNT
+	};
+	inline std::atomic<uint8_t> g_stage{STAGE_IDLE};
+	inline std::atomic<uint32_t> g_samples[STAGE_COUNT];
+	inline void Set(STAGE stage)
+	{
+		g_stage.store(static_cast<uint8_t>(stage), std::memory_order_relaxed);
+	}
+}
 
 class CMpeg2Decoder
 {
@@ -83,6 +105,7 @@ private:
 	bool DecodeMotionVectors(BITS&, int direction, int motionVectorCount, int mvFormat, bool dmv);
 	bool DecodeBlock(BITS&, int component, bool intra, int16_t* block);
 	void PredictMacroblock(uint32_t mbx, uint32_t mby, int mbType, int motionType);
+	void PredictMacroblockPlanes(uint32_t mbx, uint32_t mby, int mbType, int motionType);
 	void AddBlock(const int16_t* block, uint32_t mbx, uint32_t mby, int index, bool intra, bool fieldDct);
 	void FinishPicture();
 

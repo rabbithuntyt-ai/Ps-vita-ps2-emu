@@ -998,7 +998,12 @@ void CMpegHle::HandleGetPicture(CMIPS& ee, bool first)
 			//Resident Evil 4 RGB32 ones (columns of them go to the GS as textures).
 			size_t bytes = std::min<size_t>(picture.macroblocks.size(), static_cast<size_t>(m_mbCount) * (variant.rgb ? 0x400 : 0x180));
 			if((m_buffer + bytes) <= 0x02000000) std::memcpy(m_ram + m_buffer, picture.macroblocks.data(), bytes);
-			if(m_frameIndex < 400) Log("give picture %u after %u waits\n", m_frameIndex, m_waitsThisPicture);
+			if(m_frameIndex < 3) Log("give picture %u after %u waits\n", m_frameIndex, m_waitsThisPicture);
+			// The buffer goes back to the decoder: no new 688 KB to clear per picture.
+			{
+				std::lock_guard<std::mutex> lock(m_mutex);
+				if(m_freeBuffers.size() < 4) m_freeBuffers.push_back(std::move(picture.macroblocks));
+			}
 			//libmpeg's per-picture fields (docs/HLE_MPEG.md): picture size (set
 			//by libmpeg from the sequence header), frame count from 0,
 			//timestamps at 29.97 Hz, frame picture flags.
@@ -1185,11 +1190,19 @@ void CMpegHle::DecoderThread()
 			needData = false;
 		}
 		m_working = work.size() - readPosition;
+		std::vector<uint8_t> buffer;
+		if(!m_freeBuffers.empty())
+		{
+			buffer = std::move(m_freeBuffers.back());
+			m_freeBuffers.pop_back();
+		}
 		lock.unlock();
 
 		size_t consumed = 0;
 		auto start = std::chrono::steady_clock::now();
+		Mpeg2Profile::Set(Mpeg2Profile::STAGE_PARSE);
 		auto result = decoder.Decode(work.data() + readPosition, work.size() - readPosition, false, consumed);
+		Mpeg2Profile::Set(Mpeg2Profile::STAGE_OUTPUT);
 		PICTURE picture;
 		bool push = false;
 		if(result == CMpeg2Decoder::RESULT_PICTURE)
@@ -1197,6 +1210,9 @@ void CMpegHle::DecoderThread()
 			const auto& frame = decoder.GetPicture();
 			uint32_t mbWidth = frame.width / 16, mbHeight = frame.height / 16;
 			bool rgb = m_outputRgb;
+			// A recycled buffer of the same size is not cleared again (every byte
+			// is written below).
+			picture.macroblocks = std::move(buffer);
 			picture.macroblocks.resize(mbWidth * mbHeight * (rgb ? 0x400 : 0x180));
 			picture.width = frame.width;
 			picture.height = frame.height;
@@ -1224,7 +1240,7 @@ void CMpegHle::DecoderThread()
 				}
 			}
 			picture.last = decoder.PictureEndsSequence();
-			if(m_stats.decoded < 400) Log("decoded type %d tref %u, %.1f ms, %u bytes\n", frame.pictureType, frame.temporalReference, 0.0, static_cast<unsigned int>(consumed));
+			if(m_stats.decoded < 3) Log("decoded type %d tref %u, %u bytes\n", frame.pictureType, frame.temporalReference, static_cast<unsigned int>(consumed));
 			push = true;
 		}
 		else if(result == CMpeg2Decoder::RESULT_END)
@@ -1241,9 +1257,16 @@ void CMpegHle::DecoderThread()
 			consumed = std::min<size_t>(4, work.size() - readPosition);
 		}
 		double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+		Mpeg2Profile::Set(Mpeg2Profile::STAGE_IDLE);
 		readPosition += consumed;
 
 		lock.lock();
+		m_stats.allCallsMs += ms;
+		if(result == CMpeg2Decoder::RESULT_NEED_DATA)
+		{
+			m_stats.needDataCalls++;
+			m_stats.needDataMs += ms;
+		}
 		if(generation != m_generation) continue; //reset while decoding
 		m_working = work.size() - readPosition;
 		if(result == CMpeg2Decoder::RESULT_NEED_DATA)
@@ -1267,9 +1290,15 @@ void CMpegHle::DecoderThread()
 				m_stats.decodeMs += ms;
 				if((m_stats.decoded % 60) == 1)
 				{
-					Log("picture %u: %.1f ms (avg %.1f), %u returned, %u waits, input %u bytes\n", m_stats.decoded, ms,
+					Log("picture %u: %.1f ms (avg %.1f), %u returned, %u waits, input %u bytes; all calls %.0f ms, %u short of data (%.0f ms)\n", m_stats.decoded, ms,
 					    m_stats.decodeMs / m_stats.decoded, m_stats.pictures, m_stats.waits,
-					    static_cast<unsigned int>(m_working + m_incoming.size()));
+					    static_cast<unsigned int>(m_working + m_incoming.size()), m_stats.allCallsMs, m_stats.needDataCalls, m_stats.needDataMs);
+					uint32_t samples[Mpeg2Profile::STAGE_COUNT], total = 0;
+					for(unsigned int i = 0; i < Mpeg2Profile::STAGE_COUNT; i++) total += (samples[i] = Mpeg2Profile::g_samples[i].load(std::memory_order_relaxed));
+					total = std::max<uint32_t>(total, 1);
+					Log("  stages (wall time): idle %.0f%% parse %.0f%% idct %.0f%% predict %.0f%% add %.0f%% output %.0f%%\n",
+					    samples[0] * 100.0 / total, samples[1] * 100.0 / total, samples[2] * 100.0 / total, samples[3] * 100.0 / total,
+					    samples[4] * 100.0 / total, samples[5] * 100.0 / total);
 				}
 			}
 		}
