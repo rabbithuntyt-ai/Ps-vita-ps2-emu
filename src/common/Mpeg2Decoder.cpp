@@ -203,6 +203,20 @@ struct CMpeg2Decoder::BITS : public Framework::CBitStream
 		return size;
 	}
 
+	// The next 'count' bits, zero padded at the end of the data.
+	uint32_t PeekPadded(uint8 count)
+	{
+		uint32 value = 0;
+		size_t available = size * 8 - std::min(bitPosition, size * 8);
+		if(available >= count)
+		{
+			TryPeekBits_MSBF(count, value);
+			return value;
+		}
+		if(available != 0) TryPeekBits_MSBF(static_cast<uint8>(available), value);
+		return value << (count - available);
+	}
+
 	// The next LUT_BITS bits, zero padded at the end of the data.
 	uint32_t PeekLut()
 	{
@@ -254,16 +268,49 @@ namespace
 		uint8_t kind[LUT_SIZE];
 	};
 
-	// A stream of 'code' (LUT_BITS bits, MSB first) followed by zeros.
+	// A stream of 'code' (LUT_BITS bits, or 'bits', MSB first) followed by zeros.
 	struct PREFIX
 	{
 		uint8_t bytes[8] = {};
-		explicit PREFIX(uint32_t code)
+		explicit PREFIX(uint32_t code, uint32_t bits = CMpeg2Decoder::BITS::LUT_BITS)
 		{
-			uint32_t word = code << (32 - CMpeg2Decoder::BITS::LUT_BITS);
+			uint32_t word = code << (32 - bits);
 			for(unsigned int i = 0; i < 4; i++) bytes[i] = static_cast<uint8_t>(word >> (24 - i * 8));
 		}
 	};
+
+	// DCT codes longer than LUT_BITS all start with 7 zero bits (12-16 bit codes and
+	// the sign): a second table indexed by the 10 bits after them.
+	constexpr uint32_t LONG_PREFIX_ZEROS = 7;
+	constexpr uint32_t LONG_BITS = 10;
+	constexpr uint32_t LONG_SIZE = 1u << LONG_BITS;
+	struct DCT_LONG_LUT
+	{
+		int16_t level[LONG_SIZE];
+		uint8_t run[LONG_SIZE];
+		uint8_t length[LONG_SIZE]; //total bits, prefix included
+		uint8_t kind[LONG_SIZE];
+	};
+
+	void BuildDctLongLut(DCT_LONG_LUT& lut, CDctCoefficientTable& table)
+	{
+		for(uint32_t code = 0; code < LONG_SIZE; code++)
+		{
+			PREFIX prefix(code, LONG_PREFIX_ZEROS + LONG_BITS);
+			CMpeg2Decoder::BITS bits(prefix.bytes, sizeof(prefix.bytes));
+			lut.kind[code] = DCT_SLOW;
+			bool eob = false;
+			if(table.TryIsEndOfBlock(&bits, eob) != CVLCTable::DECODE_STATUS_SUCCESS) continue;
+			if(eob) continue; //EOB is short: never here
+			RUNLEVELPAIR pair;
+			if(table.TryGetRunLevelPair(&bits, &pair, true) != CVLCTable::DECODE_STATUS_SUCCESS) continue;
+			if((pair.run >= 64) || (bits.bitPosition > LONG_PREFIX_ZEROS + LONG_BITS)) continue;
+			lut.kind[code] = DCT_RUNLEVEL;
+			lut.run[code] = static_cast<uint8_t>(pair.run);
+			lut.level[code] = static_cast<int16_t>(pair.level);
+			lut.length[code] = static_cast<uint8_t>(bits.bitPosition);
+		}
+	}
 
 	void BuildSymbolLut(SYMBOL_LUT& lut, CVLCTable* table)
 	{
@@ -324,9 +371,12 @@ namespace
 		SYMBOL_LUT symbols[9];
 		DCT_LUT dct[2];
 		DCT_LUT dctFirst; //first coefficient of non-intra blocks (table 0)
+		DCT_LONG_LUT dctLong[2];
 
 		LUTS()
 		{
+			BuildDctLongLut(dctLong[0], CDctCoefficientTable0::GetInstance());
+			BuildDctLongLut(dctLong[1], CDctCoefficientTable1::GetInstance());
 			CVLCTable* tables[9] = {CMacroblockAddressIncrementTable::GetInstance(), CMacroblockTypeITable::GetInstance(),
 			                        CMacroblockTypePTable::GetInstance(), CMacroblockTypeBTable::GetInstance(),
 			                        CCodedBlockPatternTable::GetInstance(), CMotionCodeTable::GetInstance(),
@@ -878,16 +928,57 @@ bool CMpeg2Decoder::DecodeBlock(BITS& bits, int component, bool intra, int16_t* 
 			index++;
 			continue;
 		}
-		// MPEG-2 escape (both tables): 000001, 6 bit run, 12 bit signed level. About
-		// 2000 per picture in RE4's intro, each a bit by bit table search otherwise.
-		if(m_isMpeg2 && ((code >> (BITS::LUT_BITS - 6)) == 1))
+		// Codes of 12 to 16 bits (7 leading zeros): the second table.
+		if((code >> (BITS::LUT_BITS - LONG_PREFIX_ZEROS)) == 0)
 		{
-			uint32_t escape = bits.Peek(24);
-			bits.bitPosition += 24;
-			index += (escape >> 12) & 0x3F;
+			const DCT_LONG_LUT& longLut = GetLuts().dctLong[(intra && m_intraVlcFormat) ? 1 : 0];
+			uint32_t longCode = bits.PeekPadded(LONG_PREFIX_ZEROS + LONG_BITS) & (LONG_SIZE - 1);
+			if((longLut.kind[longCode] == DCT_RUNLEVEL) && (bits.bitPosition + longLut.length[longCode] <= bits.size * 8))
+			{
+				bits.bitPosition += longLut.length[longCode];
+				index += longLut.run[longCode];
+				if(index >= 64) return false;
+				coefficients[index] = longLut.level[longCode];
+				used[usedCount++] = static_cast<uint8_t>(index);
+				index++;
+				continue;
+			}
+		}
+		// Escape codes (both tables): 000001, 6 bit run, then the level. MPEG-2: 12
+		// bit signed. MPEG-1 (Sofdec's streams): 8 bits; 0 and 128 announce 8 more
+		// (Framework's CDctCoefficientTable decodes them the same way). Each was a
+		// bit by bit table search otherwise.
+		if((code >> (BITS::LUT_BITS - 6)) == 1)
+		{
+			int level;
+			uint32_t run;
+			if(m_isMpeg2)
+			{
+				uint32_t escape = bits.Peek(24);
+				bits.bitPosition += 24;
+				run = (escape >> 12) & 0x3F;
+				level = static_cast<int>(escape & 0xFFF);
+				if(level & 0x800) level -= 0x1000;
+			}
+			else
+			{
+				uint32_t escape = bits.Peek(20);
+				run = (escape >> 8) & 0x3F;
+				level = static_cast<int>(escape & 0xFF);
+				if((level == 0) || (level == 128))
+				{
+					uint32_t extended = bits.Peek(28) & 0xFF;
+					bits.bitPosition += 28;
+					level = (level == 0) ? static_cast<int>(extended) : static_cast<int>(extended) - 256;
+				}
+				else
+				{
+					bits.bitPosition += 20;
+					if(level > 128) level -= 256;
+				}
+			}
+			index += run;
 			if(index >= 64) return false;
-			int level = static_cast<int>(escape & 0xFFF);
-			if(level & 0x800) level -= 0x1000;
 			coefficients[index] = level;
 			used[usedCount++] = static_cast<uint8_t>(index);
 			index++;
