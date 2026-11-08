@@ -289,6 +289,39 @@ of 1, 8, 16 and 256 (the Vita's CPU has no divide instruction).
 Silent Hill 2 on a PC, 1500 frames: the IOP change gives the same final picture; with the
 EE change the same title menu (its animated background a little further on).
 
+### Kernel calls and IOP interrupts in the movie (2026-11-08, patch 0085)
+
+New measurements (all only while `ee_hot_after` profiles, so normal runs pay nothing):
+`syscalls.txt` now also has `time N calls microseconds` per EE kernel call (and for
+Play's own paths: 128 reschedule, 129 exit interrupt, 131 dispatch unlock, 132-147 the
+HLE calls 0xA00-0xA0F); `iopcalls.txt` counts IOP HLE calls by `module:function`, IOP
+syscalls, interrupts by line, and how the SPU2 IRQ flag is set and cleared. Note: the
+Vita's clock costs about 8 us per call pair, so per-call times of small calls are mostly
+that; the counts are the reliable part. Autostart `copy_bench=1` times copies of a
+movie picture (`copybench.txt`).
+
+What they showed:
+- **The picture handoff** (HLE 0xA04, `sceMpegGetPicture` RGB32): 2.7 ms per picture on
+  the emulation thread, nearly all the copy of 1.15 MB into EE RAM. `copy_bench`:
+  memcpy 310 MB/s, two threads 362 MB/s, NEON with prefetch 183, `sceDmacMemcpy` 151:
+  the Vita's memory is the limit. Only not copying would help (the decoder writing
+  into the game's buffer, which the game may still be reading).
+- **EE kernel calls**: about 50 per emulated frame from the game (`WaitSema` and
+  `SignalSema` 24000 each in 55 s); cheap each.
+- **IOP interrupts: 97% are the SPU2 IRQ**, about 256 per emulated frame (all other
+  lines 1-2). Play sets the flag about 3 times a frame (the sound input area) and RE4's
+  driver **never clears it** (neither IRQINFO reads nor the IRQ enable bit), so the
+  per-1000-ticks check raises the interrupt again and again. Two fixes were tried and
+  dropped: raising it only when the flag goes from clear to set (the driver got one
+  interrupt and then polled: `libsd` GetParam 3x, twice the audio underruns, slower)
+  and once per IRQ event (the driver polled the SPU2: 31.6 against 33.8 emulated fps,
+  twice the SPU2 read waits). The driver uses the repeated interrupt as its wake-up;
+  the current behaviour is the fastest of the three.
+- IOP HLE calls (55 s): `intrman` 17/18 (CpuSuspendIntr/CpuResumeIntr) 138000/106000,
+  `libsd` 6 86000, thevent/thbase 15000-20000. The `libsd` calls reach Play's HLE
+  dispatcher, which has no registered libsd module in release builds (CLibSd is only
+  used for the debugger's names): worth checking what RE4's sound driver gets back.
+
 ### Is a locked 30 reachable? The CPU budget (2026-11-08)
 
 The Vita gives an app three cores at 444 MHz (already set). At a real 30 pictures/s
@@ -351,7 +384,8 @@ Autostart keys, all per run:
 | `frame_dump_every=S` | Save the displayed picture to `ux0:data/VitaPS2/frames/` |
 | `mpeg_dump_mb=N` | Save the movie stream the decoder gets to `mpegstream.bin` |
 | `gs_diag_after=S` | Start `gs_diag` logging later (with `gs_diag=N`) |
-| `ee_hot_after=S` | Sample EE hotspots from this second on; also writes `syscalls.txt` (kernel calls by number) |
+| `ee_hot_after=S` | Sample EE hotspots from this second on; also writes `syscalls.txt` (kernel calls by number, with time per call from S on) and `iopcalls.txt` (IOP HLE calls, interrupts by line, SPU2 IRQ flag set/clear counts) |
+| `copy_bench=1` | At start, time copies of a 1.15 MB movie picture by four methods (`copybench.txt`) |
 | `mpeg_core=N` | Core of the movie decoder (default 2) |
 | `thread_lock_hle=1` | RE4 USA: critical sections without kernel calls (also a per-game setting) |
 

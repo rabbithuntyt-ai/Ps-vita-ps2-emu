@@ -1,0 +1,204 @@
+diff --git a/Source/ee/PS2OS.h b/Source/ee/PS2OS.h
+--- a/Source/ee/PS2OS.h
++++ b/Source/ee/PS2OS.h
+@@ -73,6 +73,16 @@
+ 	};
+ 	//Profiling: kernel calls by number.
+ 	static inline uint32 g_syscallCounts[128] = {};
++	//With g_syscallTiming: microseconds spent in HandleSyscall and calls, by number
++	//(0-127), then 128 reschedule, 129 exit interrupt, 130 libmc2, 131 dispatch
++	//unlock, 132-147 HLE calls 0xA00-0xA0F, 148 other.
++	enum
++	{
++		SYSCALL_TIMING_SLOTS = 149,
++	};
++	static inline bool g_syscallTiming = false;
++	static inline uint64 g_syscallTimeUs[SYSCALL_TIMING_SLOTS] = {};
++	static inline uint32 g_syscallTimedCalls[SYSCALL_TIMING_SLOTS] = {};
+ 	//Set by an HLE handler when the game polls for something that only time
+ 	//brings (middleware waiting for a file): the VM counts the rest of the EE's
+ 	//time slice as idle.
+diff --git a/Source/ee/PS2OS.cpp b/Source/ee/PS2OS.cpp
+--- a/Source/ee/PS2OS.cpp
++++ b/Source/ee/PS2OS.cpp
+@@ -1,3 +1,4 @@
++#include <chrono>
+ #include <cstring>
+ #include <stddef.h>
+ #include <stdlib.h>
+@@ -3198,6 +3199,33 @@
+ 
+ 	uint32 func = m_ee.m_State.nGPR[CMIPS::V1].nV[0];
+ 
++	//Profiling (g_syscallTiming): time spent here by kernel call number
++	struct SYSCALL_TIMER
++	{
++		uint32 slot = 148;
++		std::chrono::steady_clock::time_point start;
++		bool active = g_syscallTiming;
++		SYSCALL_TIMER()
++		{
++			if(active) start = std::chrono::steady_clock::now();
++		}
++		~SYSCALL_TIMER()
++		{
++			if(!active) return;
++			g_syscallTimeUs[slot] += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
++			g_syscallTimedCalls[slot]++;
++		}
++	} timer;
++	{
++		uint32 number = (func & 0x80000000) ? (0 - func) : func;
++		if(func == SYSCALL_CUSTOM_RESCHEDULE) timer.slot = 128;
++		else if(func == SYSCALL_CUSTOM_EXITINTERRUPT) timer.slot = 129;
++		else if((func >= Ee::CLibMc2::SYSCALL_RANGE_START) && (func < Ee::CLibMc2::SYSCALL_RANGE_END)) timer.slot = 130;
++		else if(func == SYSCALL_DISPATCH_UNLOCK) timer.slot = 131;
++		else if((func >= HLE_SYSCALL_START) && (func < HLE_SYSCALL_END)) timer.slot = 132 + (func - HLE_SYSCALL_START);
++		else if(number < 128) timer.slot = number;
++	}
++
+ 	if(func == SYSCALL_CUSTOM_RESCHEDULE)
+ 	{
+ 		//Reschedule
+diff --git a/Source/iop/IopBios.h b/Source/iop/IopBios.h
+--- a/Source/iop/IopBios.h
++++ b/Source/iop/IopBios.h
+@@ -33,6 +33,11 @@
+ class CIopBios : public Iop::CBiosBase
+ {
+ public:
++	//Profiling (g_callCounting): HLE calls by "module:function", kernel syscalls
++	//("syscall:N") and interrupts ("interrupt") since counting started.
++	static inline bool g_callCounting = false;
++	static inline std::map<std::string, uint32> g_callCounts;
++
+ 	enum KERNEL_RESULT_CODES
+ 	{
+ 		KERNEL_RESULT_OK = 0,
+diff --git a/Source/iop/IopBios.cpp b/Source/iop/IopBios.cpp
+--- a/Source/iop/IopBios.cpp
++++ b/Source/iop/IopBios.cpp
+@@ -3274,6 +3274,7 @@
+ 	uint32 callInstruction = memory[0];
+ 	if(callInstruction == 0x0000000C)
+ 	{
++		if(g_callCounting) g_callCounts["syscall:" + std::to_string(m_cpu.m_State.nGPR[CMIPS::V0].nV0)]++;
+ 		switch(m_cpu.m_State.nGPR[CMIPS::V0].nV0)
+ 		{
+ 		case SYSCALL_EXITTHREAD:
+@@ -3311,6 +3312,7 @@
+ 		uint32 functionId = callInstruction & 0xFFFF;
+ 		FRAMEWORK_MAYBE_UNUSED uint32 version = memory[2];
+ 		auto moduleName = ReadModuleName(reinterpret_cast<const uint8*>(memory + 3));
++		if(g_callCounting) g_callCounts[std::string(moduleName) + ":" + std::to_string(functionId)]++;
+ 
+ #ifdef _DEBUG
+ 		if(moduleName == "libsd")
+@@ -3339,6 +3341,7 @@
+ 
+ void CIopBios::HandleInterrupt()
+ {
++	if(g_callCounting) g_callCounts["interrupt"]++;
+ 	if(m_cpu.GenerateInterrupt(m_cpu.m_State.nPC))
+ 	{
+ 		//Find first concerned interrupt
+@@ -3356,6 +3359,7 @@
+ 			return;
+ 		}
+ 		uint32 line = __builtin_ctzll(status.f);
++		if(g_callCounting) g_callCounts["interrupt_line:" + std::to_string(line)]++;
+ 		status.f = ~(1ULL << line);
+ 		m_cpu.m_pMemoryMap->SetWord(Iop::CIntc::STATUS0, status.h0);
+ 		m_cpu.m_pMemoryMap->SetWord(Iop::CIntc::STATUS1, status.h1);
+@@ -3364,6 +3368,7 @@
+ 			uint32 handlerId = FindIntrHandler(line);
+ 			if(handlerId == -1)
+ 			{
++				if(g_callCounting) g_callCounts["interrupt_no_handler"]++;
+ 				ReturnFromException();
+ 				return;
+ 			}
+diff --git a/Source/iop/Iop_SpuBase.h b/Source/iop/Iop_SpuBase.h
+--- a/Source/iop/Iop_SpuBase.h
++++ b/Source/iop/Iop_SpuBase.h
+@@ -227,6 +227,9 @@
+ 
+ 		bool GetIrqPending() const;
+ 		void ClearIrqPending();
++		//Profiling: SPU2 IRQ flag set by the input area (0), by the watcher (1),
++		//watcher hits (2), cleared by an IRQINFO read (3), by the control register (4)
++		static inline std::atomic<uint32> g_irqStats[5] = {};
+ 
+ 		uint32 GetIrqAddress() const;
+ 		void SetIrqAddress(uint32);
+@@ -397,8 +400,8 @@
+ 		};
+ 
+ 		void RenderChunk(int16*, unsigned int);
+-		//Render() works in chunks of at most this many stereo samples
+-		static constexpr unsigned int MAX_RENDER_TICKS = 128;
++		//Render() works in chunks of at most this many stereo samples
++		static constexpr unsigned int MAX_RENDER_TICKS = 128;
+ 		void RenderVoice(unsigned int, int16*, int16*, unsigned int, bool);
+ 		void UpdateAdsr(CHANNEL&);
+ 		void UpdateReverb(int16[2], int16*);
+diff --git a/Source/iop/Iop_SpuBase.cpp b/Source/iop/Iop_SpuBase.cpp
+--- a/Source/iop/Iop_SpuBase.cpp
++++ b/Source/iop/Iop_SpuBase.cpp
+@@ -439,6 +439,7 @@
+ 	m_ctrl = value;
+ 	if((m_ctrl & CONTROL_IRQ) == 0)
+ 	{
++		if(m_irqPending) g_irqStats[4]++;
+ 		ClearIrqPending();
+ 		m_irqWatcher->ClearIrqPending(m_spuNumber);
+ 	}
+@@ -961,17 +962,12 @@
+ 			if(irqEnabled)
+ 			{
+ 				//TODO: Check which core is responsible for which area
+-				if(m_irqAddr == (CORE0_SIN_LEFT + m_core0OutputOffset))
+-				{
+-					m_irqPending = true;
+-				}
+-				else if(m_irqAddr == (CORE1_SIN_LEFT + m_core0OutputOffset))
+-				{
+-					m_irqPending = true;
+-				}
+-				else if(m_irqAddr == (CORE1_SIN_RIGHT + m_core0OutputOffset))
++				if((m_irqAddr == (CORE0_SIN_LEFT + m_core0OutputOffset)) ||
++				   (m_irqAddr == (CORE1_SIN_LEFT + m_core0OutputOffset)) ||
++				   (m_irqAddr == (CORE1_SIN_RIGHT + m_core0OutputOffset)))
+ 				{
+ 					m_irqPending = true;
++					g_irqStats[0]++;
+ 				}
+ 			}
+ 			m_core0OutputOffset += 2;
+@@ -990,6 +986,7 @@
+ 	if(irqEnabled && m_irqWatcher->HasPendingIrq(m_spuNumber))
+ 	{
+ 		m_irqPending = true;
++		g_irqStats[1]++;
+ 	}
+ 	m_irqWatcher->ClearIrqPending(m_spuNumber);
+ 
+@@ -1360,6 +1357,7 @@
+ 	{
+ 		if(address == m_irqAddr[i])
+ 		{
++			CSpuBase::g_irqStats[2]++;
+ 			m_irqPending[i] = true;
+ 		}
+ 	}
+diff --git a/Source/iop/Iop_Spu2.cpp b/Source/iop/Iop_Spu2.cpp
+--- a/Source/iop/Iop_Spu2.cpp
++++ b/Source/iop/Iop_Spu2.cpp
+@@ -83,6 +83,7 @@
+ 			if(core->GetSpuBase().GetIrqPending())
+ 			{
+ 				result |= (1 << (i + 2));
++				CSpuBase::g_irqStats[3]++;
+ 				core->GetSpuBase().ClearIrqPending();
+ 			}
+ 		}

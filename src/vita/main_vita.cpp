@@ -37,6 +37,10 @@
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/power.h>
+#include <psp2/kernel/dmac.h>
+#include <arm_neon.h>
+#include <functional>
+#include <thread>
 #include <vitaGL.h>
 
 #include "AutoCycleRate.h"
@@ -57,6 +61,7 @@
 #include "GameProfiles.h"
 #include "JitCacheSetup.h"
 #include "ee/PS2OS.h"
+#include "iop/IopBios.h"
 #include "Theme.h"
 #include "GSH_Hardware.h"
 #include "Gfx.h"
@@ -78,6 +83,55 @@ extern "C"
 	// Leaves room for the JIT pool (VM block) inside the app's memory budget.
 	int _newlib_heap_size_user = 240 * 1024 * 1024;
 	unsigned int sceUserMainThreadStackSize = 1 * 1024 * 1024;
+}
+
+// Autostart `copy_bench=1`: how fast can a movie picture (RGB32, 1.15 MB) go into
+// EE RAM (the heap)? Writes ux0:data/VitaPS2/copybench.txt: MB/s and whether the
+// copy is right, for memcpy, the DMA engine, NEON with prefetch and memcpy split
+// across two threads.
+static void RunCopyBench()
+{
+	const size_t size = 1120 * 0x400;
+	std::vector<uint8_t> src(size + 64), dst(size + 64);
+	for(size_t i = 0; i < src.size(); i++) src[i] = static_cast<uint8_t>(i * 7 + (i >> 9));
+	auto neonCopy = [](uint8_t* d, const uint8_t* s, size_t n) {
+		for(size_t i = 0; i < n; i += 64)
+		{
+			__builtin_prefetch(s + i + 512);
+			uint8x16x4_t v = vld1q_u8_x4(s + i);
+			vst1q_u8_x4(d + i, v);
+		}
+	};
+	struct METHOD
+	{
+		const char* name;
+		std::function<void(uint8_t*, const uint8_t*, size_t)> copy;
+	};
+	std::vector<METHOD> methods = {
+	    {"memcpy", [](uint8_t* d, const uint8_t* s, size_t n) { std::memcpy(d, s, n); }},
+	    {"sceDmacMemcpy", [](uint8_t* d, const uint8_t* s, size_t n) { sceDmacMemcpy(d, s, n); }},
+	    {"neon_pld", neonCopy},
+	    {"memcpy_2threads", [](uint8_t* d, const uint8_t* s, size_t n) {
+		     size_t half = (n / 2) & ~size_t(63);
+		     std::thread other([&]() { std::memcpy(d + half, s + half, n - half); });
+		     std::memcpy(d, s, half);
+		     other.join();
+	     }},
+	};
+	if(FILE* out = std::fopen("ux0:data/VitaPS2/copybench.txt", "w"))
+	{
+		for(const auto& method : methods)
+		{
+			const int reps = 20;
+			std::memset(dst.data(), 0, dst.size());
+			auto start = std::chrono::steady_clock::now();
+			for(int r = 0; r < reps; r++) method.copy(dst.data(), src.data(), size);
+			double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / reps;
+			bool right = (std::memcmp(dst.data(), src.data(), size) == 0);
+			std::fprintf(out, "%-16s %6.2f ms per picture  %7.1f MB/s  %s\n", method.name, ms, size / 1048576.0 / (ms / 1000.0), right ? "right" : "WRONG");
+		}
+		std::fclose(out);
+	}
 }
 
 namespace
@@ -803,6 +857,11 @@ namespace
 						eeHotAfterSeconds = static_cast<uint32_t>(std::atoi(value.c_str()));
 						continue;
 					}
+					if(key == "copy_bench")
+					{
+						RunCopyBench();
+						continue;
+					}
 					if(key == "frame_dump_every")
 					{
 						frameDumpEverySeconds = static_cast<uint32_t>(std::atoi(value.c_str()));
@@ -1110,6 +1169,8 @@ namespace
 						{
 							eeHotMovie = true;
 							session->ResetEeHotspots();
+							CPS2OS::g_syscallTiming = true; //kernel call time by number, in syscalls.txt
+							CIopBios::g_callCounting = true; //IOP HLE calls, in iopcalls.txt
 						}
 						if(!eeHotMovie && (ipu.commands[2] != perfIpu.commands[2]))
 						{
@@ -1134,6 +1195,20 @@ namespace
 								{
 									if(CPS2OS::g_syscallCounts[i] != 0) std::fprintf(calls, "%u %u\n", i, CPS2OS::g_syscallCounts[i]);
 								}
+								//Timed calls (from ee_hot_after on): number, calls, total microseconds
+								for(unsigned int i = 0; i < CPS2OS::SYSCALL_TIMING_SLOTS; i++)
+								{
+									if(CPS2OS::g_syscallTimedCalls[i] != 0)
+										std::fprintf(calls, "time %u %u %llu\n", i, CPS2OS::g_syscallTimedCalls[i], static_cast<unsigned long long>(CPS2OS::g_syscallTimeUs[i]));
+								}
+								std::fclose(calls);
+							}
+							if(FILE* calls = std::fopen("ux0:data/VitaPS2/iopcalls.txt", "w"))
+							{
+								for(const auto& entry : CIopBios::g_callCounts) std::fprintf(calls, "%s %u\n", entry.first.c_str(), entry.second);
+								const auto& irq = Iop::CSpuBase::g_irqStats;
+								std::fprintf(calls, "spu_irq set_input %u set_watcher %u watcher_hits %u cleared_read %u cleared_ctrl %u\n",
+								             irq[0].load(), irq[1].load(), irq[2].load(), irq[3].load(), irq[4].load());
 								std::fclose(calls);
 							}
 						}
