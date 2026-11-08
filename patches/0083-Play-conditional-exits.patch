@@ -1,0 +1,80 @@
+diff --git a/Source/BasicBlock.h b/Source/BasicBlock.h
+--- a/Source/BasicBlock.h
++++ b/Source/BasicBlock.h
+@@ -151,7 +151,11 @@
+ 	//no instruction of the block can raise an exception (no memory access, syscall,
+ 	//coprocessor or call into the emulator), so the exit skips that test
+ 	bool m_exitNoException = false;
++	//the block ends in a conditional branch: its target relative to nPC (0: no)
++	int32 m_exitBranchOffset = 0;
+ 	void AnalyseExit();
++	//nPC = the taken branch's target (from nPC when the offset is known)
++	void PushTakenPc(CMipsJitter*);
+ 
+ public:
+ 	static void EnableCheapExits(bool enabled)
+diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
+--- a/Source/BasicBlock.cpp
++++ b/Source/BasicBlock.cpp
+@@ -270,6 +270,7 @@
+ {
+ 	m_exitAlwaysJumps = false;
+ 	m_exitNoException = false;
++	m_exitBranchOffset = 0;
+ 	if(!g_cheapExits || (m_begin == m_end))
+ 	{
+ 		return;
+@@ -281,6 +282,11 @@
+ 		uint32 funct = op & 0x3F;
+ 		//j, jal, jr, jalr: the delay slot runs, then the jump is always taken
+ 		m_exitAlwaysJumps = (top == 0x02) || (top == 0x03) || ((top == 0x00) && ((funct == 0x08) || (funct == 0x09)));
++		//beq, bne, blez, bgtz, bltz, bgez, bltzal, bgezal (not the likely forms):
++		//when taken, the target is nPC + a constant (nPC is the block's start)
++		uint32 rt = (op >> 16) & 0x1F;
++		bool conditional = ((top >= 0x04) && (top <= 0x07)) || ((top == 0x01) && ((rt == 0x00) || (rt == 0x01) || (rt == 0x10) || (rt == 0x11)));
++		m_exitBranchOffset = conditional ? static_cast<int32>(m_end - m_begin) + (static_cast<int16>(op & 0xFFFF) * 4) : 0;
+ 	}
+ 	//Instructions that can't set nHasException: integer arithmetic, logic,
+ 	//shifts, HI/LO moves (SPECIAL without syscall and traps), branches and jumps.
+@@ -323,6 +329,21 @@
+ 	m_exitNoException = noException;
+ }
+ 
++void CBasicBlock::PushTakenPc(CMipsJitter* jitter)
++{
++	if(m_exitBranchOffset != 0)
++	{
++		jitter->PushRel(offsetof(CMIPS, m_State.nPC));
++		jitter->PushCst(m_exitBranchOffset);
++		jitter->Add();
++	}
++	else
++	{
++		jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++	}
++	jitter->PullRel(offsetof(CMIPS, m_State.nPC));
++}
++
+ void CBasicBlock::CompileProlog(CMipsJitter* jitter)
+ {
+ #ifdef DEBUGGER_INCLUDED
+@@ -391,8 +412,7 @@
+ 		jitter->PushCst(MIPS_INVALID_PC);
+ 		jitter->BeginIf(Jitter::CONDITION_NE);
+ 		{
+-			jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
+-			jitter->PullRel(offsetof(CMIPS, m_State.nPC));
++			PushTakenPc(jitter);
+ 			jitter->PushCst(MIPS_INVALID_PC);
+ 			jitter->PullRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
+ 
+@@ -423,8 +443,7 @@
+ 			jitter->PushCst(MIPS_INVALID_PC);
+ 			jitter->BeginIf(Jitter::CONDITION_NE);
+ 			{
+-				jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
+-				jitter->PullRel(offsetof(CMIPS, m_State.nPC));
++				PushTakenPc(jitter);
+ 				jitter->PushCst(MIPS_INVALID_PC);
+ 				jitter->PullRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
+ 

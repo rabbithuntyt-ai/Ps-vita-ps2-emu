@@ -23,6 +23,7 @@
 #include "MipsJitter.h"
 #include "MemStream.h"
 #include "Jitter_CodeGen_AArch32.h"
+#include "offsetof_def.h"
 #include "Ps2Const.h"
 
 int main(int argc, char** argv)
@@ -82,6 +83,8 @@ int main(int argc, char** argv)
 	Jitter::CCodeGen_AArch32::SetChainedFrames(chained);
 	Jitter::CCodeGen_AArch32::SetGuestMemoryOps(true);
 	Jitter::CCodeGen_AArch32::SetConservativeAllocation(false);
+	if(std::getenv("JIT_NO_PINNED") == nullptr)
+		Jitter::CCodeGen_AArch32::SetPinnedFields(offsetof(CMIPS, m_State.cycleQuota), offsetof(CMIPS, m_pageLookup));
 	CMA_MIPSIV::SetSignExtTracking(true);
 
 	if(findEnd != 0)

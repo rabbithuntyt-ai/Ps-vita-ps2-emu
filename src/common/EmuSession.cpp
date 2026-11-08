@@ -18,6 +18,7 @@
 #include "MA_MIPSIV.h"
 #include "BasicBlock.h"
 #include "ee/EeExecutor.h"
+#include "offsetof_def.h"
 #if defined(__arm__)
 #include "Jitter_CodeGen_AArch32.h"
 #endif
@@ -33,6 +34,7 @@ namespace
 	fs::path g_dataPath;
 	fs::path g_resourcesPath;
 	bool g_indirectDispatchWanted = true;
+	bool g_pinnedFieldsWanted = true;
 
 	std::string LowerExtension(const std::string& path)
 	{
@@ -308,11 +310,21 @@ void CEmuSession::SetSafeJit(bool safe)
 	Jitter::CCodeGen_AArch32::SetChainedFrames(!safe);
 	// EE/IOP loads and stores as single ops: registers stay allocated across them.
 	Jitter::CCodeGen_AArch32::SetGuestMemoryOps(!safe);
+	// Cycle quota and page table pointer kept in registers across linked blocks.
+	if(!safe && g_pinnedFieldsWanted)
+		Jitter::CCodeGen_AArch32::SetPinnedFields(offsetof(CMIPS, m_State.cycleQuota), offsetof(CMIPS, m_pageLookup));
+	else
+		Jitter::CCodeGen_AArch32::SetPinnedFields(-1, -1);
 #else
 	(void)safe;
 #endif
 	// Indirect jumps (function returns...) resolved in compiled code (needs chained frames).
 	CBasicBlock::EnableIndirectDispatch(!safe && g_indirectDispatchWanted);
+}
+
+void CEmuSession::SetPinnedFields(bool enabled)
+{
+	g_pinnedFieldsWanted = enabled;
 }
 
 void CEmuSession::SetIndirectDispatch(bool enabled)

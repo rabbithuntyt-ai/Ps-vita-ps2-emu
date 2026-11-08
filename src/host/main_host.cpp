@@ -220,6 +220,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--vita-jit")) vitaJit = true;
 		else if(!std::strcmp(argv[i], "--no-indirect")) CEmuSession::SetIndirectDispatch(false);
 		else if(!std::strcmp(argv[i], "--no-cheap-exits")) CEmuSession::SetCheapExits(false);
+		else if(!std::strcmp(argv[i], "--no-pinned")) CEmuSession::SetPinnedFields(false);
 		else if(!std::strcmp(argv[i], "--regions")) CEmuSession::SetRegions(true);
 		else if(!std::strcmp(argv[i], "--shot-every") && (i + 1 < argc)) shotEvery = std::strtoull(argv[++i], nullptr, 10);
 		else if(!std::strcmp(argv[i], "--shot-dir") && (i + 1 < argc)) shotDir = argv[++i];

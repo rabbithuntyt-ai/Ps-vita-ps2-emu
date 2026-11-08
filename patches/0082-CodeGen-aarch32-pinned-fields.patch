@@ -1,0 +1,295 @@
+diff --git a/include/Jitter_CodeGen.h b/include/Jitter_CodeGen.h
+--- a/include/Jitter_CodeGen.h
++++ b/include/Jitter_CodeGen.h
+@@ -30,6 +30,11 @@
+ 		virtual unsigned int GetAvailableRegisterCount() const = 0;
+ 		virtual unsigned int GetAvailableMdRegisterCount() const = 0;
+ 		//Whether single precision values may be allocated to MD registers.
++		//Symbols the code generator keeps in a register of its own (never allocated).
++		virtual bool IsSymbolPinned(const CSymbol*) const
++		{
++			return false;
++		}
+ 		virtual bool CanAllocateFpInMdRegisters() const
+ 		{
+ 			return true;
+diff --git a/include/Jitter_CodeGen_AArch32.h b/include/Jitter_CodeGen_AArch32.h
+--- a/include/Jitter_CodeGen_AArch32.h
++++ b/include/Jitter_CodeGen_AArch32.h
+@@ -57,8 +57,17 @@
+ 			uint32 tableBits = 0;
+ 		};
+ 		static void SetIndirectDispatch(uintptr_t target, const INDIRECT_DISPATCH&);
++		// Pinned context fields (chained frames only): a 32-bit field kept in r9
++		// (read and written) and a pointer kept in r10 (read only) across the whole
++		// chain of linked functions. Loaded by the prolog, the r9 field written back
++		// by the epilog and the unwinding thunks; r9 and r10 leave the register
++		// allocator. Every chained function must use the same context layout.
++		// -1: off. Set before any code is generated.
++		static void SetPinnedFields(int32 rwField, int32 pointerField);
++		static bool GetPinnedFields();
+ 
+ 		uint32 GetLinkEntryOffset() const override;
++		bool IsSymbolPinned(const CSymbol*) const override;
+ 
+ 		void GenerateCode(const StatementList&, unsigned int) override;
+ 		void SetStream(Framework::CStream*) override;
+@@ -865,6 +874,8 @@
+ 		ParamStack m_params;
+ 		uint32 m_stackSize = 0;
+ 		bool m_chained = false;
++		bool m_pinned = false; //chained and pinned fields set (SetPinnedFields)
++		bool GetPinnedRegister(const CSymbol*, CAArch32Assembler::REGISTER&) const;
+ 		uint32 m_chainedExtraStack = 0; //temporaries beyond the fixed area
+ 		uint32 m_linkEntryOffset = 0;
+ 		uint16 m_registerSave = 0;
+diff --git a/src/Jitter_CodeGen_AArch32.cpp b/src/Jitter_CodeGen_AArch32.cpp
+--- a/src/Jitter_CodeGen_AArch32.cpp
++++ b/src/Jitter_CodeGen_AArch32.cpp
+@@ -352,9 +352,57 @@
+ 	m_platformAbi = platformAbi;
+ }
+ 
++//Pinned context fields (SetPinnedFields): the last two allocatable registers
++static int32 g_pinnedRwField = -1;      //in r9 (g_registers[6])
++static int32 g_pinnedPointerField = -1; //in r10 (g_registers[5])
++static constexpr auto g_pinnedRwRegister = CAArch32Assembler::r9;
++static constexpr auto g_pinnedPointerRegister = CAArch32Assembler::r10;
++static bool g_chainedFramesForPin();
++
++void CCodeGen_AArch32::SetPinnedFields(int32 rwField, int32 pointerField)
++{
++	//Immediate offsets only (prolog/epilog loads and stores)
++	bool valid = (rwField >= 0) && (rwField < 0x1000) && ((rwField & 3) == 0) &&
++	             (pointerField >= 0) && (pointerField < 0x1000) && ((pointerField & 3) == 0);
++	g_pinnedRwField = valid ? rwField : -1;
++	g_pinnedPointerField = valid ? pointerField : -1;
++}
++
++bool CCodeGen_AArch32::GetPinnedFields()
++{
++	return (g_pinnedRwField >= 0) && (g_pinnedPointerField >= 0);
++}
++
+ unsigned int CCodeGen_AArch32::GetAvailableRegisterCount() const
+ {
+-	return MAX_REGISTERS;
++	static_assert(MAX_REGISTERS == 7, "the pinned registers are the last two");
++	return (GetPinnedFields() && g_chainedFramesForPin()) ? MAX_REGISTERS - 2 : MAX_REGISTERS;
++}
++
++bool CCodeGen_AArch32::IsSymbolPinned(const CSymbol* symbol) const
++{
++	//Called while allocating, before GenerateCode sets m_pinned
++	if(!GetPinnedFields() || !g_chainedFramesForPin()) return false;
++	if((symbol->m_type != SYM_RELATIVE) && (symbol->m_type != SYM_REL_REFERENCE)) return false;
++	auto offset = static_cast<int32>(symbol->m_valueLow);
++	return (offset == g_pinnedRwField) || (offset == g_pinnedPointerField);
++}
++
++bool CCodeGen_AArch32::GetPinnedRegister(const CSymbol* symbol, CAArch32Assembler::REGISTER& reg) const
++{
++	if(!m_pinned) return false;
++	if((symbol->m_type != SYM_RELATIVE) && (symbol->m_type != SYM_REL_REFERENCE)) return false;
++	if(static_cast<int32>(symbol->m_valueLow) == g_pinnedRwField)
++	{
++		reg = g_pinnedRwRegister;
++		return true;
++	}
++	if(static_cast<int32>(symbol->m_valueLow) == g_pinnedPointerField)
++	{
++		reg = g_pinnedPointerRegister;
++		return true;
++	}
++	return false;
+ }
+ 
+ static bool g_conservativeAllocation = (getenv("CODEGEN_AARCH32_CONSERVATIVE") != nullptr);
+@@ -387,6 +435,23 @@
+ 	return g_chainedFrames;
+ }
+ 
++static bool g_chainedFramesForPin()
++{
++	return g_chainedFrames;
++}
++
++//Pinned fields: loaded on entry from C++, the read/write one stored when leaving to C++
++static void LoadPinnedFields(CAArch32Assembler& assembler)
++{
++	assembler.Ldr(g_pinnedRwRegister, CAArch32Assembler::r11, CAArch32Assembler::MakeImmediateLdrAddress(g_pinnedRwField));
++	assembler.Ldr(g_pinnedPointerRegister, CAArch32Assembler::r11, CAArch32Assembler::MakeImmediateLdrAddress(g_pinnedPointerField));
++}
++
++static void StorePinnedFields(CAArch32Assembler& assembler)
++{
++	assembler.Str(g_pinnedRwRegister, CAArch32Assembler::r11, CAArch32Assembler::MakeImmediateLdrAddress(g_pinnedRwField));
++}
++
+ uint32 CCodeGen_AArch32::GetLinkEntryOffset() const
+ {
+ 	return m_linkEntryOffset;
+@@ -441,6 +506,7 @@
+ 				assembler.Ldr(CAArch32Assembler::rPC, CAArch32Assembler::r1, CAArch32Assembler::MakeImmediateLdrAddress(4));
+ 				assembler.MarkLabel(miss);
+ 			}
++			if(CCodeGen_AArch32::GetPinnedFields()) StorePinnedFields(assembler);
+ 			assembler.Mov(CAArch32Assembler::r0, CAArch32Assembler::r11);
+ 			assembler.Add(CAArch32Assembler::rSP, CAArch32Assembler::rSP, CAArch32Assembler::MakeImmediateAluOperand(g_chainedStackSize >> 8, 12));
+ 			assembler.Ldmia(CAArch32Assembler::rSP, (1 << CAArch32Assembler::r3));
+@@ -534,6 +600,7 @@
+ 	m_registerSave = GetSavedRegisterList(GetRegisterUsage(statements));
+ 
+ 	m_chained = g_chainedFrames;
++	m_pinned = m_chained && GetPinnedFields();
+ 	m_chainedExtraStack = 0;
+ 	m_linkEntryOffset = 0;
+ 	if(m_chained)
+@@ -661,6 +728,7 @@
+ 		m_assembler.Stmdb(CAArch32Assembler::rSP, m_registerSave);
+ 		m_assembler.Vpush(CAArch32Assembler::d8, 8);
+ 		m_assembler.Mov(CAArch32Assembler::r11, CAArch32Assembler::r0);
++		if(m_pinned) LoadPinnedFields(m_assembler);
+ 		//Every chained function may clamp: the masks stay loaded across the chain
+ 		LoadClampConstants();
+ 		m_assembler.Mov(CAArch32Assembler::r0, CAArch32Assembler::rSP);
+@@ -724,6 +792,7 @@
+ 
+ 	if(m_chained)
+ 	{
++		if(m_pinned) StorePinnedFields(m_assembler);
+ 		if(m_chainedExtraStack != 0)
+ 		{
+ 			LoadConstantInRegister(stackTempRegister, m_chainedExtraStack);
+@@ -853,6 +922,12 @@
+ 
+ void CCodeGen_AArch32::LoadMemoryInRegister(CAArch32Assembler::REGISTER registerId, CSymbol* src)
+ {
++	CAArch32Assembler::REGISTER pinned;
++	if(GetPinnedRegister(src, pinned))
++	{
++		if(registerId != pinned) m_assembler.Mov(registerId, pinned);
++		return;
++	}
+ 	switch(src->m_type)
+ 	{
+ 	case SYM_RELATIVE:
+@@ -870,6 +945,17 @@
+ 
+ void CCodeGen_AArch32::StoreRegisterInMemory(CSymbol* dst, CAArch32Assembler::REGISTER registerId)
+ {
++	CAArch32Assembler::REGISTER pinned;
++	if(GetPinnedRegister(dst, pinned))
++	{
++		//Only the read/write field is ever stored (the pointer field is read only)
++		assert(pinned == g_pinnedRwRegister);
++		if(pinned == g_pinnedRwRegister)
++		{
++			if(registerId != pinned) m_assembler.Mov(pinned, registerId);
++			return;
++		}
++	}
+ 	switch(dst->m_type)
+ 	{
+ 	case SYM_RELATIVE:
+@@ -905,6 +991,12 @@
+ {
+ 	assert(src->m_type == SYM_REL_REFERENCE);
+ 	assert((src->m_valueLow & 0x03) == 0x00);
++	CAArch32Assembler::REGISTER pinned;
++	if(GetPinnedRegister(src, pinned))
++	{
++		if(registerId != pinned) m_assembler.Mov(registerId, pinned);
++		return;
++	}
+ 	m_assembler.Ldr(registerId, g_baseRegister, CAArch32Assembler::MakeImmediateLdrAddress(src->m_valueLow));
+ }
+ 
+@@ -966,8 +1058,13 @@
+ 		break;
+ 	case SYM_TEMPORARY:
+ 	case SYM_RELATIVE:
++	{
++		//The read/write pinned field is written in place (like an allocated register)
++		CAArch32Assembler::REGISTER pinned;
++		if(GetPinnedRegister(symbol, pinned) && (pinned == g_pinnedRwRegister)) return pinned;
+ 		return preferedRegister;
+-		break;
++	}
++	break;
+ 	default:
+ 		throw std::runtime_error("Invalid symbol type.");
+ 		break;
+@@ -983,9 +1080,13 @@
+ 		break;
+ 	case SYM_TEMPORARY:
+ 	case SYM_RELATIVE:
++	{
++		CAArch32Assembler::REGISTER pinned;
++		if(GetPinnedRegister(symbol, pinned)) return pinned; //read in place
+ 		LoadMemoryInRegister(preferedRegister, symbol);
+ 		return preferedRegister;
+-		break;
++	}
++	break;
+ 	case SYM_CONSTANT:
+ 		LoadConstantInRegister(preferedRegister, symbol->m_valueLow);
+ 		return preferedRegister;
+@@ -1005,7 +1106,7 @@
+ 		break;
+ 	case SYM_TEMPORARY:
+ 	case SYM_RELATIVE:
+-		StoreRegisterInMemory(symbol, usedRegister);
++		StoreRegisterInMemory(symbol, usedRegister); //a mov or nothing for a pinned field
+ 		break;
+ 	default:
+ 		throw std::runtime_error("Invalid symbol type.");
+@@ -1041,9 +1142,13 @@
+ 		break;
+ 	case SYM_TMP_REFERENCE:
+ 	case SYM_REL_REFERENCE:
++	{
++		CAArch32Assembler::REGISTER pinned;
++		if(GetPinnedRegister(symbol, pinned)) return pinned; //read in place
+ 		LoadMemoryReferenceInRegister(preferedRegister, symbol);
+ 		return preferedRegister;
+-		break;
++	}
++	break;
+ 	default:
+ 		throw std::runtime_error("Invalid symbol type.");
+ 		break;
+@@ -1378,7 +1483,12 @@
+ void CCodeGen_AArch32::Emit_GuestMemoryPageLookup(uint32 pageTableOffset, CAArch32Assembler::REGISTER addressReg,
+                                                   CAArch32Assembler::REGISTER pageReg, CAArch32Assembler::REGISTER tmpReg)
+ {
+-	if(pageTableOffset < 0x1000)
++	auto tableReg = pageReg;
++	if(m_pinned && (static_cast<int32>(pageTableOffset) == g_pinnedPointerField))
++	{
++		tableReg = g_pinnedPointerRegister;
++	}
++	else if(pageTableOffset < 0x1000)
+ 	{
+ 		m_assembler.Ldr(pageReg, g_baseRegister, CAArch32Assembler::MakeImmediateLdrAddress(pageTableOffset));
+ 	}
+@@ -1388,7 +1498,7 @@
+ 		m_assembler.Ldr(pageReg, g_baseRegister, CAArch32Assembler::MakeRegisterLdrAddress(pageReg));
+ 	}
+ 	m_assembler.Mov(tmpReg, CAArch32Assembler::MakeRegisterAluOperand(addressReg, CAArch32Assembler::MakeConstantShift(CAArch32Assembler::SHIFT_LSR, 12)));
+-	m_assembler.Ldr(pageReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(tmpReg, CAArch32Assembler::SHIFT_LSL, 2));
++	m_assembler.Ldr(pageReg, tableReg, CAArch32Assembler::MakeRegisterLdrAddress(tmpReg, CAArch32Assembler::SHIFT_LSL, 2));
+ 	m_assembler.Cmp(pageReg, CAArch32Assembler::MakeImmediateAluOperand(0, 0));
+ }
+ 
+diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
+--- a/src/Jitter_RegAlloc.cpp
++++ b/src/Jitter_RegAlloc.cpp
+@@ -280,6 +280,7 @@
+ 		const auto& symbolRegAlloc(symbolRegAllocPair.second);
+ 		if(!isRegisterAllocatable(symbol->m_type)) continue;
+ 		if(symbolRegAlloc.aliased) continue;
++		if(m_codeGen->IsSymbolPinned(symbol.get())) continue;
+ 		sortedSymbols.push_back(&symbolRegAllocPair);
+ 	}
+ 	sortedSymbols.sort(
