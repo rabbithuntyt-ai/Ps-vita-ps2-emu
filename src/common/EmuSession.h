@@ -145,6 +145,9 @@ public:
 	// their share of the samples, most first.
 	void WriteEeHotspots(std::FILE*, unsigned int count);
 	void ResetEeHotspots();
+	// The same for the IOP (sampled while the emulation thread runs IOP code;
+	// reset with the EE's).
+	void WriteIopHotspots(std::FILE*, unsigned int count);
 	// A word of EE main memory (0 outside RAM), for dumping code.
 	uint32_t ReadEeWord(uint32_t address);
 
@@ -183,6 +186,11 @@ private:
 	std::atomic<uint32_t> m_eeHotPc[EE_HOTSPOT_SLOTS] = {};
 	std::atomic<uint32_t> m_eeHotCount[EE_HOTSPOT_SLOTS] = {};
 	std::atomic<uint32_t> m_eeHotSamples{0};
+	std::atomic<uint32_t> m_iopHotPc[EE_HOTSPOT_SLOTS] = {};
+	std::atomic<uint32_t> m_iopHotCount[EE_HOTSPOT_SLOTS] = {};
+	std::atomic<uint32_t> m_iopHotSamples{0};
+	static void AddHotSample(std::atomic<uint32_t>* pcs, std::atomic<uint32_t>* counts, std::atomic<uint32_t>& samples, uint32_t pc);
+	static void WriteHotspots(std::FILE*, unsigned int count, const char* name, std::atomic<uint32_t>* pcs, std::atomic<uint32_t>* counts, std::atomic<uint32_t>& samples);
 	CFrameMailbox m_frames;
 	std::atomic<uint64_t> m_vmFrames{0};
 	// EE idle accounting (emulation thread), published every 30 frames.

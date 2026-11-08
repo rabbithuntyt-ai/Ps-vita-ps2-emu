@@ -198,10 +198,39 @@ What this means:
 - Neither code change was kept: no measured gain, and the room lookup is game code that
   gameplay depends on.
 
+### The IOP in movies (2026-11-07, `iophot.txt`)
+
+`ee_hot_after` now also writes IOP hotspots (`iophot.txt`), and `dump_ee_ram=1` also
+writes `iopram.bin`. Disassemble with `-m mips:3000`. To find which module an address is
+in, look for the `0x41E00000` import tables at the start of each module and the strings
+after them (`runs/re4/c19.py`, `c20.py`).
+
+| IOP share | Module | What |
+|---|---|---|
+| 37% | **Capcom Sound Engine** (CSE Ver.0.13, 0x7B77C-0x903E0) | Software mixing: 16-bit samples times volume `>> 8`, added into a mix buffer (0x87FE0, 0x88BE0). Its own critical section counter (0x8ABA8 enter, 0x8ABF4 leave, calling `CpuSuspendIntr`/`CpuResumeIntr`) |
+| 16% | `sio2man`/`padman` region (0x5FCA0-0x73780) | Pad polling |
+| 7% | 0x200 | The HLE IOP kernel's stubs |
+| 7% | libsd region | Sony's sound library |
+
+The IOP is 15% of the emulation thread, so the whole CSE is about 5%. No single IOP item
+is worth a native replacement for the movie. CSE is in other Capcom games of 2005 (worth
+a signature if one of them is IOP bound). Why the IOP's time grew when the EE's MW idle
+thread was cut is still open.
+
+### What a real 30 pictures/s needs
+
+The emulation thread costs about 32 ms per emulated frame against 16.6. It is spread out:
+the game engine running under the movie (room data, `IdCalcVertex`, `PS2OT`), CRI's
+servers, Capcom's IOP mixer, kernel calls. The largest single item left is under 10%, and
+cutting EE work alone has not raised the frame rate. Two big pieces would:
+1. **Faster EE and IOP code for every game**: tier 2 recompilation (AOT_TRANSLATION.md)
+   or JIT work on block linking and register allocation. Roughly 2x is needed.
+2. **A faster native MPEG decoder** (about 55 ms per picture now, under 33 needed).
+   Without it, a faster emulation thread stops near 18 pictures/s.
+
 ## Ideas not done yet
 
-1. Find where the IOP's time goes in movies (above): it grows when the EE gets cheaper,
-   and does not shrink with `iop_rate`.
+1. Find why the IOP's time grows when the EE gets cheaper (above).
 2. A faster native MPEG decoder (above). Helps every movie game.
 3. 0x298xxx (`PS2OT`), `IdCalcVertex`, native ADX.
 4. Tier 2 recompilation (AOT_TRANSLATION.md). After the items above it is probably what

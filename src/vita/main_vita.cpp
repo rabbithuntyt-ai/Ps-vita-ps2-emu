@@ -1088,6 +1088,11 @@ namespace
 								session->WriteEeHotspots(hot, 80);
 								std::fclose(hot);
 							}
+							if(FILE* hot = std::fopen("ux0:data/VitaPS2/iophot.txt", "w"))
+							{
+								session->WriteIopHotspots(hot, 80);
+								std::fclose(hot);
+							}
 							if(FILE* calls = std::fopen("ux0:data/VitaPS2/syscalls.txt", "w"))
 							{
 								for(unsigned int i = 0; i < 128; i++)
@@ -1106,6 +1111,11 @@ namespace
 								if(FILE* dump = std::fopen("ux0:data/VitaPS2/eeram.bin", "wb"))
 								{
 									std::fwrite(session->GetVm()->m_ee->m_ram, 1, PS2::EE_RAM_SIZE, dump);
+									std::fclose(dump);
+								}
+								if(FILE* dump = std::fopen("ux0:data/VitaPS2/iopram.bin", "wb"))
+								{
+									std::fwrite(session->GetVm()->m_iop->m_ram, 1, PS2::IOP_RAM_SIZE, dump);
 									std::fclose(dump);
 								}
 								// The MPEG input path at the same moment: DMA4 (to IPU),

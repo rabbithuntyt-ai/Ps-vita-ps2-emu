@@ -316,24 +316,33 @@ void CEmuSession::ProfilerProc()
 		std::this_thread::sleep_for(std::chrono::microseconds(500));
 		unsigned int section = EmuProfile::g_section.load(std::memory_order_relaxed);
 		if(section < EmuProfile::SECTION_COUNT) m_profileCounts[section]++;
+		// Racy reads of the PC: blocks store it when they exit, so it points
+		// at (or just past) the code that is running.
 		if((section == EmuProfile::SECTION_EE) && m_vm)
 		{
-			// Racy read of the EE PC: blocks store it when they exit, so it
-			// points at (or just past) the code that is running.
-			uint32_t bucket = (m_vm->m_ee->m_EE.m_State.nPC & ~0x1Fu) | 1;
-			uint32_t slot = ((bucket >> 5) * 2654435761u) % EE_HOTSPOT_SLOTS;
-			// Open addressing; only this thread writes the table.
-			for(unsigned int probe = 0; probe < 16; probe++, slot = (slot + 1) % EE_HOTSPOT_SLOTS)
-			{
-				uint32_t current = m_eeHotPc[slot].load(std::memory_order_relaxed);
-				if(current == 0) m_eeHotPc[slot].store(current = bucket, std::memory_order_relaxed);
-				if(current != bucket) continue;
-				m_eeHotCount[slot].fetch_add(1, std::memory_order_relaxed);
-				break;
-			}
-			m_eeHotSamples.fetch_add(1, std::memory_order_relaxed);
+			AddHotSample(m_eeHotPc, m_eeHotCount, m_eeHotSamples, m_vm->m_ee->m_EE.m_State.nPC);
+		}
+		if((section == EmuProfile::SECTION_IOP) && m_vm)
+		{
+			AddHotSample(m_iopHotPc, m_iopHotCount, m_iopHotSamples, m_vm->m_iop->m_cpu.m_State.nPC);
 		}
 	}
+}
+
+void CEmuSession::AddHotSample(std::atomic<uint32_t>* pcs, std::atomic<uint32_t>* counts, std::atomic<uint32_t>& samples, uint32_t pc)
+{
+	uint32_t bucket = (pc & ~0x1Fu) | 1;
+	uint32_t slot = ((bucket >> 5) * 2654435761u) % EE_HOTSPOT_SLOTS;
+	// Open addressing; only the profiler thread writes the table.
+	for(unsigned int probe = 0; probe < 16; probe++, slot = (slot + 1) % EE_HOTSPOT_SLOTS)
+	{
+		uint32_t current = pcs[slot].load(std::memory_order_relaxed);
+		if(current == 0) pcs[slot].store(current = bucket, std::memory_order_relaxed);
+		if(current != bucket) continue;
+		counts[slot].fetch_add(1, std::memory_order_relaxed);
+		break;
+	}
+	samples.fetch_add(1, std::memory_order_relaxed);
 }
 
 void CEmuSession::ResetEeHotspots()
@@ -341,19 +350,31 @@ void CEmuSession::ResetEeHotspots()
 	// Counts only: clearing addresses would race with the profiler thread.
 	for(auto& count : m_eeHotCount) count.store(0, std::memory_order_relaxed);
 	m_eeHotSamples.store(0, std::memory_order_relaxed);
+	for(auto& count : m_iopHotCount) count.store(0, std::memory_order_relaxed);
+	m_iopHotSamples.store(0, std::memory_order_relaxed);
 }
 
 void CEmuSession::WriteEeHotspots(std::FILE* file, unsigned int count)
 {
+	WriteHotspots(file, count, "EE", m_eeHotPc, m_eeHotCount, m_eeHotSamples);
+}
+
+void CEmuSession::WriteIopHotspots(std::FILE* file, unsigned int count)
+{
+	WriteHotspots(file, count, "IOP", m_iopHotPc, m_iopHotCount, m_iopHotSamples);
+}
+
+void CEmuSession::WriteHotspots(std::FILE* file, unsigned int count, const char* name, std::atomic<uint32_t>* pcs, std::atomic<uint32_t>* counts, std::atomic<uint32_t>& samplesTotal)
+{
 	std::vector<std::pair<uint32_t, uint32_t>> hot;
 	for(unsigned int i = 0; i < EE_HOTSPOT_SLOTS; i++)
 	{
-		uint32_t samples = m_eeHotCount[i].load(std::memory_order_relaxed);
-		if(samples != 0) hot.emplace_back(m_eeHotPc[i].load(std::memory_order_relaxed) & ~0x1Fu, samples);
+		uint32_t samples = counts[i].load(std::memory_order_relaxed);
+		if(samples != 0) hot.emplace_back(pcs[i].load(std::memory_order_relaxed) & ~0x1Fu, samples);
 	}
 	std::sort(hot.begin(), hot.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
-	uint32_t total = std::max<uint32_t>(m_eeHotSamples.load(std::memory_order_relaxed), 1);
-	std::fprintf(file, "EE samples: %u\n", total);
+	uint32_t total = std::max<uint32_t>(samplesTotal.load(std::memory_order_relaxed), 1);
+	std::fprintf(file, "%s samples: %u\n", name, total);
 	for(unsigned int i = 0; (i < count) && (i < hot.size()); i++)
 	{
 		std::fprintf(file, "%08X %5.1f%%\n", hot[i].first, hot[i].second * 100.0f / total);
