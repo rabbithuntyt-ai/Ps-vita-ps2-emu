@@ -39,8 +39,11 @@ second. Full history: [docs/perf/vita_realworld.md](docs/perf/vita_realworld.md)
 
 Resident Evil 4 on the same Vita, per build (the table's first rows measured the attract
 trailer, the last the orange intro, which is heavier). Its movies
-need 30 new pictures per second, which takes 60 emulated fps: the intro is at 14. Status,
-findings and notes for other sessions: [docs/RE4.md](docs/RE4.md).
+need 30 new pictures per second, which takes 60 emulated fps: the intro is at 14. Load
+times went down on 2026-11-07: boot to title 29.7 to 8.8 s, New Game to the intro 17 to
+10 s. Both fixes are library code (CRI ADX file waits count as idle; SN Systems' DLL
+linker native), see [docs/LIBRARY_WIDE.md](docs/LIBRARY_WIDE.md). Status, findings and
+notes for other sessions: [docs/RE4.md](docs/RE4.md).
 
 ![Resident Evil 4 frame rates on a real PS Vita, per build](docs/perf/re4_vita.svg)
 

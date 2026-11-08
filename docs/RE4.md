@@ -20,6 +20,36 @@ movie pictures handed to the game, not flips. A real 30 needs 60 emulated fps.
 | Attract trailer (idle at the title) | black, 3 pictures/s | picture correct, 13 pictures/s (peaks of 17), 27 emulated fps. Plays through and returns to the title | 30 pictures/s |
 | Real-time 3D (Leon on the path, from a save state) | grey screen or hang | **drawn, with depth. 0.9 fps.** Some textures on Leon are wrong (patches on hair and jacket) | 30 |
 
+Load times, 2026-11-07 (warm JIT cache, wall clock on the Vita):
+
+| Load | Before | Now | What changed |
+|---|---|---|---|
+| Boot to the title menu | 29.7 s | **8.8 s** | CRI ADX poll loop counted as idle |
+| New Game confirmed to the first intro picture | 17 s | **10 s** | SN Systems DLL linker's symbol scans native |
+| First button press at the title to the first intro picture | 43 s | 36 s | Same two changes. The rest is menu screens and the memory card check |
+
+### Why the loads were slow
+
+- **Boot (7 to 27 s of black screen).** `DVDLoadPartition` waits for its files with
+  `while(ADXF_GetPtStat(i) != 3) ADXM_ExecMain();`. The file comes from the IOP, so it
+  needs emulated time, but the EE spent all its cycles running CRI's servers in the
+  loop: 5 emulated fps, 75% of the EE in `LSC_ExecServer`, `ADXF_GetStat` and friends.
+  `ee_cycle_rate=50` alone brought the title to 19.9 s, which proved it was a wait.
+  Now `ADXM_ExecMain` (0x17CB98) starts with an HLE call. From its third call in a
+  frame, the rest of the EE's time slice is idle (`IDLE_HLE_POLL`, patch 0076). It never
+  fires at the title or in movies. Setting: `adx_idle=0` turns it off.
+- **New Game (8 s at 50 emulated fps, nothing on screen).** 58% of the EE was in three
+  static functions of SN Systems' DLL linker (0x2A4CB0, 0x2A4DC8, 0x2A4EA0, between
+  `_kExitTLBHandler` and `snInitDllSystem`). They resolve each symbol by walking every
+  loaded module's table with `strcmp`. Their scans are native now (`PatchSnDll`). The
+  relocation routine (0x2A4B70) is still the game's own code, called from a short MIPS
+  loop. The intro and Leon's car cutscene still play, 270 s of movie with the game's
+  code running behind them (frame dumps, run `dl_long`). The 3D after the cutscene was
+  not reached in that run: if the gameplay session sees a crash or missing behaviour
+  right after New Game, retest with the linker patch removed first.
+- RE4 ships its symbol table in EE RAM: `runs/re4/syms.txt` (5602 names, made by
+  `runs/re4/an27.py` from a RAM dump) names most hot addresses.
+
 Not verified: moving Leon (no input tried yet), audio sync in movies, and the movie picture
 compared with a reference. Pictures looked right in frame dumps only, apart from one
 frame (t=317 of a run) that was mostly black with a blocky patch: maybe a scene cut,

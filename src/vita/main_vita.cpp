@@ -184,6 +184,7 @@ namespace
 		uint32_t iopRate = 100;     //IOP clock, percent of real speed
 		uint32_t mpegCore = 2;      //core of the movie decoder
 		bool threadLockHle = false; //game's critical sections without kernel calls (needs mpeg_hle)
+		bool adxIdle = true;        //CRI ADX polling for a file ends the EE's time slice (needs mpeg_hle)
 		bool interlaced = false;
 		uint32_t frameSkip = 0;
 		bool showStats = true;
@@ -217,6 +218,7 @@ namespace
 		else if(key == "iop_rate") settings.iopRate = value;
 		else if(key == "mpeg_core") settings.mpegCore = value;
 		else if(key == "thread_lock_hle") settings.threadLockHle = value != 0;
+		else if(key == "adx_idle") settings.adxIdle = value != 0;
 		else if(key == "interlaced") settings.interlaced = value != 0;
 		else if(key == "frame_skip") settings.frameSkip = value;
 		else if(key == "show_stats") settings.showStats = value != 0;
@@ -707,6 +709,7 @@ namespace
 			if(settings.movieHle)
 			{
 				if(settings.threadLockHle) mpegHle.EnableThreadLockHle();
+				mpegHle.SetAdxPollIdle(settings.adxIdle);
 				// Native movie decoding (libmpeg 2.2 sceMpegGetPicture), decoder on
 				// core 2 (VU1 has little to do while the EE does not decode).
 				uint32_t mpegCoreMask = 0x10000u << std::min<uint32_t>(settings.mpegCore, 2);

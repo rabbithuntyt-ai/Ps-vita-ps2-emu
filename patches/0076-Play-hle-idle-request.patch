@@ -1,0 +1,40 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -80,6 +80,7 @@
+ 		IDLE_DMA_STAT,
+ 		IDLE_DMA_CHCR,
+ 		IDLE_VIF_GIF,
++		IDLE_HLE_POLL, //Slices ended by an HLE handler: the game polls middleware for a file.
+ 		IDLE_SOURCE_COUNT
+ 	};
+ 	inline std::atomic<uint32> g_idleTriggers[IDLE_SOURCE_COUNT];
+diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
+--- a/Source/PS2VM.cpp
++++ b/Source/PS2VM.cpp
+@@ -755,7 +755,10 @@
+ 			EmuProfile::CScope profileScope(EmuProfile::SECTION_EE);
+ 			executed = m_ee->ExecuteCpu(m_singleStepEe ? 1 : m_eeExecutionTicks);
+ 		}
+-		if(m_ee->IsCpuIdle())
++		bool hleIdle = CPS2OS::g_hleIdleRequest;
++		CPS2OS::g_hleIdleRequest = false;
++		if(hleIdle) EmuProfile::g_idleTriggers[EmuProfile::IDLE_HLE_POLL].fetch_add(1, std::memory_order_relaxed);
++		if(hleIdle || m_ee->IsCpuIdle())
+ 		{
+ 			m_cpuUtilisation.eeIdleTicks += (m_eeExecutionTicks - executed);
+ 			executed = m_eeExecutionTicks;
+diff --git a/Source/ee/PS2OS.h b/Source/ee/PS2OS.h
+--- a/Source/ee/PS2OS.h
++++ b/Source/ee/PS2OS.h
+@@ -73,6 +73,10 @@
+ 	};
+ 	//Profiling: kernel calls by number.
+ 	static inline uint32 g_syscallCounts[128] = {};
++	//Set by an HLE handler when the game polls for something that only time
++	//brings (middleware waiting for a file): the VM counts the rest of the EE's
++	//time slice as idle.
++	static inline bool g_hleIdleRequest = false;
+ 
+ 	void HandleInterrupt(int32);
+ 	void HandleSyscall();

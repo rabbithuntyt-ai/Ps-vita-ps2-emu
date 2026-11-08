@@ -24,6 +24,8 @@ of `tools/vitalab_compat.sh` across the test set.
 | Wait timers in `perf.csv` | Every place the emulation thread sleeps is timed. Found the largest gain so far | Every game: **look at them first**. A thread below 90% CPU with no fast game means a wait, not a CPU limit |
 | `pad_script` | Scripted buttons for the game in autostart runs | Lets the compatibility harness get past menus without Vita Lab |
 | Diagnostics (`frame_dump_every`, `ee_hot_after`, `syscalls.txt`, `mpeg_dump_mb`...) | See [RE4.md](RE4.md) | Finding the next bottleneck in any game |
+| **CRI ADX file waits count as idle** (`adx_idle`, patch 0076, `PatchAdxmExecMain`) | `while(ADXF_GetStat(h) != done) ADXM_ExecMain();` burns the EE while the IOP reads. From the third `ADXM_ExecMain` call in a frame, the rest of the slice is idle. RE4's boot: 29.7 to 8.8 s | **Every game using CRI ADX (Capcom, Sega, Namco and many more), but only with `mpeg_hle` on today.** Found by its call chain (`ADXM_ExecSvrAll`: 7 calls of one-line `SVM_ExecSvr*` functions), not by address. A game polling `ADXM_ExecMain` 3+ times per frame while it has real work would lose EE time: watch the last `idle_*` count in `perf.csv` |
+| **SN Systems DLL linker's symbol scans native** (`PatchSnDll`) | ProDG's `snDll` resolves symbols by walking every module's table with `strcmp`. RE4's New Game load: 17 to 10 s | **Games built with ProDG that load DLL modules**, if their `snDll` is the same build (exact match, addresses masked). Other builds need their own signature. Only with `mpeg_hle` on today |
 
 ## Known problem for every 3D game
 
@@ -57,6 +59,11 @@ These need a per-game choice today. The job is to make that choice automatic.
 | **libmpeg 3.0 signatures** | Taken from RE4's build | Should match other games on the same SDK release (`PsIIlibipu 3000` in EE RAM), including non-Sofdec ones. RAW8 mode (0x2E7410 here) is written but has **never been run** |
 | `[SLUS-21134]` in `assets/game_profiles.ini` | One serial | The PAL and Japanese releases need their own entries and their own lock signatures. Their `ee_slice` should carry over |
 
+**`CMpegHle` is now the home of every guest-code replacement**, not only movies: memcpy,
+the ADX wait, the DLL linker. They need `mpeg_hle=1` only because that is where the
+syscall hook is installed. Next step for the whole library: split them into a "game HLE"
+class that is on for every game, with each replacement still behind its own signature.
+
 ## The method, for any game
 
 1. `tools/vitalab_compat.sh`, or a run with `frame_dump_every=15`. Look at the frames: fps
@@ -84,5 +91,10 @@ These need a per-game choice today. The job is to make that choice automatic.
 - **Movies:** the native decoder takes about 28 ms of CPU per 512x336 picture. Any movie
   game should now be limited by the rest of the emulator, not by decoding, provided nothing
   shares its core at equal priority.
+- **Load screens are often a wait the EE spins through.** If a black load screen has the EE
+  near 100% with `vm_fps` low and few disc reads, try `ee_cycle_rate=50`: if the load gets
+  shorter, the game is waiting for time (IOP, disc), not working. Find the poll loop with
+  `ee_hot_after` and end the slice there. If `vm_fps` is near full speed instead, the load
+  is real EE work: look for a library routine to make native (RE4: the DLL linker).
 - **Check for sleeping before optimising.** In RE4's intro a third of the time was a wait,
   with idle CPU on all three cores, and no hotspot pointed to it.

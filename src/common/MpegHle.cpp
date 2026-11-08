@@ -156,6 +156,109 @@ namespace
 	    0x03E00008,                         // jr    ra
 	    0x0100102D};                        // move  v0, t0
 
+	// CRI ADX (many games): code waits for a file with
+	//   while(ADXF_GetStat(handle) != ADXF_STAT_READEND) ADXM_ExecMain();
+	// Resident Evil 4's DVDLoadPartition spends 20 s of its boot there, 75% of the
+	// EE's time. The file comes from the IOP, which needs emulated time, not EE work.
+	// ADXM_ExecMain is a tail call to ADXMNG_CallMainServerFunctions, which calls
+	// ADXM_ExecSvrAll: 7 calls of one-line SVM_ExecSvr* functions (li a0, server; j
+	// SVM_ExecSvrFunc). Found through that chain, so no fixed addresses (RE4:
+	// 0x17CB98, 0x191BE8, 0x191D10).
+	constexpr uint32_t SYSCALL_ADXM_MAIN = SYSCALL_BASE + 8;
+	constexpr uint32_t ADXM_WRAPPER_WORDS = 5;
+	const uint32_t g_codeAdxmWrapper[ADXM_WRAPPER_WORDS] = {0x27BDFFF0, 0xFFBF0000, 0xDFBF0000, 0x08000000 /* j */, 0x27BD0010};
+	// The stub keeps the original j; the stack adjustment it no longer needs goes.
+	const uint32_t g_stubAdxmHead[] = {0x24030000 | SYSCALL_ADXM_MAIN, 0x0000000C, 0x00000000};
+	// Later calls in the same frame end the EE's slice (one call per frame is the
+	// game's own update; more than this is a loop waiting).
+	constexpr uint32_t ADXM_CALLS_PER_FRAME = 2;
+	constexpr uint32_t ADXM_MAX_SEARCHES = 20;
+
+	// SN Systems' DLL linker (ProDG's snDll*, many games): three static functions
+	// resolve a symbol by walking every loaded module's symbol table (entries of
+	// 12 bytes: name, value, 16 bit hash, type, flag) with strcmp on a hash match.
+	// Resident Evil 4 links its modules after New Game: 58% of the EE's time for
+	// about 8 s. RE4: 0x2A4CB0 (link: every definition of type 1 or 3 is passed to
+	// a relocation routine), 0x2A4DC8 and 0x2A4EA0 (is it resolved already?); the
+	// module list is at 0x32F2EC. The scans become native; the relocation routine
+	// stays guest code, called from a short MIPS loop.
+	constexpr uint32_t SYSCALL_DLL_NEXT = SYSCALL_BASE + 9;
+	constexpr uint32_t SYSCALL_DLL_FIND = SYSCALL_BASE + 10;
+	constexpr uint32_t SYSCALL_DLL_FIND_ANY = SYSCALL_BASE + 11;
+	const uint32_t g_codeSnDll[] = {
+	    0x27BDFF60, 0x24030001, 0x7FB10080, 0x3C020033, 0x7FB00090, 0x7FB20070, 0x7FB30060, 0x7FB40050, 0x7FB50040, 0x7FB60030, 0x7FB70020,
+	    0x7FBE0010, 0xFFBF0000, 0xA083000B, 0x8C9E0000, 0x8C51F2EC, 0x94970008, 0x12200026, 0x8C960004, 0x8E320010, 0x12400020, 0x8E30000C,
+	    0x3C13AAAA, 0x24150001, 0x24140003, 0x3673AAAB, 0x96020008, 0x54570017, 0x2652FFFF, 0x8E040000, 0x0C0ABE37, 0x03C0282D, 0x54400012,
+	    0x2652FFFF, 0x9202000A, 0x50550004, 0x8E26000C, 0x5454000D, 0x2652FFFF, 0x8E26000C, 0x02C0382D, 0x8E240004, 0x02063023, 0x8E250008,
+	    0x00D33018, 0x0C0A92DC, 0x00063083, 0x14400005, 0x0000102D, 0x10000008, 0x7BB00090, 0x1640FFE6, 0x2610000C, 0x8E310030, 0x5620FFDD,
+	    0x8E320010, 0x24020001, 0x7BB00090, 0x7BB10080, 0x7BB20070, 0x7BB30060, 0x7BB40050, 0x7BB50040, 0x7BB60030, 0x7BB70020, 0x7BBE0010,
+	    0xDFBF0000, 0x03E00008, 0x27BD00A0, 0x00000000, 0x27BDFF90, 0x3C020033, 0x7FB20040, 0x7FB30030, 0x8C52F2EC, 0x0080982D, 0x7FB00060,
+	    0x7FB10050, 0x7FB40020, 0x7FB50010, 0x1240001F, 0xFFBF0000, 0x8E510010, 0x00000000, 0x12200018, 0x8E50000C, 0x24140002, 0x24150004,
+	    0x9202000B, 0x50400011, 0x2631FFFF, 0x96030008, 0x96620008, 0x5462000D, 0x2631FFFF, 0x8E040000, 0x0C0ABE37, 0x8E650000, 0x54400008,
+	    0x2631FFFF, 0x9202000A, 0x5054000C, 0x24020001, 0x54550008, 0xA200000B, 0x10000008, 0x24020001, 0x1620FFEC, 0x2610000C, 0x8E520030,
+	    0x5640FFE5, 0x8E510010, 0x0C0A932C, 0x0260202D, 0x7BB00060, 0x7BB10050, 0x7BB20040, 0x7BB30030, 0x7BB40020, 0x7BB50010, 0xDFBF0000,
+	    0x03E00008, 0x27BD0070, 0x00000000, 0x27BDFFB0, 0x3C020033, 0x7FB20020, 0x7FB30010, 0x8C52F2EC, 0x0080982D, 0x7FB00040, 0x7FB10030,
+	    0x12400018, 0xFFBF0000, 0x8E510010, 0x00000000, 0x12200011, 0x8E50000C, 0x9202000B, 0x5040000C, 0x2631FFFF, 0x96030008, 0x96620008,
+	    0x54620008, 0x2631FFFF, 0x8E040000, 0x0C0ABE37, 0x8E650000, 0x14400003, 0x2631FFFF, 0x10000008, 0x24020001, 0x1620FFF1, 0x2610000C,
+	    0x8E520030, 0x5640FFEC, 0x8E510010, 0x0C0A932C, 0x0260202D, 0x7BB00040, 0x7BB10030, 0x7BB20020, 0x7BB30010, 0xDFBF0000, 0x03E00008,
+	    0x27BD0050};
+	constexpr uint32_t SNDLL_WORDS = sizeof(g_codeSnDll) / sizeof(g_codeSnDll[0]);
+	constexpr uint32_t SNDLL_FIND = (0x2A4DC8 - 0x2A4CB0) / 4;     //second function
+	constexpr uint32_t SNDLL_FIND_ANY = (0x2A4EA0 - 0x2A4CB0) / 4; //third function
+	constexpr uint32_t SNDLL_LIST_HI = 3, SNDLL_LIST_LO = 15;     //lui v0 / lw s1, the module list
+	constexpr uint32_t SNDLL_RELOCATE = 45;                        //jal of the relocation routine
+	// Addresses: lui immediates, offsets from v0 (the module list), jal targets.
+	uint32_t SnDllMask(uint32_t opcode)
+	{
+		uint32_t op = opcode >> 26;
+		if(op == 0x03) return 0xFC000000;
+		if(op == 0x0F) return 0xFFFF0000;
+		if((op == 0x23) && (((opcode >> 21) & 0x1F) == 2)) return 0xFFFF0000;
+		return ~0u;
+	}
+	// The link function: s0 symbol, s1 module (0: not started), s2 next entry
+	// (-1: the next module); SYSCALL_DLL_NEXT finds the next definition and loads
+	// the relocation routine's arguments.
+	constexpr uint32_t SNDLL_STUB_RELOCATE = 13;
+	const uint32_t g_stubSnDllLink[] = {
+	    0x27BDFFE0,                      // addiu sp, sp, -32
+	    0xFFBF0000,                      // sd    ra, 0(sp)
+	    0xFFB00008,                      // sd    s0, 8(sp)
+	    0xFFB10010,                      // sd    s1, 16(sp)
+	    0xFFB20018,                      // sd    s2, 24(sp)
+	    0x0080802D,                      // move  s0, a0
+	    0x0000882D,                      // move  s1, zero
+	    0x0000902D,                      // move  s2, zero
+	    0x0200202D,                      // loop: move a0, s0
+	    0x24030000 | SYSCALL_DLL_NEXT,   // addiu v1, zero, id
+	    0x0000000C,                      // syscall
+	    0x10400007,                      // beqz  v0, done
+	    0x00000000,                      // nop
+	    0x0C000000,                      // jal   relocate (a0..a3)
+	    0x00000000,                      // nop
+	    0x10400004,                      // beqz  v0, return (0)
+	    0x00000000,                      // nop
+	    0x1000FFF6,                      // b     loop
+	    0x2412FFFF,                      // li    s2, -1 (the next module)
+	    0x24020001,                      // done: li v0, 1
+	    0xDFBF0000,                      // return: ld ra, 0(sp)
+	    0xDFB00008,                      // ld    s0, 8(sp)
+	    0xDFB10010,                      // ld    s1, 16(sp)
+	    0xDFB20018,                      // ld    s2, 24(sp)
+	    0x03E00008,                      // jr    ra
+	    0x27BD0020};                     // addiu sp, sp, 32
+	// The lookups: v0 1 is the answer, 0 means "link it" (a0 is kept).
+	constexpr uint32_t SNDLL_STUB_LINK_CALL = 4;
+	const uint32_t g_stubSnDllFind[] = {
+	    0x24030000,  // addiu v1, zero, id
+	    0x0000000C,  // syscall
+	    0x14400003,  // bnez  v0, return
+	    0x00000000,  // nop
+	    0x08000000,  // j     link
+	    0x00000000,  // nop
+	    0x03E00008,  // return: jr ra
+	    0x00000000};
+
 	// Kinds of the code after 00 00 01 (Sofdec's classifier, RE4 0x2DABE8).
 	uint32_t StartCodeKind(uint8_t code)
 	{
@@ -283,6 +386,9 @@ void CMpegHle::PatchCode(CMIPS& ee)
 	PatchStartCodeScan(ee);
 	PatchThreadLock(ee);
 	PatchMemcpy(ee);
+	PatchAdxmExecMain(ee);
+	PatchSnDll(ee);
+	m_adxmCallsThisFrame = 0;
 	auto matches = [&](uint32_t variant, uint32_t address) {
 		const auto& v = g_variants[variant];
 		for(uint32_t i = 0; i < v.words; i++)
@@ -387,6 +493,251 @@ void CMpegHle::PatchMemcpy(CMIPS& ee)
 	for(uint32_t i = 0; i < 5; i++) Write32(m_ram, m_memcpyAddress + (MEMCPY_LOOP + i) * 4, g_stubMemcpyLoop[i]);
 	ee.m_executor->ClearActiveBlocksInRange(m_memcpyAddress, m_memcpyAddress + MEMCPY_WORDS * 4, false);
 	Log("patched memcpy at 0x%08X\n", m_memcpyAddress);
+}
+
+void CMpegHle::PatchSnDll(CMIPS& ee)
+{
+	constexpr uint32_t LINK_WORDS = sizeof(g_stubSnDllLink) / 4;
+	constexpr uint32_t LIST_WORD = LINK_WORDS; //data word after the link stub: the module list
+	auto patched = [&](uint32_t address) {
+		return (Read32(m_ram, address + 8 * 4) == g_stubSnDllLink[8]) && (Read32(m_ram, address + 9 * 4) == g_stubSnDllLink[9]) &&
+		       (Read32(m_ram, address + SNDLL_FIND * 4) == (g_stubSnDllFind[0] | SYSCALL_DLL_FIND));
+	};
+	auto matches = [&](uint32_t address) {
+		for(uint32_t i = 0; i < SNDLL_WORDS; i++)
+		{
+			uint32_t mask = SnDllMask(g_codeSnDll[i]);
+			if((Read32(m_ram, address + i * 4) & mask) != (g_codeSnDll[i] & mask)) return false;
+		}
+		return true;
+	};
+	if(m_snDllAddress != 0)
+	{
+		if(patched(m_snDllAddress)) return;
+		if(!matches(m_snDllAddress)) m_snDllAddress = 0;
+	}
+	if((m_snDllAddress == 0) && ((m_vblanks % 60) == 1) && (m_snDllSearches < ADXM_MAX_SEARCHES))
+	{
+		m_snDllSearches++;
+		for(uint32_t address = 0x100000; address < 0x1000000 - SNDLL_WORDS * 4; address += 4)
+		{
+			// A state saved after the patch: the stubs are there already.
+			if((Read32(m_ram, address) == g_stubSnDllLink[0]) && patched(address))
+			{
+				m_snDllAddress = address;
+				m_snDllList = Read32(m_ram, address + LIST_WORD * 4);
+				Log("SN DLL linker already patched at 0x%08X\n", address);
+				return;
+			}
+			if((Read32(m_ram, address) == g_codeSnDll[0]) && matches(address))
+			{
+				m_snDllAddress = address;
+				Log("SN DLL linker found at 0x%08X\n", address);
+				break;
+			}
+		}
+	}
+	if(m_snDllAddress == 0) return;
+	uint32_t pc = ee.m_State.nPC;
+	if((pc >= m_snDllAddress) && (pc < m_snDllAddress + SNDLL_WORDS * 4)) return;
+	const uint32_t base = m_snDllAddress;
+	uint32_t hi = Read32(m_ram, base + SNDLL_LIST_HI * 4) & 0xFFFF;
+	int16_t lo = static_cast<int16_t>(Read32(m_ram, base + SNDLL_LIST_LO * 4) & 0xFFFF);
+	m_snDllList = (hi << 16) + static_cast<int32_t>(lo);
+	uint32_t relocate = Read32(m_ram, base + SNDLL_RELOCATE * 4);
+	for(uint32_t i = 0; i < LINK_WORDS; i++)
+	{
+		uint32_t word = g_stubSnDllLink[i];
+		if(i == SNDLL_STUB_RELOCATE) word = relocate;
+		Write32(m_ram, base + i * 4, word);
+	}
+	Write32(m_ram, base + LIST_WORD * 4, m_snDllList);
+	const uint32_t jumpLink = 0x08000000 | ((base >> 2) & 0x03FFFFFF);
+	const uint32_t finds[2][2] = {{SNDLL_FIND, SYSCALL_DLL_FIND}, {SNDLL_FIND_ANY, SYSCALL_DLL_FIND_ANY}};
+	for(const auto& find : finds)
+	{
+		for(uint32_t i = 0; i < sizeof(g_stubSnDllFind) / 4; i++)
+		{
+			uint32_t word = g_stubSnDllFind[i];
+			if(i == 0) word |= find[1];
+			if(i == SNDLL_STUB_LINK_CALL) word = jumpLink;
+			Write32(m_ram, base + (find[0] + i) * 4, word);
+		}
+	}
+	ee.m_executor->ClearActiveBlocksInRange(base, base + SNDLL_WORDS * 4, false);
+	Log("patched the SN DLL linker at 0x%08X (modules at 0x%08X)\n", base, m_snDllList);
+}
+
+void CMpegHle::HandleSnDll(CMIPS& ee, uint32_t func)
+{
+	auto& gpr = ee.m_State.nGPR;
+	auto inRam = [](uint32_t address, uint32_t size) { return ((address & 0x1FFFFFFF) + size) <= 0x02000000; };
+	auto r32 = [&](uint32_t address) { return inRam(address, 4) ? Read32(m_ram, address) : 0; };
+	auto r16 = [&](uint32_t address) -> uint32_t {
+		if(!inRam(address, 2)) return 0;
+		uint16_t value;
+		std::memcpy(&value, m_ram + (address & 0x01FFFFFF), 2);
+		return value;
+	};
+	auto r8 = [&](uint32_t address) -> uint32_t { return inRam(address, 1) ? m_ram[address & 0x01FFFFFF] : 0; };
+	auto w8 = [&](uint32_t address, uint8_t value) { if(inRam(address, 1)) m_ram[address & 0x01FFFFFF] = value; };
+	// strcmp(a, b) == 0 on guest strings.
+	auto same = [&](uint32_t a, uint32_t b) {
+		for(uint32_t i = 0; i < 4096; i++)
+		{
+			if(!inRam(a + i, 1) || !inRam(b + i, 1)) return false;
+			uint8_t x = m_ram[(a + i) & 0x01FFFFFF], y = m_ram[(b + i) & 0x01FFFFFF];
+			if(x != y) return false;
+			if(x == 0) return true;
+		}
+		return false;
+	};
+	const uint32_t symbol = gpr[CMIPS::A0].nV0;
+	const uint32_t hash = r16(symbol + 8), name = r32(symbol);
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_stats.dllLookups++;
+	}
+	if(func == SYSCALL_DLL_NEXT)
+	{
+		uint32_t module = gpr[CMIPS::S1].nV0, next = gpr[CMIPS::S2].nV0;
+		if(module == 0)
+		{
+			w8(symbol + 11, 1);
+			module = r32(m_snDllList);
+			next = 0;
+		}
+		else if(next == 0xFFFFFFFF)
+		{
+			module = r32(module + 48);
+			next = 0;
+		}
+		for(; module != 0; module = r32(module + 48), next = 0)
+		{
+			uint32_t count = r32(module + 16), entries = r32(module + 12);
+			for(uint32_t i = next; i < count; i++)
+			{
+				uint32_t entry = entries + i * 12;
+				if((r16(entry + 8) != hash) || !same(r32(entry), name)) continue;
+				uint32_t type = r8(entry + 10);
+				if((type != 1) && (type != 3)) continue;
+				gpr[CMIPS::S1].nD0 = static_cast<int32_t>(module);
+				gpr[CMIPS::S2].nD0 = static_cast<int32_t>(i + 1);
+				gpr[CMIPS::A0].nD0 = static_cast<int32_t>(r32(module + 4));
+				gpr[CMIPS::A1].nD0 = static_cast<int32_t>(r32(module + 8));
+				gpr[CMIPS::A2].nD0 = static_cast<int32_t>(i);
+				gpr[CMIPS::A3].nD0 = static_cast<int32_t>(r32(symbol + 4));
+				gpr[CMIPS::V0].nD0 = 1;
+				return;
+			}
+		}
+		gpr[CMIPS::V0].nD0 = 0;
+		return;
+	}
+	// Already resolved? FIND: a definition of type 2 or 4 (another type is
+	// cleared, then linked); FIND_ANY: any. 0: the stub calls the link function.
+	for(uint32_t module = r32(m_snDllList); module != 0; module = r32(module + 48))
+	{
+		uint32_t count = r32(module + 16), entries = r32(module + 12);
+		for(uint32_t i = 0; i < count; i++)
+		{
+			uint32_t entry = entries + i * 12;
+			if((r8(entry + 11) == 0) || (r16(entry + 8) != hash) || !same(r32(entry), name)) continue;
+			uint32_t type = r8(entry + 10);
+			if((func == SYSCALL_DLL_FIND_ANY) || (type == 2) || (type == 4))
+			{
+				gpr[CMIPS::V0].nD0 = 1;
+				return;
+			}
+			w8(entry + 11, 0);
+			gpr[CMIPS::V0].nD0 = 0;
+			return;
+		}
+	}
+	gpr[CMIPS::V0].nD0 = 0;
+}
+
+uint32_t CMpegHle::FindAdxmExecMain() const
+{
+	constexpr uint32_t start = 0x100000, end = 0x1000000;
+	auto jumpTarget = [](uint32_t address, uint32_t opcode) {
+		return (address & 0xF0000000) | ((opcode & 0x03FFFFFF) << 2);
+	};
+	// li a0, server (move a0, zero for 0); j SVM_ExecSvrFunc, in a frame of 16 bytes.
+	auto serverCall = [&](uint32_t address) -> uint32_t {
+		if((address < start) || (address >= end)) return 0;
+		uint32_t server = Read32(m_ram, address + 4);
+		if((Read32(m_ram, address) != 0x27BDFFF0) || (((server & 0xFFFF0000) != 0x24040000) && (server != 0x0000202D)) ||
+		   (Read32(m_ram, address + 8) != 0xFFBF0000) || (Read32(m_ram, address + 12) != 0xDFBF0000) ||
+		   ((Read32(m_ram, address + 16) >> 26) != 0x02) || (Read32(m_ram, address + 20) != 0x27BD0010)) return 0;
+		return jumpTarget(address, Read32(m_ram, address + 16));
+	};
+	uint32_t execSvrAll = 0;
+	for(uint32_t address = start; (address < end - 64) && (execSvrAll == 0); address += 4)
+	{
+		if((Read32(m_ram, address) != 0x27BDFFF0) || (Read32(m_ram, address + 4) != 0xFFBF0000)) continue;
+		uint32_t common = 0;
+		bool all = true;
+		for(uint32_t i = 0; all && (i < 7); i++)
+		{
+			uint32_t call = Read32(m_ram, address + 8 + i * 8);
+			uint32_t target = ((call >> 26) == 0x03) && (Read32(m_ram, address + 12 + i * 8) == 0) ? serverCall(jumpTarget(address, call)) : 0;
+			all = (target != 0) && ((common == 0) || (target == common));
+			common = target;
+		}
+		if(all) execSvrAll = address;
+	}
+	if(execSvrAll == 0) return 0;
+	const uint32_t callExecSvrAll = 0x0C000000 | ((execSvrAll >> 2) & 0x03FFFFFF);
+	for(uint32_t address = start; address < end - 32; address += 4)
+	{
+		bool wrapper = true;
+		for(uint32_t i = 0; wrapper && (i < ADXM_WRAPPER_WORDS); i++)
+		{
+			uint32_t mask = (i == 3) ? 0xFC000000 : ~0u;
+			wrapper = ((Read32(m_ram, address + i * 4) & mask) == g_codeAdxmWrapper[i]);
+		}
+		if(!wrapper) continue;
+		uint32_t target = jumpTarget(address, Read32(m_ram, address + 12));
+		if((target < start) || (target >= end - 256)) continue;
+		for(uint32_t i = 0; i < 64; i++)
+		{
+			if(Read32(m_ram, target + i * 4) == callExecSvrAll) return address;
+		}
+	}
+	return 0;
+}
+
+void CMpegHle::PatchAdxmExecMain(CMIPS& ee)
+{
+	if(!m_adxPollIdle) return;
+	auto patched = [&](uint32_t address) {
+		return (Read32(m_ram, address) == g_stubAdxmHead[0]) && (Read32(m_ram, address + 4) == g_stubAdxmHead[1]);
+	};
+	if(m_adxmAddress != 0)
+	{
+		if(patched(m_adxmAddress)) return;
+		bool still = true;
+		for(uint32_t i = 0; still && (i < ADXM_WRAPPER_WORDS); i++)
+		{
+			uint32_t mask = (i == 3) ? 0xFC000000 : ~0u;
+			still = ((Read32(m_ram, m_adxmAddress + i * 4) & mask) == g_codeAdxmWrapper[i]);
+		}
+		if(!still) m_adxmAddress = 0;
+	}
+	if((m_adxmAddress == 0) && ((m_vblanks % 60) == 1) && (m_adxmSearches < ADXM_MAX_SEARCHES))
+	{
+		m_adxmSearches++;
+		m_adxmAddress = FindAdxmExecMain();
+		if(m_adxmAddress != 0) Log("ADXM_ExecMain found at 0x%08X\n", m_adxmAddress);
+	}
+	if(m_adxmAddress == 0) return;
+	uint32_t pc = ee.m_State.nPC;
+	if((pc >= m_adxmAddress) && (pc < m_adxmAddress + ADXM_WRAPPER_WORDS * 4)) return;
+	for(uint32_t i = 0; i < 3; i++) Write32(m_ram, m_adxmAddress + i * 4, g_stubAdxmHead[i]);
+	Write32(m_ram, m_adxmAddress + 16, 0);
+	ee.m_executor->ClearActiveBlocksInRange(m_adxmAddress, m_adxmAddress + ADXM_WRAPPER_WORDS * 4, false);
+	Log("patched ADXM_ExecMain at 0x%08X\n", m_adxmAddress);
 }
 
 void CMpegHle::HandleMemcpyBytes(CMIPS& ee)
@@ -535,6 +886,21 @@ void CMpegHle::OnSyscall(void* context, CMIPS& ee)
 	if(func == SYSCALL_SCAN)
 	{
 		hle->HandleStartCodeScan(ee);
+		return;
+	}
+	if((func == SYSCALL_DLL_NEXT) || (func == SYSCALL_DLL_FIND) || (func == SYSCALL_DLL_FIND_ANY))
+	{
+		hle->HandleSnDll(ee, func);
+		return;
+	}
+	if(func == SYSCALL_ADXM_MAIN)
+	{
+		if(++hle->m_adxmCallsThisFrame > ADXM_CALLS_PER_FRAME)
+		{
+			CPS2OS::g_hleIdleRequest = true;
+			std::lock_guard<std::mutex> lock(hle->m_mutex);
+			hle->m_stats.adxPolls++;
+		}
 		return;
 	}
 	hle->m_variant = std::min<uint32_t>((func - SYSCALL_BASE) / 2, VARIANT_COUNT - 1);

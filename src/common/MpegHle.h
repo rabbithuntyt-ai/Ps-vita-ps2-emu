@@ -41,6 +41,11 @@ public:
 	{
 		m_threadLockHle = true;
 	}
+	// CRI ADX games waiting for a file: the EE's time slices end early (on by default).
+	void SetAdxPollIdle(bool enabled)
+	{
+		m_adxPollIdle = enabled;
+	}
 	// Diagnostics: the first maxBytes the game feeds to the decoder, for replaying
 	// on a PC (tests/mpeg2_decoder_tests --es).
 	void SetInputDump(const char* path, size_t maxBytes);
@@ -53,6 +58,8 @@ public:
 		uint32_t decoded = 0;
 		double waitMs = 0;        //EE thread blocked waiting for pictures
 		uint32_t starved = 0;     //times the decoder ran out of input
+		uint32_t adxPolls = 0;    //ADXM_ExecMain calls that ended the EE's slice (polling for a file)
+		uint32_t dllLookups = 0;  //SN DLL symbol scans done natively
 	};
 	STATS GetStats();
 
@@ -90,6 +97,20 @@ private:
 	bool m_threadLockPatched = false;
 	void PatchStartCodeScan(CMIPS&);
 	void HandleStartCodeScan(CMIPS&);
+	// CRI ADX's ADXM_ExecMain: called again within a frame, the game is polling
+	// for a file and the rest of the EE's time slice is idle.
+	void PatchAdxmExecMain(CMIPS&);
+	uint32_t FindAdxmExecMain() const;
+	// SN Systems' DLL linker: its symbol scans as native code.
+	void PatchSnDll(CMIPS&);
+	void HandleSnDll(CMIPS&, uint32_t func);
+	uint32_t m_snDllAddress = 0;
+	uint32_t m_snDllList = 0; //address of the first module's pointer
+	uint32_t m_snDllSearches = 0;
+	bool m_adxPollIdle = true;
+	uint32_t m_adxmAddress = 0;
+	uint32_t m_adxmSearches = 0;
+	uint32_t m_adxmCallsThisFrame = 0;
 	uint32_t m_scanAddress = 0; //Sofdec's start code scan, replaced by native code
 	static constexpr uint32_t VARIANT_COUNT = 3;
 	uint32_t m_patchAddress[VARIANT_COUNT] = {};
