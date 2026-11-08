@@ -21,6 +21,12 @@ This is an emulator for every PS2 game. Whatever is learned from one game goes i
 
 ## Driving the Vita (Vita Lab)
 
+- **Keep both machines awake, always (owner's rule, for every session working through
+  Vita Lab).** The Vita: `vitalab cmd "nosleep on"` at the start of a session and before
+  each run (`runs/re4/run.sh` does it), check with `vitalab cmd "nosleep status"`. It
+  holds in and out of the emulator; VitaPS2 also calls `sceKernelPowerTick` every frame.
+  The Vita's own Settings > Power Save > automatic standby should stay off. The PC: in
+  the Claude app, ask for keep-awake (`request_keep_awake`, until the session is idle).
 - `vitalab shot s.png` (look at it), `vitalab press cross`, `vitalab stats`
 - Faster iteration: `vitalab push-eboot VTPS20000 eboot.bin`
 - `tools/vitalab_run.sh GAME SECONDS OUTDIR [setting=value...]`: writes

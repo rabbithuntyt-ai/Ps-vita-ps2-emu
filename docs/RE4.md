@@ -287,6 +287,8 @@ Autostart keys, all per run:
 
 ## Traps when testing
 
+- Keep the Vita and the PC awake (docs/HANDOFF.md): `vitalab cmd "nosleep on"`, and
+  keep-awake in the Claude app.
 - Judge movies by `mpeg_pictures` and frame dumps. The fps counter rose to 35 while the
   movie was actually stalled, and to 22 while it was replaying old pictures.
 - Every build invalidates the JIT cache: the first run takes about 2x as long to reach
