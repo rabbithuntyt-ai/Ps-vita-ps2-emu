@@ -320,6 +320,11 @@ void CEmuSession::SetIndirectDispatch(bool enabled)
 	g_indirectDispatchWanted = enabled;
 }
 
+void CEmuSession::SetCheapExits(bool enabled)
+{
+	CBasicBlock::EnableCheapExits(enabled);
+}
+
 void CEmuSession::SetRegions(bool enabled)
 {
 	CEeExecutor::SetRegions(enabled);

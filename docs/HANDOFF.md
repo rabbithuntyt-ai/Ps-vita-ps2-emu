@@ -122,4 +122,9 @@ findings, tools and traps that apply to every game.
 - JIT (AArch32): fused guest memory ops, interval register allocator, r9,
   branchless branches, fast block epilogue, EE sign-extension tracking,
   VU sticky-flag merging, NEON clamp/blend/flag accumulation.
-- Fuzz test for the EE JIT: `tools/make_ee_fuzz_elf.py` (+ ctest cases).
+- Fuzz test for the EE JIT: `tools/make_ee_fuzz_elf.py` (+ ctest cases); on the Vita's
+  ARM JIT: `tools/vita_jit_fuzz.sh`. The fuzzer generates EE code only: after any change
+  to block exits or linking, also boot an IOP-heavy game on the Vita (RE4 to its movie).
+  Indirect dispatch (on by default on the Vita, not on x86) skips the executor between
+  blocks, so bugs that the PC build hides show there (e.g. `addiu zero, zero, N`, a
+  syscall in Play's IOP stubs).

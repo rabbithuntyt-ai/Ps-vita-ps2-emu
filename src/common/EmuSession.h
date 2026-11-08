@@ -164,6 +164,8 @@ public:
 	// Indirect jumps resolved in compiled code (on by default; takes effect at
 	// the next SetSafeJit, before booting).
 	static void SetIndirectDispatch(bool);
+	//Block exits without the tests their guest code makes needless (on by default)
+	static void SetCheapExits(bool);
 	// Tier 2 regions: blocks of a function compiled as one (off by default).
 	static void SetRegions(bool);
 

@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <vector>
 #include "JitCache.h"
+#include "BasicBlock.h"
 #include "xxhash.h"
 #if defined(__arm__) && !defined(__aarch64__)
 #include "Jitter_CodeGen_AArch32.h"
@@ -85,8 +86,8 @@ namespace
 		}
 #if defined(__arm__) && !defined(__aarch64__)
 		// Modes that change the generated code without changing the executable.
-		uint8 modes[3] = {Jitter::CCodeGen_AArch32::GetConservativeAllocation(), Jitter::CCodeGen_AArch32::GetChainedFrames(),
-		                  Jitter::CCodeGen_AArch32::GetGuestMemoryOps()};
+		uint8 modes[4] = {Jitter::CCodeGen_AArch32::GetConservativeAllocation(), Jitter::CCodeGen_AArch32::GetChainedFrames(),
+		                  Jitter::CCodeGen_AArch32::GetGuestMemoryOps(), CBasicBlock::GetCheapExits()};
 		XXH3_64bits_update(state, modes, sizeof(modes));
 #endif
 		uint64 hash = XXH3_64bits_digest(state);

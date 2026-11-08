@@ -194,6 +194,7 @@ namespace
 		bool safeJit = false;    //no NEON/VFP register allocation in the JIT
 		bool indirectJit = true; //indirect jumps (function returns) resolved in compiled code
 		bool jitRegions = false; //tier 2 regions: blocks of a function compiled as one
+		bool cheapExits = true; //block exits skip tests the block's code makes needless
 		bool threadedSpu = true; //SPU2 audio mixing on the second core
 		bool jitCache = true;    //keep compiled code between runs (ux0:data/VitaPS2/jitcache)
 		bool movieHle = false;   //native movie decoding (libmpeg 2.2 games, docs/HLE_MPEG.md)
@@ -230,6 +231,7 @@ namespace
 		else if(key == "safe_jit") settings.safeJit = value != 0;
 		else if(key == "indirect_jit") settings.indirectJit = value != 0;
 		else if(key == "jit_regions") settings.jitRegions = value != 0;
+		else if(key == "cheap_exits") settings.cheapExits = value != 0;
 		else if(key == "threaded_spu") settings.threadedSpu = value != 0;
 		else if(key == "jit_cache") settings.jitCache = value != 0;
 		else if(key == "mpeg_hle") settings.movieHle = value != 0;
@@ -631,6 +633,7 @@ namespace
 		// Before anything is compiled for this game.
 		CEmuSession::SetIndirectDispatch(settings.indirectJit);
 		CEmuSession::SetRegions(settings.jitRegions);
+		CEmuSession::SetCheapExits(settings.cheapExits);
 		CEmuSession::SetSafeJit(settings.safeJit);
 		std::printf("safe jit: %s\n", settings.safeJit ? "on" : "off");
 		CAutoCycleRate autoRate;

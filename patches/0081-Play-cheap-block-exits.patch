@@ -1,0 +1,201 @@
+diff --git a/Source/BasicBlock.h b/Source/BasicBlock.h
+--- a/Source/BasicBlock.h
++++ b/Source/BasicBlock.h
+@@ -145,6 +145,28 @@
+ 
+ 	uint32 m_blockCompileHints = 0;
+ 
++	//Cheaper block exits (set by CompileRange from the guest code, MIPS blocks only):
++	//the block ends in j/jal/jr/jalr, so the delayed jump is always taken
++	bool m_exitAlwaysJumps = false;
++	//no instruction of the block can raise an exception (no memory access, syscall,
++	//coprocessor or call into the emulator), so the exit skips that test
++	bool m_exitNoException = false;
++	void AnalyseExit();
++
++public:
++	static void EnableCheapExits(bool enabled)
++	{
++		g_cheapExits = enabled;
++	}
++	static bool GetCheapExits()
++	{
++		return g_cheapExits;
++	}
++
++
++protected:
++	static inline bool g_cheapExits = true;
++
+ 	virtual void CompileProlog(CMipsJitter*);
+ 	virtual void CompileEpilog(CMipsJitter*, bool);
+ 
+diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
+--- a/Source/BasicBlock.cpp
++++ b/Source/BasicBlock.cpp
+@@ -248,6 +248,7 @@
+ 
+ 	m_context.m_pArch->SetCompileHints(m_blockCompileHints);
+ 
++	AnalyseExit();
+ 	CompileProlog(jitter);
+ 	jitter->MarkFirstBlockLabel();
+ 
+@@ -265,6 +266,63 @@
+ 	CompileEpilog(jitter, loopsOnItself);
+ }
+ 
++void CBasicBlock::AnalyseExit()
++{
++	m_exitAlwaysJumps = false;
++	m_exitNoException = false;
++	if(!g_cheapExits || (m_begin == m_end))
++	{
++		return;
++	}
++	auto getOp = [&](uint32 address) { return m_context.m_pMemoryMap->GetInstruction(address); };
++	{
++		uint32 op = getOp(m_end - 4);
++		uint32 top = op >> 26;
++		uint32 funct = op & 0x3F;
++		//j, jal, jr, jalr: the delay slot runs, then the jump is always taken
++		m_exitAlwaysJumps = (top == 0x02) || (top == 0x03) || ((top == 0x00) && ((funct == 0x08) || (funct == 0x09)));
++	}
++	//Instructions that can't set nHasException: integer arithmetic, logic,
++	//shifts, HI/LO moves (SPECIAL without syscall and traps), branches and jumps.
++	//Anything else (memory accesses call handlers on their slow path, COP0/1/2,
++	//MMI, syscall) keeps the test.
++	bool noException = true;
++	for(uint32 address = m_begin; address <= m_end; address += 4)
++	{
++		uint32 op = getOp(address);
++		uint32 top = op >> 26;
++		bool safe = false;
++		switch(top)
++		{
++		case 0x00:
++		{
++			uint32 funct = op & 0x3F;
++			safe = (funct != 0x0C) && (funct < 0x30); //not SYSCALL, not traps
++		}
++		break;
++		case 0x01:
++		{
++			uint32 rt = (op >> 16) & 0x1F;
++			safe = (rt <= 0x03) || ((rt >= 0x10) && (rt <= 0x13)); //BLTZ/BGEZ(L)(AL), not traps
++		}
++		break;
++		case 0x09:
++			//ADDIU R0, R0, x: the IOP's dynamic linking stubs, a syscall (CMA_MIPSIV::ADDIU)
++			safe = ((op >> 16) & 0x3FF) != 0;
++			break;
++		default:
++			safe = ((top >= 0x02) && (top <= 0x0F)) || ((top >= 0x14) && (top <= 0x17));
++			break;
++		}
++		if(!safe)
++		{
++			noException = false;
++			break;
++		}
++	}
++	m_exitNoException = noException;
++}
++
+ void CBasicBlock::CompileProlog(CMipsJitter* jitter)
+ {
+ #ifdef DEBUGGER_INCLUDED
+@@ -296,6 +354,66 @@
+ 	jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
+ 	jitter->PushCst(0);
+ 	jitter->BeginIf(Jitter::CONDITION_GT);
++	if(m_exitAlwaysJumps)
++	{
++		//j/jal/jr/jalr: nDelayedJumpAddr is set (no exception: the block entered
++		//with none and can't raise one, or it is tested here)
++		auto takeJump = [&]() {
++			jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++			jitter->PullRel(offsetof(CMIPS, m_State.nPC));
++			jitter->PushCst(MIPS_INVALID_PC);
++			jitter->PullRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++			if(loopsOnItself)
++			{
++				jitter->Goto(jitter->GetFirstBlockLabel());
++			}
++			else
++			{
++				jitter->JumpToDynamic(reinterpret_cast<void*>(&BranchBlockTrampoline));
++			}
++		};
++		if(m_exitNoException)
++		{
++			takeJump();
++		}
++		else
++		{
++			jitter->PushRel(offsetof(CMIPS, m_State.nHasException));
++			jitter->PushCst(0);
++			jitter->BeginIf(Jitter::CONDITION_EQ);
++			takeJump();
++			jitter->EndIf();
++		}
++	}
++	else if(m_exitNoException)
++	{
++		jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++		jitter->PushCst(MIPS_INVALID_PC);
++		jitter->BeginIf(Jitter::CONDITION_NE);
++		{
++			jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++			jitter->PullRel(offsetof(CMIPS, m_State.nPC));
++			jitter->PushCst(MIPS_INVALID_PC);
++			jitter->PullRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++
++			if(loopsOnItself)
++			{
++				jitter->Goto(jitter->GetFirstBlockLabel());
++			}
++			else
++			{
++				jitter->JumpToDynamic(reinterpret_cast<void*>(&BranchBlockTrampoline));
++			}
++		}
++		jitter->EndIf();
++
++		jitter->PushRel(offsetof(CMIPS, m_State.nPC));
++		jitter->PushCst(m_end - m_begin + 4);
++		jitter->Add();
++		jitter->PullRel(offsetof(CMIPS, m_State.nPC));
++		jitter->JumpToDynamic(reinterpret_cast<void*>(&NextBlockTrampoline));
++	}
++	else
+ 	{
+ 		jitter->PushRel(offsetof(CMIPS, m_State.nHasException));
+ 		jitter->PushCst(0);
+diff --git a/Source/GenericMipsExecutor.h b/Source/GenericMipsExecutor.h
+--- a/Source/GenericMipsExecutor.h
++++ b/Source/GenericMipsExecutor.h
+@@ -196,6 +196,12 @@
+ 	{
+ 		auto block = m_blockLookup.FindBlockAt(startAddress);
+ 
++		if(!block->HasLinkSlot(LINK_SLOT_NEXT))
++		{
++			//Blocks ending in j/jal/jr/jalr have no fall-through exit
++			block->SetOutLink(LINK_SLOT_NEXT, std::end(m_blockOutLinks));
++		}
++		else
+ 		{
+ 			uint32 nextBlockAddress = (endAddress + 4) & m_addressMask;
+ 			const auto linkSlot = LINK_SLOT_NEXT;
+diff --git a/Source/ee/EeBasicBlock.cpp b/Source/ee/EeBasicBlock.cpp
+--- a/Source/ee/EeBasicBlock.cpp
++++ b/Source/ee/EeBasicBlock.cpp
+@@ -34,6 +34,7 @@
+ 	{
+ 		jitter->PushCst(MIPS_EXCEPTION_IDLE);
+ 		jitter->PullRel(offsetof(CMIPS, m_State.nHasException));
++		m_exitNoException = false; //the exit must see MIPS_EXCEPTION_IDLE
+ 	}
+ 
+ 	CBasicBlock::CompileEpilog(jitter, loopsOnItself);
