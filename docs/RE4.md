@@ -321,6 +321,22 @@ What they showed:
   `libsd` 6 86000, thevent/thbase 15000-20000. The `libsd` calls reach Play's HLE
   dispatcher, which has no registered libsd module in release builds (CLibSd is only
   used for the debugger's names): worth checking what RE4's sound driver gets back.
+- SPU2 register accesses (`iopcalls.txt` lines `spu2 ADDRESS reads N writes N`): RE4's
+  driver reads each voice's envelope and the core attributes about once a frame, never
+  reads IRQINFO and writes almost nothing (it mixes on the IOP and streams by DMA). So it
+  never acknowledges the SPU2 IRQ at all; Play's repeated interrupt is what wakes it.
+
+### Where the EE's compiled code goes (2026-11-08, `runs/re4/opcost.py`)
+
+Each EE instruction of RE4's hot blocks compiled alone (with and without it) by the
+Vita's code generator, weighted by how often its block runs: **memory accesses are
+about 60% of the in-block ARM code**: `lw` 20 ARM instructions (8 on the fast path: base,
+add, page lookup, test, offset extract, load; 6 for the handler call; 4 to store the
+result and its sign-extended upper half), `lq`/`sq` 24, `ld`/`sd` 20, `lbu` 20, `sw` 19;
+`addiu` 4. Per-access savings left are about one instruction (page entries pre-biased
+so the offset extract goes away, about 1.5% overall). A large cut needs guest memory
+mapped straight into the host address space (not available to Vita user code) or
+code that keeps guest values in registers across blocks (tier 2).
 
 ### Is a locked 30 reachable? The CPU budget (2026-11-08)
 

@@ -1171,6 +1171,7 @@ namespace
 							session->ResetEeHotspots();
 							CPS2OS::g_syscallTiming = true; //kernel call time by number, in syscalls.txt
 							CIopBios::g_callCounting = true; //IOP HLE calls, in iopcalls.txt
+							Iop::CSpu2::g_countAccesses = true; //SPU2 register accesses, in iopcalls.txt
 						}
 						if(!eeHotMovie && (ipu.commands[2] != perfIpu.commands[2]))
 						{
@@ -1209,6 +1210,11 @@ namespace
 								const auto& irq = Iop::CSpuBase::g_irqStats;
 								std::fprintf(calls, "spu_irq set_input %u set_watcher %u watcher_hits %u cleared_read %u cleared_ctrl %u\n",
 								             irq[0].load(), irq[1].load(), irq[2].load(), irq[3].load(), irq[4].load());
+								for(unsigned int i = 0; i < 0x400; i++)
+								{
+									uint32 reads = Iop::CSpu2::g_reads[i].load(), writes = Iop::CSpu2::g_writes[i].load();
+									if(reads + writes >= 1000) std::fprintf(calls, "spu2 %08X reads %u writes %u\n", 0x1F900000 + i * 2, reads, writes);
+								}
 								std::fclose(calls);
 							}
 						}
