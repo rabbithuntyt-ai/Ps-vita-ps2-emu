@@ -222,6 +222,8 @@ private:
 		uint32 lastUseFrame = 0;
 		// Pixels rendered by the GPU and not yet written back to GS memory.
 		bool gpuDirty = false;
+		// Some of those pixels had their alpha written (else GS memory's alpha is current).
+		bool alphaDirty = false;
 		uint32 dirtyX0 = 0, dirtyY0 = 0, dirtyX1 = 0, dirtyY1 = 0;
 		uint32 lastUse = 0;
 	};
@@ -270,7 +272,7 @@ private:
 	// Writes GPU pixels of rows [rowBegin, rowEnd) of the dirty rectangle back to GS memory.
 	void DownloadTarget(TARGET&, uint32 rowBegin = 0, uint32 rowEnd = ~0U);
 	// overwritten: the caller writes every byte of the range next.
-	void DownloadTargetsOverlapping(uint32 start, uint32 size, bool overwritten = false);
+	void DownloadTargetsOverlapping(uint32 start, uint32 size, bool overwritten = false, bool alphaOnly = false);
 	// Forgets GPU pixels of rows [rowBegin, rowEnd) (overwritten in GS memory). False
 	// when they are in the middle of the dirty rectangle (it cannot have holes).
 	bool DiscardDirtyRows(TARGET&, uint32 rowBegin, uint32 rowEnd);

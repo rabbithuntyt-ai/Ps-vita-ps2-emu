@@ -581,7 +581,7 @@ void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 wi
 	if((width == 0) || (height == 0)) return;
 	FlushBatch();
 
-	if(m_diagFile && (m_diagUploads.size() < 3000))
+	if(m_diagFile && (m_diagUploads.size() < 60000))
 	{
 		char text[64];
 		std::snprintf(text, sizeof(text), " U%X:%u,%u+%ux%u", target.fbp, x0, y0, width, height);
@@ -638,6 +638,7 @@ void CGSH_Hardware::MarkTargetDirty(TARGET& target, int32 x0, int32 y0, int32 x1
 	y1 = std::min<int32>({y1, s.scay1 + 1, static_cast<int32>(target.validRows)});
 	if((x0 >= x1) || (y0 >= y1)) return;
 	target.drawnRows = std::max<uint32>(target.drawnRows, y1);
+	if(m_colorMask[3]) target.alphaDirty = true;
 	if(!target.gpuDirty)
 	{
 		target.gpuDirty = true;
@@ -672,7 +673,7 @@ void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEn
 	FlushBatch();
 	uint32 x0 = target.dirtyX0;
 	uint32 width = target.dirtyX1 - x0, height = y1 - y0;
-	if(m_diagFile && (m_diagUploads.size() < 3000))
+	if(m_diagFile && (m_diagUploads.size() < 60000))
 	{
 		char text[64];
 		std::snprintf(text, sizeof(text), " D%X:%u,%u+%ux%u(%u-%u)", target.fbp, x0, y0, width, height, rowBegin, rowEnd);
@@ -720,6 +721,7 @@ void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEn
 	RowsToBytes(target, y0, y0 + height, start, end);
 	m_textureCache.MarkBytesWritten(start, end - start);
 	DiscardDirtyRows(target, y0, y1);
+	if(!target.gpuDirty) target.alphaDirty = false;
 	m_stats.targetDownloads++;
 	m_stats.downloadedPixels += width * height;
 	m_stateApplied = false;
@@ -747,7 +749,7 @@ bool CGSH_Hardware::DiscardDirtyRows(TARGET& target, uint32 rowBegin, uint32 row
 	return true;
 }
 
-void CGSH_Hardware::DownloadTargetsOverlapping(uint32 start, uint32 size, bool overwritten)
+void CGSH_Hardware::DownloadTargetsOverlapping(uint32 start, uint32 size, bool overwritten, bool alphaOnly)
 {
 	// Only the rows stored in [start, start + size) are needed. When the caller
 	// is about to overwrite every byte of the range, rows lying entirely inside
@@ -755,6 +757,7 @@ void CGSH_Hardware::DownloadTargetsOverlapping(uint32 start, uint32 size, bool o
 	for(auto& target : m_targets)
 	{
 		if(!target->gpuDirty) continue;
+		if(alphaOnly && !target->alphaDirty) continue;
 		uint32 rowBegin = 0, rowEnd = 0;
 		if(!BytesToRows(*target, start, size, rowBegin, rowEnd)) continue;
 		if(!overwritten)
@@ -814,7 +817,7 @@ void CGSH_Hardware::BeginTransferWrite()
 	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
 	auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
 	auto [start, size] = GsTransfer::GetDstRange(bltBuf, trxReg, trxPos);
-	if(m_diagFile && (m_diagUploads.size() < 3000) && !((trxReg.nRRW == 16) && (trxReg.nRRH == 336)))
+	if(m_diagFile && (m_diagUploads.size() < 60000) && !((trxReg.nRRW == 16) && (trxReg.nRRH == 336)))
 	{
 		char text[80];
 		std::snprintf(text, sizeof(text), " B%X/%u/%X@%u,%u+%ux%u[%X+%X]", bltBuf.GetDstPtr(), static_cast<uint32>(bltBuf.nDstWidth), static_cast<uint32>(bltBuf.nDstPsm),
@@ -861,7 +864,7 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 		return;
 	}
 	m_textureCache.MarkBytesWritten(start, size);
-	if(m_diagFile && (m_diagUploads.size() < 3000) && !((trxReg.nRRW == 16) && (trxReg.nRRH == 336)))
+	if(m_diagFile && (m_diagUploads.size() < 60000) && !((trxReg.nRRW == 16) && (trxReg.nRRH == 336)))
 	{
 		char text[64];
 		std::snprintf(text, sizeof(text), " %X/%u/%X@%u,%u+%ux%u", bltBuf.GetDstPtr(), static_cast<uint32>(bltBuf.nDstWidth),
@@ -1055,7 +1058,7 @@ void CGSH_Hardware::BindTexture()
 			texture = m_feedbackTexture;
 		}
 		glBindTexture(GL_TEXTURE_2D, texture);
-		if(m_diagFile && (m_diagUploads.size() < 3000))
+		if(m_diagFile && (m_diagUploads.size() < 60000))
 		{
 			char text[64];
 			if(m_diagUploads.find(" T") == std::string::npos)
@@ -1090,13 +1093,18 @@ void CGSH_Hardware::BindTexture()
 
 	uint32 firstPage = 0, pageCount = 0;
 	CTextureCache::GetPageRange(key, firstPage, pageCount);
-	if(m_diagFile && (m_diagUploads.size() < 3000))
+	if(m_diagFile && (m_diagUploads.size() < 60000))
 	{
 		char text[64];
 		std::snprintf(text, sizeof(text), " M%X/%u/%X:%ux%u", s.tbp, s.tbw, s.tpsm, s.tw, s.th);
 		if(m_diagUploads.find(text) == std::string::npos) m_diagUploads += text;
 	}
-	DownloadTargetsOverlapping(firstPage * 8192, pageCount * 8192);
+	// A texture of alpha values (PSMT8H, PSMT4HL, PSMT4HH) reads only the top byte of
+	// each pixel: GPU pixels drawn with alpha masked do not change it. Games that
+	// grade the colours by drawing the frame over itself through a palette indexed by
+	// its alpha (Resident Evil 4, in strips) would read the frame back for each strip.
+	bool alphaTexture = (s.tpsm == CGSHandler::PSMT8H) || (s.tpsm == CGSHandler::PSMT4HL) || (s.tpsm == CGSHandler::PSMT4HH);
+	DownloadTargetsOverlapping(firstPage * 8192, pageCount * 8192, false, alphaTexture);
 
 	auto texture = m_textureCache.Get(key);
 	auto regionU = ResolveWrap(s.wms, s.minu, s.maxu, s.tw);

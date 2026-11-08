@@ -59,11 +59,26 @@ one a number comes from**.
    later ones, so **every break also risks wrong overlaps. Fewer breaks fixes both this and
    the speed.** Found with `gs_debug=1` (no depth test), which showed the world at once.
 
-Where the 0.9 fps goes: GPU thread 1600 ms/s in `gpu_tex`, the emulation thread 83% waiting
-for the GS, 640 draws, 28 read-backs, 12 uploads and 19 texture decodes per frame. Targets
-at the same address with different widths and formats (0x2D8000 as 1 and 4 pages wide;
-0x310000 as 2, 4 and 8, formats 0 and 2) replace each other, reading back each time: the
-first thing to fix.
+### Handoff to the gameplay session
+
+Gameplay has its own session from 2026-11-07; this one keeps movies, loading and menus.
+Where it stands:
+
+- About 1 fps, GPU-bound: `gpu_tex` 1190 ms/s, the emulation thread mostly waiting for
+  the GS. Per frame: 625 draws, 13 read-backs (`D`), 12 uploads (`U`), 4 texture decodes.
+- Done: textures of alpha values (PSMT8H/4HL/4HH) do not read the frame back when the
+  draws since kept alpha (`TARGET::alphaDirty`). RE4 grades its colours by drawing the
+  frame over itself in 16 strips through a palette indexed by the frame's alpha: 28 -> 13
+  read-backs per frame, `gpu_tex` 1650 -> 1190 ms/s, same picture.
+- Next, from `gs_diag` (`runs/re4/dg2.py` tallies a frame's `D`/`U`/`M`):
+  - 0x310000 is drawn as 2, 4 and 8 pages wide, formats 0 and 2; 0x2D8000 as 1 and 4.
+    Each layout replaces the other with a read-back and an upload. Let them coexist.
+  - The Z buffer (0x1C0000) is sampled as a texture (`M1C0000/8/31`, PSMZ24) for an
+    effect: depth is never read back from the GPU, so this reads stale memory.
+  - Wrong textures on Leon (patches on hair and jacket).
+- Start from a state: `save_state_at=570` in a New Game run (scripted with `pad_script`)
+  saves one just before the first real-time scene; `runs/re4/state_before_gameplay.state`
+  is a copy. `threaded_vu1=0` is needed (see above).
 
 A state from just before this scene saves 10 minutes per test: `save_state_at=570` during
 a New Game run, then `load_state=1`.
