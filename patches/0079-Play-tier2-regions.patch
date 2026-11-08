@@ -427,7 +427,7 @@ diff --git a/Source/ee/EeExecutor.h b/Source/ee/EeExecutor.h
  
  class CEeExecutor : public CGenericMipsExecutor<BlockLookupTwoWay>
  {
-@@ -43,8 +44,22 @@
+@@ -43,8 +44,23 @@
  	void ClearActiveBlocksInRange(uint32, uint32, bool) override;
  
  	BasicBlockPtr BlockFactory(CMIPS&, uint32, uint32) override;
@@ -447,19 +447,35 @@ diff --git a/Source/ee/EeExecutor.h b/Source/ee/EeExecutor.h
  private:
 +	static inline bool g_regions = false;
 +	std::vector<CEeRegionBlock::PART> m_pendingRegion;
++	std::map<uint32, uint32> m_regionRanges; //region start -> end (checked against the blocks before use)
  	typedef std::map<CachedBlockKey, BasicBlockPtr> CachedBlockMap;
  	CachedBlockMap m_cachedBlocks;
  
 diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
 --- a/Source/ee/EeExecutor.cpp
 +++ b/Source/ee/EeExecutor.cpp
-@@ -151,11 +151,54 @@
+@@ -151,11 +151,70 @@
  	CGenericMipsExecutor::ClearActiveBlocksInRange(start, end, executing);
  }
  
 +void CEeExecutor::PartitionFunction(uint32 startAddress)
 +{
-+	if(g_regions && (startAddress >= 0x100000) && (startAddress < PS2::EE_RAM_SIZE))
++	//Inside a region already compiled (entered there after a quota exit, or by a
++	//branch from elsewhere): a block, not another overlapping region (each would
++	//compile the same code again: loop programs spent seconds compiling)
++	bool insideRegion = false;
++	for(auto it = m_regionRanges.begin(); it != m_regionRanges.end();)
++	{
++		auto block = FindBlockStartingAt(it->first);
++		if(block->IsEmpty() || (block->GetEndAddress() != it->second))
++		{
++			it = m_regionRanges.erase(it); //cleared since
++			continue;
++		}
++		if((startAddress > it->first) && (startAddress <= it->second)) insideRegion = true;
++		++it;
++	}
++	if(g_regions && !insideRegion && (startAddress >= 0x100000) && (startAddress < PS2::EE_RAM_SIZE))
 +	{
 +		auto parts = CEeRegionBlock::Find(m_context, startAddress, 32, 256);
 +		//Per-block settings and breakpoints keep their blocks
@@ -481,6 +497,7 @@ diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
 +			//No link slots of its own (it leaves through the indirect dispatch);
 +			//blocks waiting for this address link to it.
 +			ResolveIncomingLinks(startAddress, FindBlockStartingAt(startAddress));
++			m_regionRanges[startAddress] = endAddress;
 +			return;
 +		}
 +	}

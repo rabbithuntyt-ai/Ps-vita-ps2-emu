@@ -19,16 +19,16 @@ for mode in ${MODES:-"" "--loops"}; do
 	for ((seed=1; seed<=COUNT; seed++)); do
 		name=fuzz_${seed}${mode:+_loops}
 		WOUT=$(echo "$OUT" | sed -E 's|^/([a-zA-Z])/|/mnt/\L\1/|')
-		MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu-24.04 -u root -- bash -c "python3 $WROOT/tools/make_ee_fuzz_elf.py $WOUT/$name.elf $seed $mode && cd /tmp && timeout 60 /root/build-host/vitaps2_host $WOUT/$name.elf --frames 60 --timeout 50 2>&1 | grep '^EE s6' > $WOUT/$name.expected" </dev/null >/dev/null 2>&1
+		MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu-24.04 -u root -- bash -c "python3 $WROOT/tools/make_ee_fuzz_elf.py $WOUT/$name.elf $seed ${SIZE:-} $mode && cd /tmp && timeout 60 /root/build-host/vitaps2_host $WOUT/$name.elf --frames 60 --timeout 50 2>&1 | grep '^EE s6' > $WOUT/$name.expected" </dev/null >/dev/null 2>&1
 		expected=$(cat "$OUT/$name.expected" 2>/dev/null)
 		vitalab cmd "nosleep on" >/dev/null 2>&1
 		vitalab quit all >/dev/null 2>&1; sleep 2
 		vitalab put "$OUT/$name.elf" "$DATA/games/$name.elf" >/dev/null
-		{ echo "game=$DATA/games/$name.elf"; echo "seconds=12"; echo "show_stats=0"; for s in "$@"; do echo "$s"; done; } > "$OUT/autostart.txt"
+		{ echo "game=$DATA/games/$name.elf"; echo "seconds=${SECS:-12}"; echo "show_stats=0"; for s in "$@"; do echo "$s"; done; } > "$OUT/autostart.txt"
 		vitalab rm "$DATA/eegprs.txt" >/dev/null 2>&1
 		vitalab put "$OUT/autostart.txt" "$DATA/autostart.txt" >/dev/null
 		vitalab launch VTPS20000 >/dev/null
-		sleep 24
+		sleep $(( ${SECS:-12} + 12 ))
 		vitalab get "$DATA/eegprs.txt" "$OUT/$name.vita" >/dev/null 2>&1
 		vitalab rm "$DATA/games/$name.elf" >/dev/null 2>&1
 		got=$(head -1 "$OUT/$name.vita" 2>/dev/null)
