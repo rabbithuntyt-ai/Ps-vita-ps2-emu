@@ -1,0 +1,510 @@
+diff --git a/Source/MA_MIPSIV.h b/Source/MA_MIPSIV.h
+--- a/Source/MA_MIPSIV.h
++++ b/Source/MA_MIPSIV.h
+@@ -114,6 +114,11 @@
+ 
+ public:
+ 	static void SetSignExtTracking(bool);
++	//Forget what is known about registers (a label other code can jump to)
++	void ResetBlockKnowledge()
++	{
++		m_signExtKnown = 0;
++	}
+ 
+ protected:
+ 
+diff --git a/Source/GenericMipsExecutor.h b/Source/GenericMipsExecutor.h
+--- a/Source/GenericMipsExecutor.h
++++ b/Source/GenericMipsExecutor.h
+@@ -229,19 +229,22 @@
+ 			block->SetOutLink(LINK_SLOT_BRANCH, std::end(m_blockOutLinks));
+ 		}
+ 
+-		//Resolve any block links that could be valid now that block has been created
++		ResolveIncomingLinks(startAddress, block);
++	}
++
++	//Resolve any block links that could be valid now that block has been created
++	void ResolveIncomingLinks(uint32 startAddress, CBasicBlock* block)
++	{
++		auto lowerBound = m_blockOutLinks.lower_bound(startAddress);
++		auto upperBound = m_blockOutLinks.upper_bound(startAddress);
++		for(auto blockLinkIterator = lowerBound; blockLinkIterator != upperBound; blockLinkIterator++)
+ 		{
+-			auto lowerBound = m_blockOutLinks.lower_bound(startAddress);
+-			auto upperBound = m_blockOutLinks.upper_bound(startAddress);
+-			for(auto blockLinkIterator = lowerBound; blockLinkIterator != upperBound; blockLinkIterator++)
+-			{
+-				auto& blockLink = blockLinkIterator->second;
+-				if(blockLink.live) continue;
+-				auto referringBlock = m_blockLookup.FindBlockAt(blockLink.srcAddress);
+-				if(referringBlock->IsEmpty()) continue;
+-				referringBlock->LinkBlock(blockLink.slot, block);
+-				blockLink.live = true;
+-			}
++			auto& blockLink = blockLinkIterator->second;
++			if(blockLink.live) continue;
++			auto referringBlock = m_blockLookup.FindBlockAt(blockLink.srcAddress);
++			if(referringBlock->IsEmpty()) continue;
++			referringBlock->LinkBlock(blockLink.slot, block);
++			blockLink.live = true;
+ 		}
+ 	}
+ 
+diff --git a/Source/BasicBlock.h b/Source/BasicBlock.h
+--- a/Source/BasicBlock.h
++++ b/Source/BasicBlock.h
+@@ -46,6 +46,8 @@
+ 	void EmptyBlockHandler(CMIPS*);
+ 	void NextBlockTrampoline(CMIPS*);
+ 	void BranchBlockTrampoline(CMIPS*);
++	//Where tier 2 regions leave to (not a link slot; the indirect dispatch finds the next block)
++	void RegionExitTrampoline(CMIPS*);
+ }
+ 
+ enum LINK_SLOT
+diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
+--- a/Source/BasicBlock.cpp
++++ b/Source/BasicBlock.cpp
+@@ -437,6 +437,7 @@
+ 		info.tableBits = CMIPS::INDIRECT_TABLE_BITS;
+ 		static_assert(sizeof(CMIPS::INDIRECT_ENTRY) == 8, "the dispatcher reads 8 byte entries");
+ 		Jitter::CCodeGen_AArch32::SetIndirectDispatch(reinterpret_cast<uintptr_t>(&BranchBlockTrampoline), info);
++		Jitter::CCodeGen_AArch32::SetIndirectDispatch(reinterpret_cast<uintptr_t>(&RegionExitTrampoline), info);
+ 		g_indirectDispatch = true;
+ 	}
+ #else
+@@ -698,3 +699,7 @@
+ void BranchBlockTrampoline(CMIPS* context)
+ {
+ }
++
++void RegionExitTrampoline(CMIPS* context)
++{
++}
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -75,6 +75,9 @@
+ 	//Index 0: EE, 1: IOP.
+ 	inline uint64 g_dispatches[2] = {};
+ 	inline uint64 g_executeCalls[2] = {};
++	//Tier 2 regions compiled (CEeRegionBlock), and the EE instructions they hold
++	inline uint32 g_regions = 0;
++	inline uint64 g_regionInstructions = 0;
+ 
+ 	//EE slices ended by the idle loop detection, by polled register.
+ 	enum IDLE_SOURCE
+diff --git a/Source/ee/EeBasicBlock.h b/Source/ee/EeBasicBlock.h
+--- a/Source/ee/EeBasicBlock.h
++++ b/Source/ee/EeBasicBlock.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <vector>
+ #include "BasicBlock.h"
+ 
+ class CEeBasicBlock : public CBasicBlock
+@@ -9,6 +10,8 @@
+ 
+ 	void SetFpRoundingMode(Jitter::CJitter::ROUNDINGMODE);
+ 	void SetIsIdleLoopBlock();
++	//The idle loop pattern (a self loop polling memory) in [begin, end]
++	static bool IsIdleLoopRange(CMIPS&, uint32 begin, uint32 end);
+ 
+ protected:
+ 	void CompileProlog(CMipsJitter*) override;
+@@ -22,3 +25,30 @@
+ 
+ 	bool m_isIdleLoopBlock = false;
+ };
++
++//Tier 2: consecutive blocks of a function compiled as one unit. Each part is
++//compiled like a block of its own (same instructions, cycles counted per part,
++//exception test after each), but branches between parts jump straight to a
++//label: no exit, link or dispatch between them. Loops back check the cycle
++//quota (interrupts). Only the last part may end with a call, return or jalr.
++class CEeRegionBlock : public CEeBasicBlock
++{
++public:
++	struct PART
++	{
++		uint32 begin = 0;
++		uint32 end = 0;      //the delay slot
++		int target = -1;     //index of the part the branch goes to, -1: none inside
++		bool unconditional = false;
++	};
++
++	CEeRegionBlock(CMIPS&, std::vector<PART>, BLOCK_CATEGORY);
++	void CompileRange(CMipsJitter*) override;
++
++	//Parts of a region starting at 'start', or empty when there is none worth
++	//making (no branch between parts, or code a region cannot hold).
++	static std::vector<PART> Find(CMIPS&, uint32 start, uint32 maxParts, uint32 maxInstructions);
++
++private:
++	std::vector<PART> m_parts;
++};
+diff --git a/Source/ee/EeBasicBlock.cpp b/Source/ee/EeBasicBlock.cpp
+--- a/Source/ee/EeBasicBlock.cpp
++++ b/Source/ee/EeBasicBlock.cpp
+@@ -1,5 +1,8 @@
+ #include "EeBasicBlock.h"
+ #include "offsetof_def.h"
++#include "MA_MIPSIV.h"
++#include "MipsJitter.h"
++#include "MIPS.h"
+ 
+ void CEeBasicBlock::SetFpRoundingMode(Jitter::CJitter::ROUNDINGMODE fpRoundingMode)
+ {
+@@ -170,3 +173,258 @@
+ 
+ 	return true;
+ }
++
++bool CEeBasicBlock::IsIdleLoopRange(CMIPS& context, uint32 begin, uint32 end)
++{
++	CEeBasicBlock block(context, begin, end, BLOCK_CATEGORY_PS2_EE);
++	return block.IsCodeIdleLoopBlock();
++}
++
++namespace
++{
++	enum BRANCH_KIND
++	{
++		BRANCH_STATIC,        //conditional or j: a target known at compile time
++		BRANCH_LAST,          //jal, jr, jalr, branch and link: only as the last part
++		BRANCH_NOT_IN_REGION, //likely branches (they skip their delay slot): no region holds them
++	};
++
++	BRANCH_KIND ClassifyBranch(uint32 opcode)
++	{
++		uint32 op = opcode >> 26;
++		uint32 rt = (opcode >> 16) & 0x1F;
++		uint32 rs = (opcode >> 21) & 0x1F;
++		switch(op)
++		{
++		case 0x00: //jr, jalr
++			return BRANCH_LAST;
++		case 0x01: //REGIMM
++			if((rt == 0x00) || (rt == 0x01)) return BRANCH_STATIC;              //bltz, bgez
++			if((rt == 0x10) || (rt == 0x11)) return BRANCH_LAST;                //bltzal, bgezal
++			return BRANCH_NOT_IN_REGION;                                          //likely forms
++		case 0x02: //j
++			return BRANCH_STATIC;
++		case 0x03: //jal
++			return BRANCH_LAST;
++		case 0x04: //beq
++		case 0x05: //bne
++		case 0x06: //blez
++		case 0x07: //bgtz
++			return BRANCH_STATIC;
++		case 0x11: //COP1 bc1f/bc1t (bc1fl/bc1tl are likely)
++		case 0x12: //COP2 bc2f/bc2t
++			if((rs == 0x08) && ((rt & 0x02) == 0)) return BRANCH_STATIC;
++			return BRANCH_NOT_IN_REGION;
++		default:
++			return BRANCH_NOT_IN_REGION;
++		}
++	}
++}
++
++CEeRegionBlock::CEeRegionBlock(CMIPS& context, std::vector<PART> parts, BLOCK_CATEGORY category)
++    : CEeBasicBlock(context, parts.front().begin, parts.back().end, category)
++    , m_parts(std::move(parts))
++{
++}
++
++std::vector<CEeRegionBlock::PART> CEeRegionBlock::Find(CMIPS& context, uint32 start, uint32 maxParts, uint32 maxInstructions)
++{
++	std::vector<PART> parts;
++	std::vector<uint32> targets;
++	uint32 address = start;
++	uint32 instructions = 0;
++	bool last = false;
++	while(!last && (parts.size() < maxParts) && (instructions < maxInstructions))
++	{
++		//One part: to the first branch and its delay slot (CGenericMipsExecutor::PartitionFunction)
++		uint32 branchAddress = MIPS_INVALID_PC;
++		for(uint32 scan = address; scan < address + 0x400; scan += 4)
++		{
++			uint32 opcode = context.m_pMemoryMap->GetInstruction(scan);
++			auto type = context.m_pArch->IsInstructionBranch(&context, scan, opcode);
++			if(type == MIPS_BRANCH_NODELAY) break; //syscall, eret...: not in a region
++			if(type == MIPS_BRANCH_NORMAL)
++			{
++				branchAddress = scan;
++				break;
++			}
++		}
++		if(branchAddress == MIPS_INVALID_PC) break;
++		uint32 branchOpcode = context.m_pMemoryMap->GetInstruction(branchAddress);
++		uint32 delayOpcode = context.m_pMemoryMap->GetInstruction(branchAddress + 4);
++		if(context.m_pArch->IsInstructionBranch(&context, branchAddress + 4, delayOpcode) != MIPS_BRANCH_NONE) break;
++		auto kind = ClassifyBranch(branchOpcode);
++		if(kind == BRANCH_NOT_IN_REGION) break;
++		PART part;
++		part.begin = address;
++		part.end = branchAddress + 4;
++		if(IsIdleLoopRange(context, part.begin, part.end)) break; //idle loop detection works per block
++		if(kind == BRANCH_STATIC)
++		{
++			targets.push_back(context.m_pArch->GetInstructionEffectiveAddress(&context, branchAddress, branchOpcode));
++			part.unconditional = ((branchOpcode >> 26) == 0x02);
++		}
++		else
++		{
++			targets.push_back(MIPS_INVALID_PC);
++			last = true;
++		}
++		parts.push_back(part);
++		instructions += ((part.end - part.begin) / 4) + 1;
++		address = part.end + 4;
++	}
++	//Branches between parts
++	bool internal = false;
++	for(size_t i = 0; i < parts.size(); i++)
++	{
++		for(size_t j = 0; j < parts.size(); j++)
++		{
++			if(targets[i] == parts[j].begin)
++			{
++				parts[i].target = static_cast<int>(j);
++				internal = true;
++			}
++		}
++	}
++	if(!internal || (parts.size() < 2)) parts.clear();
++	return parts;
++}
++
++void CEeRegionBlock::CompileRange(CMipsJitter* jitter)
++{
++	auto arch = static_cast<CMA_MIPSIV*>(m_context.m_pArch);
++	m_context.m_pArch->SetCompileHints(m_blockCompileHints);
++	CompileProlog(jitter);
++	jitter->MarkFirstBlockLabel();
++
++	std::vector<Jitter::CJitter::LABEL> labels;
++	for(size_t i = 0; i < m_parts.size(); i++) labels.push_back(jitter->CreateLabel());
++	auto exitLabel = jitter->CreateLabel();
++
++	//nPC holds the region's start while it runs: instructions compute addresses from it
++	auto setPcOffset = [&](uint32 address) {
++		jitter->PushRel(offsetof(CMIPS, m_State.nPC));
++		jitter->PushCst(address - m_begin);
++		jitter->Add();
++		jitter->PullRel(offsetof(CMIPS, m_State.nPC));
++	};
++	//Leave with nPC set: to the next block when the quota allows, else to the executor
++	auto leave = [&]() {
++		jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
++		jitter->PushCst(0);
++		jitter->BeginIf(Jitter::CONDITION_GT);
++		{
++			jitter->JumpToDynamic(reinterpret_cast<void*>(&RegionExitTrampoline));
++		}
++		jitter->EndIf();
++		jitter->Goto(exitLabel);
++	};
++
++	for(size_t i = 0; i < m_parts.size(); i++)
++	{
++		const auto& part = m_parts[i];
++		jitter->MarkLabel(labels[i]);
++		//Other parts jump here: nothing is known about the registers
++		arch->ResetBlockKnowledge();
++		for(uint32 address = part.begin; address <= part.end; address += 4)
++		{
++			m_context.m_pArch->CompileInstruction(address, jitter, &m_context, address - m_begin);
++			assert(jitter->IsStackEmpty());
++		}
++
++		//Cycles, as if this part were a block
++		jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
++		jitter->PushCst(((part.end - part.begin) / 4) + 1);
++		jitter->Sub();
++		jitter->PullRel(offsetof(CMIPS, m_State.cycleQuota));
++
++		//An exception (syscall-like instruction, VU0 call...): leave as a block would
++		jitter->PushRel(offsetof(CMIPS, m_State.nHasException));
++		jitter->PushCst(0);
++		jitter->BeginIf(Jitter::CONDITION_NE);
++		{
++			jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++			jitter->PushCst(MIPS_INVALID_PC);
++			jitter->Cmp(Jitter::CONDITION_NE);
++			jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++			jitter->PushRel(offsetof(CMIPS, m_State.nPC));
++			jitter->PushCst(part.end + 4 - m_begin);
++			jitter->Add();
++			jitter->Select();
++			jitter->PullRel(offsetof(CMIPS, m_State.nPC));
++			jitter->PushCst(MIPS_INVALID_PC);
++			jitter->PullRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++			jitter->Goto(exitLabel);
++		}
++		jitter->EndIf();
++
++		bool hasNext = (i + 1) < m_parts.size();
++		if(part.target >= 0)
++		{
++			//Branch inside the region
++			const auto& target = m_parts[part.target];
++			auto goInside = [&]() {
++				jitter->PushCst(MIPS_INVALID_PC);
++				jitter->PullRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++				if(static_cast<size_t>(part.target) <= i)
++				{
++					//Loop back: interrupts need the quota checked
++					jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
++					jitter->PushCst(0);
++					jitter->BeginIf(Jitter::CONDITION_LE);
++					{
++						setPcOffset(target.begin);
++						jitter->Goto(exitLabel);
++					}
++					jitter->EndIf();
++				}
++				jitter->Goto(labels[part.target]);
++			};
++			if(part.unconditional)
++			{
++				goInside();
++				continue;
++			}
++			jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++			jitter->PushCst(MIPS_INVALID_PC);
++			jitter->BeginIf(Jitter::CONDITION_NE);
++			{
++				goInside();
++			}
++			jitter->EndIf();
++		}
++		else
++		{
++			//Branch out of the region (static target outside, or call/return as the last part)
++			jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++			jitter->PushCst(MIPS_INVALID_PC);
++			jitter->BeginIf(Jitter::CONDITION_NE);
++			{
++				jitter->PushRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++				jitter->PullRel(offsetof(CMIPS, m_State.nPC));
++				jitter->PushCst(MIPS_INVALID_PC);
++				jitter->PullRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
++				leave();
++			}
++			jitter->EndIf();
++		}
++		//Not taken: the next part follows, or leave past the end
++		if(!hasNext)
++		{
++			setPcOffset(part.end + 4);
++			leave();
++		}
++	}
++
++	jitter->MarkLastBlockLabel();
++	jitter->MarkLabel(exitLabel);
++	//Back to the executor: flag the quota as done when it is
++	static_assert(MIPS_EXCEPTION_STATUS_QUOTADONE == 0x80, "QUOTADONE must be 0x80");
++	jitter->PushRel(offsetof(CMIPS, m_State.nHasException));
++	jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
++	jitter->PushCst(0);
++	jitter->Cmp(Jitter::CONDITION_LE);
++	jitter->Shl(7);
++	jitter->Or();
++	jitter->PullRel(offsetof(CMIPS, m_State.nHasException));
++}
+diff --git a/Source/ee/EeExecutor.h b/Source/ee/EeExecutor.h
+--- a/Source/ee/EeExecutor.h
++++ b/Source/ee/EeExecutor.h
+@@ -14,6 +14,7 @@
+ #include <optional>
+ 
+ #include "../GenericMipsExecutor.h"
++#include "EeBasicBlock.h"
+ 
+ class CEeExecutor : public CGenericMipsExecutor<BlockLookupTwoWay>
+ {
+@@ -43,8 +44,22 @@
+ 	void ClearActiveBlocksInRange(uint32, uint32, bool) override;
+ 
+ 	BasicBlockPtr BlockFactory(CMIPS&, uint32, uint32) override;
++	void PartitionFunction(uint32) override;
++
++	//Tier 2 regions (CEeRegionBlock): several blocks of a function compiled as
++	//one, when execution enters code that loops or branches within itself.
++	static void SetRegions(bool enabled)
++	{
++		g_regions = enabled;
++	}
++	static bool GetRegions()
++	{
++		return g_regions;
++	}
+ 
+ private:
++	static inline bool g_regions = false;
++	std::vector<CEeRegionBlock::PART> m_pendingRegion;
+ 	typedef std::map<CachedBlockKey, BasicBlockPtr> CachedBlockMap;
+ 	CachedBlockMap m_cachedBlocks;
+ 
+diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
+--- a/Source/ee/EeExecutor.cpp
++++ b/Source/ee/EeExecutor.cpp
+@@ -151,11 +151,54 @@
+ 	CGenericMipsExecutor::ClearActiveBlocksInRange(start, end, executing);
+ }
+ 
++void CEeExecutor::PartitionFunction(uint32 startAddress)
++{
++	if(g_regions && (startAddress >= 0x100000) && (startAddress < PS2::EE_RAM_SIZE))
++	{
++		auto parts = CEeRegionBlock::Find(m_context, startAddress, 32, 256);
++		//Per-block settings and breakpoints keep their blocks
++		for(const auto& part : parts)
++		{
++			if(m_blockFpRoundingModes.count(part.begin) || m_idleLoopBlocks.count(part.begin) || m_blockFpUseAccurateAddSub.count(part.begin) ||
++			   m_context.HasBreakpointInRange(part.begin, part.end))
++			{
++				parts.clear();
++				break;
++			}
++		}
++		if(!parts.empty())
++		{
++			uint32 endAddress = parts.back().end;
++			m_pendingRegion = std::move(parts);
++			CreateBlock(startAddress, endAddress);
++			m_pendingRegion.clear();
++			//No link slots of its own (it leaves through the indirect dispatch);
++			//blocks waiting for this address link to it.
++			ResolveIncomingLinks(startAddress, FindBlockStartingAt(startAddress));
++			return;
++		}
++	}
++	CGenericMipsExecutor::PartitionFunction(startAddress);
++}
++
+ BasicBlockPtr CEeExecutor::BlockFactory(CMIPS& context, uint32 start, uint32 end)
+ {
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_JIT);
+ 	uint32 blockSize = (end - start) + 4;
+ 
++	if(!m_pendingRegion.empty() && (m_pendingRegion.front().begin == start))
++	{
++		if(start >= 0x100000 && start < PS2::EE_RAM_SIZE)
++		{
++			SetMemoryProtected(m_ram + start, blockSize, true);
++		}
++		auto region = std::make_shared<CEeRegionBlock>(context, m_pendingRegion, m_blockCategory);
++		region->Compile(); //not in the JIT caches: compiled each run
++		EmuProfile::g_regions++;
++		EmuProfile::g_regionInstructions += blockSize / 4;
++		return region;
++	}
++
+ 	//Kernel area is below 0x100000 and isn't protected. Some games will write code in there
+ 	//but it is safe to assume that it won't change (code writes some data just besides itself
+ 	//so it keeps generating exceptions, making the game slower)

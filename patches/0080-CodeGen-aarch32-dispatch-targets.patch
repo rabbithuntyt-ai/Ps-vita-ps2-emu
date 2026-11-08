@@ -1,0 +1,53 @@
+diff --git a/include/Jitter_CodeGen_AArch32.h b/include/Jitter_CodeGen_AArch32.h
+--- a/include/Jitter_CodeGen_AArch32.h
++++ b/include/Jitter_CodeGen_AArch32.h
+@@ -44,7 +44,7 @@
+ 		// The thunk that unwinds a chained frame and jumps to 'target' (one per
+ 		// target, in JIT memory). For code loaded from a JIT cache.
+ 		static uintptr_t GetChainedThunk(uintptr_t target);
+-		// Indirect dispatch: the chained thunk of 'target' first looks the guest
++		// Indirect dispatch: the chained thunk of each target (several may be set) first looks the guest
+ 		// PC (context + pcOffset, masked with context + maskOffset) up in the
+ 		// table at context + tableOffset (pointer; null: off): 1 << tableBits
+ 		// entries of {guest PC, link entry} indexed by PC bits 2 and up. Found:
+diff --git a/src/Jitter_CodeGen_AArch32.cpp b/src/Jitter_CodeGen_AArch32.cpp
+--- a/src/Jitter_CodeGen_AArch32.cpp
++++ b/src/Jitter_CodeGen_AArch32.cpp
+@@ -1,5 +1,7 @@
++#include <algorithm>
+ #include <cstdlib>
+ #include <map>
++#include <vector>
+ #include <memory>
+ #include <mutex>
+ #include <stdexcept>
+@@ -393,7 +395,7 @@
+ namespace
+ {
+ 	//Indirect dispatch (CCodeGen_AArch32::SetIndirectDispatch)
+-	uintptr_t g_indirectDispatchTarget = 0;
++	std::vector<uintptr_t> g_indirectDispatchTargets;
+ 	CCodeGen_AArch32::INDIRECT_DISPATCH g_indirectDispatch = {};
+ 
+ 	//Unwinds a chained frame and tail calls 'target' with the context in r0.
+@@ -414,7 +416,7 @@
+ 			Framework::CMemStream stream;
+ 			CAArch32Assembler assembler;
+ 			assembler.SetStream(&stream);
+-			if((target == g_indirectDispatchTarget) && (target != 0))
++			if(std::find(g_indirectDispatchTargets.begin(), g_indirectDispatchTargets.end(), target) != g_indirectDispatchTargets.end())
+ 			{
+ 				const auto& info = g_indirectDispatch;
+ 				auto loadField = [&](CAArch32Assembler::REGISTER dst, uint32 offset) {
+@@ -463,7 +465,10 @@
+ void CCodeGen_AArch32::SetIndirectDispatch(uintptr_t target, const INDIRECT_DISPATCH& info)
+ {
+ 	//Before any function referencing 'target' is generated (its thunk is made once)
+-	g_indirectDispatchTarget = target;
++	if(std::find(g_indirectDispatchTargets.begin(), g_indirectDispatchTargets.end(), target) == g_indirectDispatchTargets.end())
++	{
++		g_indirectDispatchTargets.push_back(target);
++	}
+ 	g_indirectDispatch = info;
+ }
+ 

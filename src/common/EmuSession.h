@@ -164,6 +164,8 @@ public:
 	// Indirect jumps resolved in compiled code (on by default; takes effect at
 	// the next SetSafeJit, before booting).
 	static void SetIndirectDispatch(bool);
+	// Tier 2 regions: blocks of a function compiled as one (off by default).
+	static void SetRegions(bool);
 
 	// Called once at startup before anything touches CAppConfig.
 	static void SetDataPaths(const std::string& dataPath, const std::string& resourcesPath);

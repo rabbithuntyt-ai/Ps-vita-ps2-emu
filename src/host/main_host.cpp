@@ -219,6 +219,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--mpeg-hle")) mpegHleEnabled = true;
 		else if(!std::strcmp(argv[i], "--vita-jit")) vitaJit = true;
 		else if(!std::strcmp(argv[i], "--no-indirect")) CEmuSession::SetIndirectDispatch(false);
+		else if(!std::strcmp(argv[i], "--regions")) CEmuSession::SetRegions(true);
 		else if(!std::strcmp(argv[i], "--shot-every") && (i + 1 < argc)) shotEvery = std::strtoull(argv[++i], nullptr, 10);
 		else if(!std::strcmp(argv[i], "--shot-dir") && (i + 1 < argc)) shotDir = argv[++i];
 		else if(!std::strcmp(argv[i], "--stats") && (i + 1 < argc)) statsPath = argv[++i];
@@ -456,6 +457,7 @@ int main(int argc, char** argv)
 			            (unsigned long long)EmuProfile::g_dispatches[0], EmuProfile::g_dispatches[0] * 1000.0 / executed,
 			            (unsigned long long)EmuProfile::g_executeCalls[0], (unsigned long long)EmuProfile::g_dispatches[1],
 			            (unsigned long long)EmuProfile::g_executeCalls[1]);
+			std::printf("regions: %u (%llu EE instructions)\n", EmuProfile::g_regions, (unsigned long long)EmuProfile::g_regionInstructions);
 		}
 		session.GetFrames().Fetch(serial, pixels, width, height);
 		for(const auto& usage : threadUsage)

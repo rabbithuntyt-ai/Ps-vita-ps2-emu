@@ -17,6 +17,7 @@
 #include "ee/Ee_SubSystem.h"
 #include "MA_MIPSIV.h"
 #include "BasicBlock.h"
+#include "ee/EeExecutor.h"
 #if defined(__arm__)
 #include "Jitter_CodeGen_AArch32.h"
 #endif
@@ -317,6 +318,11 @@ void CEmuSession::SetSafeJit(bool safe)
 void CEmuSession::SetIndirectDispatch(bool enabled)
 {
 	g_indirectDispatchWanted = enabled;
+}
+
+void CEmuSession::SetRegions(bool enabled)
+{
+	CEeExecutor::SetRegions(enabled);
 }
 
 void CEmuSession::ProfilerProc()
