@@ -34,11 +34,19 @@ int main(int argc, char** argv)
 	}
 	std::string outDir;
 	bool chained = true;
+	bool regions = false;
+	uint32 findStart = 0, findEnd = 0;
 	std::vector<uint32> addresses;
 	for(int i = 2; i < argc; i++)
 	{
 		if(!std::strcmp(argv[i], "--out") && (i + 1 < argc)) outDir = argv[++i];
 		else if(!std::strcmp(argv[i], "--unchained")) chained = false;
+		else if(!std::strcmp(argv[i], "--region")) regions = true; //compile a tier 2 region where there is one
+		else if(!std::strcmp(argv[i], "--find-regions") && (i + 2 < argc))
+		{
+			findStart = static_cast<uint32>(std::strtoul(argv[++i], nullptr, 16));
+			findEnd = static_cast<uint32>(std::strtoul(argv[++i], nullptr, 16));
+		}
 		else addresses.push_back(static_cast<uint32>(std::strtoul(argv[i], nullptr, 16)));
 	}
 
@@ -76,9 +84,52 @@ int main(int argc, char** argv)
 	Jitter::CCodeGen_AArch32::SetConservativeAllocation(false);
 	CMA_MIPSIV::SetSignExtTracking(true);
 
+	if(findEnd != 0)
+	{
+		//Region starts in [findStart, findEnd): the parts of each
+		for(uint32 address = findStart; address < findEnd; address += 4)
+		{
+			auto parts = CEeRegionBlock::Find(ee, address, 32, 256);
+			if(parts.empty()) continue;
+			std::printf("region %08X:", address);
+			for(const auto& part : parts) std::printf(" [%08X-%08X ->%d%s]", part.begin, part.end, part.target, part.unconditional ? " j" : "");
+			std::printf("\n");
+		}
+		return 0;
+	}
+
 	for(uint32 start : addresses)
 	{
 		start &= ~3U;
+		if(regions)
+		{
+			auto parts = CEeRegionBlock::Find(ee, start, 32, 256);
+			if(!parts.empty())
+			{
+				uint32 end = parts.back().end;
+				CEeRegionBlock region(ee, parts, BLOCK_CATEGORY_PS2_EE);
+				Framework::CMemStream stream;
+				{
+					CMipsJitter jitter(new Jitter::CCodeGen_AArch32());
+					jitter.SetStream(&stream);
+					jitter.Begin();
+					region.CompileRange(&jitter);
+					jitter.End();
+				}
+				std::printf("%08X %08X %u %u region\n", start, end, ((end - start) / 4) + 1, static_cast<unsigned int>(stream.GetSize()));
+				if(!outDir.empty())
+				{
+					char path[1024];
+					std::snprintf(path, sizeof(path), "%s/%08X.bin", outDir.c_str(), start);
+					if(FILE* out = std::fopen(path, "wb"))
+					{
+						std::fwrite(stream.GetBuffer(), 1, stream.GetSize(), out);
+						std::fclose(out);
+					}
+				}
+				continue;
+			}
+		}
 		// The block ends after the first branch's delay slot (CGenericMipsExecutor::PartitionFunction).
 		uint32 end = start;
 		for(uint32 address = start; address < start + 0x1000; address += 4)

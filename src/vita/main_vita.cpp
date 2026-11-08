@@ -889,6 +889,15 @@ namespace
 			if(autostart && autostart->seconds && (sceKernelGetProcessTimeWide() - runStart >= autostart->seconds * 1000000ULL))
 			{
 				std::printf("autostart: %u seconds done\n", autostart->seconds);
+				// The EE's registers at the end (test programs leave a checksum
+				// there: tools/vita_jit_fuzz.sh compares it with a PC run).
+				if(FILE* gprs = std::fopen("ux0:data/VitaPS2/eegprs.txt", "w"))
+				{
+					const auto& state = session->GetVm()->m_ee->m_EE.m_State;
+					std::fprintf(gprs, "EE s6 %08X s7 %08X\npc %08X\n", state.nGPR[22].nV0, state.nGPR[23].nV0, state.nPC);
+					for(unsigned int i = 0; i < 32; i++) std::fprintf(gprs, "r%u %08X %08X %08X %08X\n", i, state.nGPR[i].nV3, state.nGPR[i].nV2, state.nGPR[i].nV1, state.nGPR[i].nV0);
+					std::fclose(gprs);
+				}
 				break;
 			}
 			if((buttons & SCE_CTRL_SELECT) && (pressed & SCE_CTRL_START))

@@ -238,6 +238,22 @@ which now runs above the decoder: at equal priority it could not sample it at al
   pictures/s. **It is no longer the next limit; the emulation thread (14) is.** For 30:
   parsing (a cheaper bit reader in `DecodeMacroblock`) and the CSC.
 
+### State on 2026-11-08 (the profiler fixed, tier 2 started)
+
+With the profiler sampling fairly (it was starved on core 2 before, which made the
+EE look larger and produced the "IOP takes the EE's time" artefact), the intro is at
+about 31.5-33 emulated fps, 15-15.3 pictures/s. The emulation thread per emulated
+frame: EE about 53%, IOP 21%, other 10%, waits (mostly SPU2 sync) 5%, about 32 ms in
+all against 16.6.
+
+- Indirect jumps in compiled code (tier 2 step 1): +2.5%, on by default.
+- Regions (tier 2 step 3a): no gain on RE4, off by default.
+- The CPU is already at 444 MHz (main_vita.cpp).
+- `tools/jit_arm_report.py runs/re4/ih1`: RE4's hot blocks are 2-6 EE instructions;
+  each block's exit costs about as much as its instructions. The large remaining
+  lever is keeping guest registers in host registers across blocks (docs/AOT_TRANSLATION.md
+  step 3b), which needs work in the Jitter's register allocator.
+
 ### What a real 30 pictures/s needs
 
 The emulation thread costs about 32 ms per emulated frame against 16.6. It is spread out:

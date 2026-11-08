@@ -130,6 +130,13 @@ version 1), so `perf_gap.py` cannot run there; the CI still runs it. Instead:
   call` is a call-heavy workload (jal, jr ra, jalr): 146 returns to the executor
   per 1000 EE instructions, 2.4x slower than the integer workload on a PC.
 
+- `tools/vita_jit_fuzz.sh COUNT [settings]`: the ARM JIT checked on the Vita itself:
+  random EE programs (plain and with loops) must end with the same checksum as on
+  the PC (the Vita app writes the EE's registers to `eegprs.txt` when an autostart
+  run ends). The defaults (indirect dispatch on, regions off) pass 20 of 20.
+- `jit_arm_dump RAM --find-regions START END` lists regions; `--region ADDRESS`
+  compiles one.
+
 **What RE4's hot code costs** (`jit_arm_report.py`, 79 blocks, 47% of EE time):
 blocks are 2 to 6 EE instructions; the static code is about 17 ARM instructions
 per EE instruction (both exit paths counted). 13% are loads and stores of guest
@@ -143,6 +150,7 @@ units.
 | 1. **Indirect jumps in compiled code** (patches 0077, 0078): `jr ra` and unlinked branches looked up in a per-CPU table of {guest PC, link entry} by the chained thunk, instead of returning to the C++ loop | Done, on by default (`indirect_jit=0` turns it off). AArch32 with chained frames only | RE4 intro: returns to the executor 188000 -> 21000 per second (EE), 69000 -> 26000 (IOP); 32.1 -> 32.9 emulated fps, 15.0 -> 15.3 pictures/s |
 | 2. Cheaper block exits: skip the exception test in blocks that cannot raise one; conditional branches without storing and re-reading the delayed jump address | Next | |
 | 3a. **Regions** (patches 0079, 0080): consecutive blocks of a function compiled as one (`CEeRegionBlock`): branches between them jump to labels (no exit, link or dispatch), cycles counted per part as before, quota checked on loops back, exits through the indirect dispatch | Done, **off by default** (`jit_regions=1`, host `--regions`) | Same results: 40 EE fuzz programs (plain and with loops, 125-276 regions each) give the same checksums; Silent Hill 2 on a PC, 1500 frames, 672 regions: the same final picture. RE4 on the Vita: stable, but **no gain** (15.0 pictures/s either way): its hot code is small functions joined by calls and returns, which end a region |
+| **Open bug, regions on ARM**: loop programs never finish on the Vita with `jit_regions=1` (`MODES=--loops tools/vita_jit_fuzz.sh 2 jit_regions=1`), with or without the indirect dispatch; the same programs pass on the PC, and forward-only regions pass on the Vita. Seed 1 stops inside the region at 0x102D50 with t9 = 5. The region's ARM code (`jit_arm_dump fl.ram 102D50 --region`) looked right at the back edge; next suspect: an AArch32 code generator assumption about flags or registers at a label reached by a backward jump | Keep regions off | |
 | 3b. Guest registers kept in host registers across a region's parts (the Jitter's allocator spills at every label today) | Planned | Needed before regions pay off |
 | 4. Register width across blocks (no upper-half stores where never read) | Planned | |
 
