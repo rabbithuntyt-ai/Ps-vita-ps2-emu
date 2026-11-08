@@ -232,6 +232,10 @@ else()
 	target_link_libraries(game_profiles_tests PRIVATE vitaps2_common)
 
 	# Persistent JIT cache: file format and relocation helpers (any host).
+	# The Vita JIT's ARM code for EE blocks from a RAM dump, on any host (tools/jit_arm_report.py)
+	add_executable(jit_arm_dump tools/jit_arm_dump.cpp)
+	target_link_libraries(jit_arm_dump PRIVATE PlayCore)
+
 	add_executable(jit_cache_tests tests/jit_cache_tests.cpp)
 	target_link_libraries(jit_cache_tests PRIVATE PlayCore)
 	add_test(NAME jit_cache_tests COMMAND jit_cache_tests)

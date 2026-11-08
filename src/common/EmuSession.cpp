@@ -16,6 +16,7 @@
 #include "ee/Vpu.h"
 #include "ee/Ee_SubSystem.h"
 #include "MA_MIPSIV.h"
+#include "BasicBlock.h"
 #if defined(__arm__)
 #include "Jitter_CodeGen_AArch32.h"
 #endif
@@ -30,6 +31,7 @@ namespace
 {
 	fs::path g_dataPath;
 	fs::path g_resourcesPath;
+	bool g_indirectDispatchWanted = true;
 
 	std::string LowerExtension(const std::string& path)
 	{
@@ -308,6 +310,13 @@ void CEmuSession::SetSafeJit(bool safe)
 #else
 	(void)safe;
 #endif
+	// Indirect jumps (function returns...) resolved in compiled code (needs chained frames).
+	CBasicBlock::EnableIndirectDispatch(!safe && g_indirectDispatchWanted);
+}
+
+void CEmuSession::SetIndirectDispatch(bool enabled)
+{
+	g_indirectDispatchWanted = enabled;
 }
 
 void CEmuSession::ProfilerProc()

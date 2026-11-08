@@ -19,6 +19,18 @@ This is an emulator for every PS2 game. Whatever is learned from one game goes i
 - Host build + tests (Linux): `cmake -B build && cmake --build build && ctest`.
   ARM tests under qemu: `build-arm` (see CMakeLists for the toolchain).
 
+## Testing a game in one go
+
+`tools/vita_game_test.sh "Game.iso" 150 [setting=value...]` (Git Bash on the PC, Vita
+Lab connected): keeps the Vita awake, optionally installs a build (`EBOOT=path`), does a
+warm-up run (fills the JIT cache), then a measured run with scripted buttons (`PAD`,
+default START/CROSS every 4 s), frame dumps, EE/IOP hotspots and RAM dumps. It then writes
+`report.md` with `tools/game_report.py`: verdict against the goals (movies locked at
+30, menus at 60 emulated fps), load phases, costs per phase, hotspots (named from the
+game's symbol table when it ships one in RAM) and `sheet.png` with the frames. Use it
+on each new game before anything else. Keep Vita Lab free during runs: a large
+`vitalab get` (a disc image) makes its file server refuse every other transfer.
+
 ## Driving the Vita (Vita Lab)
 
 - **Keep both machines awake, always (owner's rule, for every session working through

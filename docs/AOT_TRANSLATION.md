@@ -112,6 +112,39 @@ generator does today, and what has to change:
   save-then-load test there (compile, store, reload in a fresh process,
   compare register checksums) checks the relocations without a Vita.
 
+## Tier 2 progress (started 2026-11-08)
+
+Owner's goal: every movie locked at 30 pictures/s, which needs 60 emulated fps
+(Resident Evil 4's intro is at 33). Built in steps, each measured on a PC first.
+
+**Measuring without a Vita.** qemu-user does not run under WSL1 (the PC's WSL is
+version 1), so `perf_gap.py` cannot run there; the CI still runs it. Instead:
+- `jit_arm_dump` (host tool, `tools/jit_arm_dump.cpp`) compiles EE blocks from a
+  RAM dump with the Vita's ARM code generator in the Vita's modes and writes the
+  code. Nothing runs, so it works on x86.
+- `tools/jit_arm_report.py RUN_DIR` takes a Vita run's `eehot.txt` and `eeram.bin`
+  (`dump_ee_ram=1`), compiles every hot block, disassembles it and reports ARM
+  instructions per EE instruction weighted by EE time, and where they go.
+- The host runner counts returns to the executor (`dispatch:` line) and has
+  `--vita-jit` (the Vita's JIT modes) and `--no-indirect`. `make_workload_elf.py
+  call` is a call-heavy workload (jal, jr ra, jalr): 146 returns to the executor
+  per 1000 EE instructions, 2.4x slower than the integer workload on a PC.
+
+**What RE4's hot code costs** (`jit_arm_report.py`, 79 blocks, 47% of EE time):
+blocks are 2 to 6 EE instructions; the static code is about 17 ARM instructions
+per EE instruction (both exit paths counted). 13% are loads and stores of guest
+registers, 13% the block exit's fields (cycle quota, PC, exception, delayed
+jump), 8% branches. The exit costs about as much as the instructions in a block
+this short, so the next steps are cheaper exits, then blocks merged into larger
+units.
+
+| Step | State | Result |
+|---|---|---|
+| 1. **Indirect jumps in compiled code** (patches 0077, 0078): `jr ra` and unlinked branches looked up in a per-CPU table of {guest PC, link entry} by the chained thunk, instead of returning to the C++ loop | Done, on by default (`indirect_jit=0` turns it off). AArch32 with chained frames only | RE4 intro: returns to the executor 188000 -> 21000 per second (EE), 69000 -> 26000 (IOP); 32.1 -> 32.9 emulated fps, 15.0 -> 15.3 pictures/s |
+| 2. Cheaper block exits: skip the exception test in blocks that cannot raise one; conditional branches without storing and re-reading the delayed jump address | Next | |
+| 3. Blocks merged along hot paths (superblocks), guest registers kept in host registers across them | Planned | |
+| 4. Register width across blocks (no upper-half stores where never read) | Planned | |
+
 ## What it could gain
 
 Static recompilers with a strong optimizer typically reach 1.5-2.5 host

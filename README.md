@@ -56,6 +56,7 @@ notes for other sessions: [docs/RE4.md](docs/RE4.md).
 | GPU round trips removed | 52.5 | 24.5 | 12 |
 | Critical sections and start code scan native | 55.5 | 26.5 | 13 |
 | Orange intro: native memcpy, SPU2 priority, input bound by ViBuf | 53.0 | 30.6 | 14.2 |
+| Faster MPEG decoder, indirect jumps in compiled code (tier 2 step 1) | 58.8 | 32.9 | 15.3 |
 
 ## Performance gap
 

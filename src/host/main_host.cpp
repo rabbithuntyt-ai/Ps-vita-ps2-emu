@@ -188,6 +188,7 @@ int main(int argc, char** argv)
 	std::string jitCachePath; //persistent JIT cache file (32-bit ARM only)
 	std::vector<CPH_Script::PRESS> presses;
 	bool mpegHleEnabled = false;
+	bool vitaJit = false; // the Vita app's JIT modes (CEmuSession::SetSafeJit(false)): chained frames, indirect dispatch...
 	uint64_t shotEvery = 0;
 	std::string shotDir = ".";
 	std::string statsPath;
@@ -216,6 +217,8 @@ int main(int argc, char** argv)
 			}
 		}
 		else if(!std::strcmp(argv[i], "--mpeg-hle")) mpegHleEnabled = true;
+		else if(!std::strcmp(argv[i], "--vita-jit")) vitaJit = true;
+		else if(!std::strcmp(argv[i], "--no-indirect")) CEmuSession::SetIndirectDispatch(false);
 		else if(!std::strcmp(argv[i], "--shot-every") && (i + 1 < argc)) shotEvery = std::strtoull(argv[++i], nullptr, 10);
 		else if(!std::strcmp(argv[i], "--shot-dir") && (i + 1 < argc)) shotDir = argv[++i];
 		else if(!std::strcmp(argv[i], "--stats") && (i + 1 < argc)) statsPath = argv[++i];
@@ -286,6 +289,7 @@ int main(int argc, char** argv)
 	}
 #endif
 
+	if(vitaJit) CEmuSession::SetSafeJit(false);
 	try
 	{
 		CEmuSession session(config);
@@ -445,6 +449,14 @@ int main(int argc, char** argv)
 			JitCacheSetup::Close();
 		}
 		std::printf("EE executed %llu idle %llu\n", (unsigned long long)session.GetEeExecutedTicks(), (unsigned long long)session.GetEeIdleTicks());
+		{
+			// Returns to the C++ dispatch loop per 1000 EE instructions (indirect jumps, unlinked blocks).
+			double executed = static_cast<double>(std::max<uint64_t>(session.GetEeExecutedTicks(), 1));
+			std::printf("dispatch: EE %llu (%.1f per 1000 instructions, %llu slices), IOP %llu (%llu slices)\n",
+			            (unsigned long long)EmuProfile::g_dispatches[0], EmuProfile::g_dispatches[0] * 1000.0 / executed,
+			            (unsigned long long)EmuProfile::g_executeCalls[0], (unsigned long long)EmuProfile::g_dispatches[1],
+			            (unsigned long long)EmuProfile::g_executeCalls[1]);
+		}
 		session.GetFrames().Fetch(serial, pixels, width, height);
 		for(const auto& usage : threadUsage)
 		{

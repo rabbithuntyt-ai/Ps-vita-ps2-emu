@@ -192,6 +192,7 @@ namespace
 		bool softwareRenderer = false;
 		bool threadedVu1 = true; //VU1 microprograms on the third core
 		bool safeJit = false;    //no NEON/VFP register allocation in the JIT
+		bool indirectJit = true; //indirect jumps (function returns) resolved in compiled code
 		bool threadedSpu = true; //SPU2 audio mixing on the second core
 		bool jitCache = true;    //keep compiled code between runs (ux0:data/VitaPS2/jitcache)
 		bool movieHle = false;   //native movie decoding (libmpeg 2.2 games, docs/HLE_MPEG.md)
@@ -226,6 +227,7 @@ namespace
 		else if(key == "software_renderer") settings.softwareRenderer = value != 0;
 		else if(key == "threaded_vu1") settings.threadedVu1 = value != 0;
 		else if(key == "safe_jit") settings.safeJit = value != 0;
+		else if(key == "indirect_jit") settings.indirectJit = value != 0;
 		else if(key == "threaded_spu") settings.threadedSpu = value != 0;
 		else if(key == "jit_cache") settings.jitCache = value != 0;
 		else if(key == "mpeg_hle") settings.movieHle = value != 0;
@@ -590,7 +592,7 @@ namespace
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",ps2_%s", EmuProfile::GetSectionName(i));
 				std::fprintf(perfFile, ",spu_full_waits,spu_read_waits,ipu_idec,ipu_bdec,ipu_out_kb,ipu_stalls,audio_underruns,audio_tempo");
 				std::fprintf(perfFile, ",jit_blocks,jit_writes,jit_write_ms,jit_alloc_ms,jit_free_ranges,jit_translate_ms,jit_finish_ms,jit_install_ms,jit_guest_instr,jit_code_kb,jit_opt_ms,jit_alloc_regs_ms,jit_codegen_ms,jit_statements");
-				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms\n");
+				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop\n");
 			}
 		}
 		const uint64_t runStart = sceKernelGetProcessTimeWide();
@@ -625,6 +627,7 @@ namespace
 		CGSH_Hardware::GPU_TIMES perfGpu = CGSH_Hardware::GetTimes();
 		uint64_t perfPresentUs = g_presentUs;
 		// Before anything is compiled for this game.
+		CEmuSession::SetIndirectDispatch(settings.indirectJit);
 		CEmuSession::SetSafeJit(settings.safeJit);
 		std::printf("safe jit: %s\n", settings.safeJit ? "on" : "off");
 		CAutoCycleRate autoRate;
@@ -1199,6 +1202,14 @@ namespace
 							lastLimiter = limiterNow;
 							lastWaitMs = mpegStats.waitMs;
 							lastDecodeMs = mpegStats.decodeMs;
+						}
+						{
+							// Returns to the executor loop (indirect jumps, unlinked blocks), EE and IOP
+							static uint64_t lastDispatches[2] = {};
+							std::fprintf(perfFile, ",%llu,%llu", static_cast<unsigned long long>(EmuProfile::g_dispatches[0] - lastDispatches[0]),
+							             static_cast<unsigned long long>(EmuProfile::g_dispatches[1] - lastDispatches[1]));
+							lastDispatches[0] = EmuProfile::g_dispatches[0];
+							lastDispatches[1] = EmuProfile::g_dispatches[1];
 						}
 						std::fprintf(perfFile, "\n");
 						std::fflush(perfFile);

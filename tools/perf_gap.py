@@ -23,6 +23,7 @@ WORKLOADS = [
     ('float', 'Float (matrix x vector)', ['make_workload_elf.py', None, 'float']),
     ('mmi', '128-bit MMI (pixel blend)', ['make_workload_elf.py', None, 'mmi']),
     ('mem', 'Loads/stores (all sizes)', ['make_membench_elf.py', None, '100000000']),
+    ('call', 'Calls and returns (jal, jr ra, jalr)', ['make_workload_elf.py', None, 'call']),
 ]
 FRAMES_A, FRAMES_B = 2, 4
 
@@ -81,11 +82,14 @@ def count_arm_instructions(stream):
     return per_cpu[emu], ee
 
 
+RUNNER_ARGS = []  # --runner-arg: e.g. --vita-jit (the Vita app's JIT modes)
+
+
 def run(runner, sysroot, elf, frames):
     cmd = ['qemu-arm']
     if sysroot:
         cmd += ['-L', sysroot]
-    cmd += ['-d', 'in_asm,exec,nochain', '-D', '/dev/stdout', runner, elf, '--frames', str(frames), '--timeout', '1200', '--bench-exit']
+    cmd += ['-d', 'in_asm,exec,nochain', '-D', '/dev/stdout', runner, elf, '--frames', str(frames), '--timeout', '1200', '--bench-exit'] + RUNNER_ARGS
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     arm, ee = count_arm_instructions(proc.stdout)
     proc.wait()
@@ -114,7 +118,7 @@ def measure(runner, sysroot):
 # one-to-one line. Light and dark come from the viewer's color scheme.
 # Palette: reference categorical slots 1-4 (validated light + dark); text uses
 # ink tokens, series identity is carried by line, legend and end labels.
-SERIES = {'int': 1, 'float': 2, 'mmi': 3, 'mem': 4}
+SERIES = {'int': 1, 'float': 2, 'mmi': 3, 'mem': 4, 'call': 5}
 
 
 def render_svg(rows, path):
@@ -225,7 +229,13 @@ def main():
     ap.add_argument('--svg')
     ap.add_argument('--label', default='')
     ap.add_argument('--render-only', action='store_true', help='redraw the SVG from the history')
+    ap.add_argument('--runner-arg', action='append', default=[], help='extra runner argument (repeatable), e.g. --vita-jit')
+    ap.add_argument('--only', help='comma separated workload keys')
     args = ap.parse_args()
+    RUNNER_ARGS.extend(args.runner_arg)
+    if args.only:
+        keep = args.only.split(',')
+        WORKLOADS[:] = [w for w in WORKLOADS if w[0] in keep]
     keys = [k for k, _, _ in WORKLOADS]
     rows = []
     if args.history and os.path.exists(args.history):

@@ -161,6 +161,9 @@ public:
 	// frames between linked blocks): slower, to rule out JIT bugs. Set before
 	// booting (code is compiled in one mode). No-op on other CPUs.
 	static void SetSafeJit(bool);
+	// Indirect jumps resolved in compiled code (on by default; takes effect at
+	// the next SetSafeJit, before booting).
+	static void SetIndirectDispatch(bool);
 
 	// Called once at startup before anything touches CAppConfig.
 	static void SetDataPaths(const std::string& dataPath, const std::string& resourcesPath);

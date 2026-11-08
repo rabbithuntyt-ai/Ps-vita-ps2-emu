@@ -1,0 +1,182 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -70,6 +70,12 @@
+ 	};
+ 	inline JIT_STATS g_jit;
+ 
++	//Returns to the C++ dispatch loop (a block could not jump straight to the next:
++	//indirect jumps such as jr ra, unlinked blocks), and Execute calls (slices).
++	//Index 0: EE, 1: IOP.
++	inline uint64 g_dispatches[2] = {};
++	inline uint64 g_executeCalls[2] = {};
++
+ 	//EE slices ended by the idle loop detection, by polled register.
+ 	enum IDLE_SOURCE
+ 	{
+diff --git a/Source/GenericMipsExecutor.h b/Source/GenericMipsExecutor.h
+--- a/Source/GenericMipsExecutor.h
++++ b/Source/GenericMipsExecutor.h
+@@ -3,6 +3,7 @@
+ #include <unordered_set>
+ #include "MIPS.h"
+ #include "BasicBlock.h"
++#include "EmuProfile.h"
+ #include "xxhash.h"
+ #include <cstring>
+ #include <vector>
+@@ -66,11 +67,27 @@
+ 		m_mustBreak = false;
+ 		m_initQuota = cycles;
+ #endif
++		const unsigned int profileIndex = (m_blockCategory == BLOCK_CATEGORY_PS2_IOP) ? 1 : 0;
++		EmuProfile::g_executeCalls[profileIndex]++;
++		//EE and IOP code: compiled blocks find each other through the table
++		//(CBasicBlock::EnableIndirectDispatch), filled here as blocks are dispatched.
++		const bool indirectDispatch = CBasicBlock::IsIndirectDispatchEnabled() &&
++		                              ((m_blockCategory == BLOCK_CATEGORY_PS2_EE) || (m_blockCategory == BLOCK_CATEGORY_PS2_IOP));
++		if(indirectDispatch && m_indirectTable.empty()) m_indirectTable.resize(CMIPS::INDIRECT_TABLE_SIZE, CMIPS::INDIRECT_ENTRY{MIPS_INVALID_PC, 0});
++		m_context.m_indirectTable = indirectDispatch ? m_indirectTable.data() : nullptr;
++		m_context.m_indirectAddressMask = m_addressMask;
+ 		while(m_context.m_State.nHasException == 0)
+ 		{
+ 			uint32 address = m_context.m_State.nPC & m_addressMask;
+ 			auto block = m_blockLookup.FindBlockAt(address);
++			if(indirectDispatch && !block->IsEmpty())
++			{
++				auto& entry = m_indirectTable[(address >> 2) & (CMIPS::INDIRECT_TABLE_SIZE - 1)];
++				entry.pc = address;
++				entry.entry = block->GetLinkEntryAddress();
++			}
+ 			block->Execute();
++			EmuProfile::g_dispatches[profileIndex]++;
+ 		}
+ 		m_context.m_State.nHasException &= ~MIPS_EXCEPTION_STATUS_QUOTADONE;
+ #ifdef DEBUGGER_INCLUDED
+@@ -91,6 +108,7 @@
+ 
+ 	void Reset() override
+ 	{
++		ClearIndirectTable();
+ 		m_blockLookup.Clear();
+ 		m_blocks.clear();
+ 		m_blockOutLinks.clear();
+@@ -295,6 +313,9 @@
+ 		uint32 scanEnd = end;
+ 		assert(scanEnd > scanStart);
+ 
++		//Compiled code may go away: no entry may point at it
++		ClearIndirectTable();
++
+ 		std::set<CBasicBlock*> clearedBlocks;
+ 		for(uint32 address = scanStart; address < scanEnd; address += instructionSize)
+ 		{
+@@ -334,6 +355,12 @@
+ 		}
+ 	}
+ 
++	void ClearIndirectTable()
++	{
++		std::fill(m_indirectTable.begin(), m_indirectTable.end(), CMIPS::INDIRECT_ENTRY{MIPS_INVALID_PC, 0});
++	}
++
++	std::vector<CMIPS::INDIRECT_ENTRY> m_indirectTable;
+ 	BlockStore m_blocks;
+ 	BasicBlockPtr m_emptyBlock;
+ 	BlockOutLinkMap m_blockOutLinks;
+diff --git a/Source/MIPS.h b/Source/MIPS.h
+--- a/Source/MIPS.h
++++ b/Source/MIPS.h
+@@ -171,6 +171,22 @@
+ 	void* m_vuMem = nullptr;
+ 	void** m_pageLookup = nullptr;
+ 
++	//Indirect jump table (chained frames on AArch32): guest PC -> compiled block's
++	//link entry, filled by the executor, read by the code generator's branch
++	//dispatcher. Null: every unlinked jump returns to the executor.
++	struct INDIRECT_ENTRY
++	{
++		uint32 pc;
++		uintptr_t entry;
++	};
++	INDIRECT_ENTRY* m_indirectTable = nullptr;
++	uint32 m_indirectAddressMask = 0;
++	enum
++	{
++		INDIRECT_TABLE_BITS = 12, //entries, indexed by PC bits 2..13
++		INDIRECT_TABLE_SIZE = 1 << INDIRECT_TABLE_BITS,
++	};
++
+ 	//Scratch for the VU compiler: sticky flags accumulated within a block
+ 	//(only live while a block runs, not part of the saved state)
+ 	uint32 m_vuStickyAccumulator = 0;
+diff --git a/Source/BasicBlock.h b/Source/BasicBlock.h
+--- a/Source/BasicBlock.h
++++ b/Source/BasicBlock.h
+@@ -85,6 +85,17 @@
+ 	uint32 GetEndAddress() const;
+ 	bool IsCompiled() const;
+ 	bool IsEmpty() const;
++	//Where linked blocks jump in (chained frames: after the frame is built)
++	uintptr_t GetLinkEntryAddress() const;
++
++	//Indirect jumps (jr ra...) and unlinked branches looked up in compiled code
++	//instead of returning to the executor (AArch32 with chained frames only;
++	//call before compiling anything). True if it could be enabled.
++	static bool EnableIndirectDispatch(bool enabled);
++	static bool IsIndirectDispatchEnabled()
++	{
++		return g_indirectDispatch;
++	}
+ 
+ 	uint32 GetRecycleCount() const;
+ 	void SetRecycleCount(uint32);
+@@ -144,6 +155,8 @@
+ 	static void BreakpointHandler(CMIPS*);
+ #endif
+ 
++	static inline bool g_indirectDispatch = false;
++
+ #ifdef AOT_BUILD_CACHE
+ 	static Framework::CStdStream* m_aotBlockOutputStream;
+ 	static std::mutex m_aotBlockOutputStreamMutex;
+diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
+--- a/Source/BasicBlock.cpp
++++ b/Source/BasicBlock.cpp
+@@ -424,6 +424,36 @@
+ 	m_outLinks[linkSlot] = link;
+ }
+ 
++bool CBasicBlock::EnableIndirectDispatch(bool enabled)
++{
++	g_indirectDispatch = false;
++#if defined(__arm__) && !defined(__aarch64__) && !defined(AOT_ENABLED)
++	if(enabled && Jitter::CCodeGen_AArch32::GetChainedFrames())
++	{
++		Jitter::CCodeGen_AArch32::INDIRECT_DISPATCH info;
++		info.tableOffset = offsetof(CMIPS, m_indirectTable);
++		info.pcOffset = offsetof(CMIPS, m_State.nPC);
++		info.maskOffset = offsetof(CMIPS, m_indirectAddressMask);
++		info.tableBits = CMIPS::INDIRECT_TABLE_BITS;
++		static_assert(sizeof(CMIPS::INDIRECT_ENTRY) == 8, "the dispatcher reads 8 byte entries");
++		Jitter::CCodeGen_AArch32::SetIndirectDispatch(reinterpret_cast<uintptr_t>(&BranchBlockTrampoline), info);
++		g_indirectDispatch = true;
++	}
++#else
++	(void)enabled;
++#endif
++	return g_indirectDispatch;
++}
++
++uintptr_t CBasicBlock::GetLinkEntryAddress() const
++{
++#if !defined(AOT_USE_CACHE)
++	return reinterpret_cast<uintptr_t>(m_function.GetCode()) + m_linkEntryOffset;
++#else
++	return 0;
++#endif
++}
++
+ void CBasicBlock::LinkBlock(LINK_SLOT linkSlot, CBasicBlock* otherBlock)
+ {
+ #if !defined(AOT_ENABLED) && !defined(__EMSCRIPTEN__)

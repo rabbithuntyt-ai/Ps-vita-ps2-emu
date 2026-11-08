@@ -1,0 +1,96 @@
+diff --git a/include/Jitter_CodeGen_AArch32.h b/include/Jitter_CodeGen_AArch32.h
+--- a/include/Jitter_CodeGen_AArch32.h
++++ b/include/Jitter_CodeGen_AArch32.h
+@@ -44,6 +44,19 @@
+ 		// The thunk that unwinds a chained frame and jumps to 'target' (one per
+ 		// target, in JIT memory). For code loaded from a JIT cache.
+ 		static uintptr_t GetChainedThunk(uintptr_t target);
++		// Indirect dispatch: the chained thunk of 'target' first looks the guest
++		// PC (context + pcOffset, masked with context + maskOffset) up in the
++		// table at context + tableOffset (pointer; null: off): 1 << tableBits
++		// entries of {guest PC, link entry} indexed by PC bits 2 and up. Found:
++		// jump to the link entry, the frame kept.
++		struct INDIRECT_DISPATCH
++		{
++			uint32 tableOffset = 0;
++			uint32 pcOffset = 0;
++			uint32 maskOffset = 0;
++			uint32 tableBits = 0;
++		};
++		static void SetIndirectDispatch(uintptr_t target, const INDIRECT_DISPATCH&);
+ 
+ 		uint32 GetLinkEntryOffset() const override;
+ 
+diff --git a/src/Jitter_CodeGen_AArch32.cpp b/src/Jitter_CodeGen_AArch32.cpp
+--- a/src/Jitter_CodeGen_AArch32.cpp
++++ b/src/Jitter_CodeGen_AArch32.cpp
+@@ -392,8 +392,14 @@
+ 
+ namespace
+ {
++	//Indirect dispatch (CCodeGen_AArch32::SetIndirectDispatch)
++	uintptr_t g_indirectDispatchTarget = 0;
++	CCodeGen_AArch32::INDIRECT_DISPATCH g_indirectDispatch = {};
++
+ 	//Unwinds a chained frame and tail calls 'target' with the context in r0.
+-	//One per target, shared by all functions.
++	//One per target, shared by all functions. The indirect dispatch target first
++	//looks the guest PC up in the context's table and, when found, jumps to the
++	//block's link entry with the frame kept (no return to the executor).
+ 	class CChainedThunks
+ 	{
+ 	public:
+@@ -408,6 +414,31 @@
+ 			Framework::CMemStream stream;
+ 			CAArch32Assembler assembler;
+ 			assembler.SetStream(&stream);
++			if((target == g_indirectDispatchTarget) && (target != 0))
++			{
++				const auto& info = g_indirectDispatch;
++				auto loadField = [&](CAArch32Assembler::REGISTER dst, uint32 offset) {
++					assembler.Movw(CAArch32Assembler::r3, static_cast<uint16>(offset & 0xFFFF));
++					if(offset > 0xFFFF) assembler.Movt(CAArch32Assembler::r3, static_cast<uint16>(offset >> 16));
++					assembler.Ldr(dst, CAArch32Assembler::r11, CAArch32Assembler::MakeRegisterLdrAddress(CAArch32Assembler::r3));
++				};
++				auto miss = assembler.CreateLabel();
++				loadField(CAArch32Assembler::r1, info.tableOffset);
++				assembler.Cmp(CAArch32Assembler::r1, CAArch32Assembler::MakeImmediateAluOperand(0, 0));
++				assembler.BCc(CAArch32Assembler::CONDITION_EQ, miss);
++				loadField(CAArch32Assembler::r0, info.pcOffset);
++				loadField(CAArch32Assembler::r2, info.maskOffset);
++				assembler.And(CAArch32Assembler::r0, CAArch32Assembler::r0, CAArch32Assembler::r2);
++				assembler.Ubfx(CAArch32Assembler::r3, CAArch32Assembler::r0, 2, static_cast<uint8>(info.tableBits));
++				//Entries of 8 bytes: guest PC, link entry
++				assembler.Add(CAArch32Assembler::r1, CAArch32Assembler::r1,
++				              CAArch32Assembler::MakeRegisterAluOperand(CAArch32Assembler::r3, CAArch32Assembler::MakeConstantShift(CAArch32Assembler::SHIFT_LSL, 3)));
++				assembler.Ldr(CAArch32Assembler::r2, CAArch32Assembler::r1, CAArch32Assembler::MakeImmediateLdrAddress(0));
++				assembler.Cmp(CAArch32Assembler::r2, CAArch32Assembler::r0);
++				assembler.BCc(CAArch32Assembler::CONDITION_NE, miss);
++				assembler.Ldr(CAArch32Assembler::rPC, CAArch32Assembler::r1, CAArch32Assembler::MakeImmediateLdrAddress(4));
++				assembler.MarkLabel(miss);
++			}
+ 			assembler.Mov(CAArch32Assembler::r0, CAArch32Assembler::r11);
+ 			assembler.Add(CAArch32Assembler::rSP, CAArch32Assembler::rSP, CAArch32Assembler::MakeImmediateAluOperand(g_chainedStackSize >> 8, 12));
+ 			assembler.Ldmia(CAArch32Assembler::rSP, (1 << CAArch32Assembler::r3));
+@@ -416,6 +447,7 @@
+ 			assembler.Ldmia(CAArch32Assembler::rSP, g_chainedRegisterSave);
+ 			assembler.Ldr_Pc(CAArch32Assembler::rPC, -4);
+ 			stream.Write32(static_cast<uint32>(target));
++			assembler.ResolveLabelReferences();
+ 			auto& thunk = thunks[target];
+ 			thunk = std::make_unique<CMemoryFunction>(stream.GetBuffer(), stream.GetSize());
+ 			return reinterpret_cast<uintptr_t>(thunk->GetCode());
+@@ -428,6 +460,13 @@
+ 	return CChainedThunks::Get(target);
+ }
+ 
++void CCodeGen_AArch32::SetIndirectDispatch(uintptr_t target, const INDIRECT_DISPATCH& info)
++{
++	//Before any function referencing 'target' is generated (its thunk is made once)
++	g_indirectDispatchTarget = target;
++	g_indirectDispatch = info;
++}
++
+ unsigned int CCodeGen_AArch32::GetAvailableMdRegisterCount() const
+ {
+ 	return g_conservativeAllocation ? 0 : MAX_MDREGISTERS;

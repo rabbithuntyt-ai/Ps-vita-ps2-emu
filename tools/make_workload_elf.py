@@ -2,7 +2,7 @@
 # host (ARM) instructions the emulator needs per PS2 instruction
 # (tools/perf_gap.py). Each kernel loops forever and keeps a running result
 # in s7 so nothing is dead code.
-# Usage: make_workload_elf.py out.elf KERNEL [--check]   (KERNEL: int, float, mmi)
+# Usage: make_workload_elf.py out.elf KERNEL [--check]   (KERNEL: int, float, mmi, call)
 #   --check: run one pass, then s6 = 0xD0E and s7 = checksum (for tests);
 #            float takes its matrix from random bits (NaN/Inf/huge values
 #            exercise the clamping)
@@ -49,6 +49,11 @@ def nop(): code.append(0)
 def label(n): labels[n] = len(code)
 def bne(rs, rt, n): fix.append((len(code), n)); I(0x05, rs, rt, 0)
 def beq(rs, rt, n): fix.append((len(code), n)); I(0x04, rs, rt, 0)
+jfix, lafix = [], []
+def jal(n): jfix.append((len(code), n)); code.append(0x03 << 26)
+def jr(rs): Rt(0x08, rs, 'zero', 'zero')
+def jalr(rs): Rt(0x09, rs, 'zero', 'ra')
+def la(rt, n): lafix.append((len(code), n)); lui(rt, 0); ori(rt, rt, 0)
 
 kernel = sys.argv[2]
 check = '--check' in sys.argv
@@ -116,11 +121,41 @@ elif kernel == 'mmi':
     addiu('a0', 'a0', 16); addiu('a1', 'a1', 16); addiu('a2', 'a2', 16); addiu('t9', 't9', -1); bne('t9', 'zero', 'row'); nop()
     lw('t0', 0, 's2'); xor('s7', 's7', 't0'); sw('s7', 0, 's0')
     beq('zero', 'zero', 'outer'); nop()
+elif kernel == 'call':
+    # C++ engine style: small functions called with jal and left with jr ra, a
+    # non-leaf one with a stack frame, and a call through a pointer (jalr).
+    # Every call and return is an indirect or unlinked jump for the JIT.
+    label('outer')
+    move('a0', 's0'); li('t9', 256)
+    label('loop')
+    lw('a1', 0, 'a0')
+    jal('leaf'); nop()
+    xor('s7', 's7', 'v0')
+    jal('nonleaf'); move('a2', 'v0')
+    addu('s7', 's7', 'v0')
+    la('t8', 'leaf'); jalr('t8'); move('a1', 's7')
+    xor('s7', 's7', 'v0')
+    addiu('a0', 'a0', 4); addiu('t9', 't9', -1); bne('t9', 'zero', 'loop'); nop()
+    sw('s7', 0, 's0')
+    beq('zero', 'zero', 'outer'); nop()
+    label('leaf')       # v0 = a1 * 3 + 1
+    sll('v0', 'a1', 1); addu('v0', 'v0', 'a1'); jr('ra'); addiu('v0', 'v0', 1)
+    label('nonleaf')    # v0 = leaf(leaf(a2))
+    addiu('sp', 'sp', -16); sw('ra', 0, 'sp')
+    jal('leaf'); move('a1', 'a2')
+    jal('leaf'); move('a1', 'v0')
+    lw('ra', 0, 'sp'); jr('ra'); addiu('sp', 'sp', 16)
 else:
     raise SystemExit('unknown kernel ' + kernel)
 
 for pos, n in fix:
     code[pos] |= (labels[n] - pos - 1) & 0xFFFF
+for pos, n in jfix:
+    code[pos] |= ((m.BASE + labels[n] * 4) >> 2) & 0x03FFFFFF
+for pos, n in lafix:
+    address = m.BASE + labels[n] * 4
+    code[pos] |= (address >> 16) & 0xFFFF
+    code[pos + 1] |= address & 0xFFFF
 image = bytearray(0x1000)
 for i, w in enumerate(code):
     struct.pack_into('<I', image, i * 4, w)
