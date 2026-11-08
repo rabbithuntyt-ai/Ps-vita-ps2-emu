@@ -254,6 +254,29 @@ all against 16.6.
   lever is keeping guest registers in host registers across blocks (docs/AOT_TRANSLATION.md
   step 3b), which needs work in the Jitter's register allocator.
 
+### Is a locked 30 reachable? The CPU budget (2026-11-08)
+
+The Vita gives an app three cores at 444 MHz (already set). At a real 30 pictures/s
+(60 emulated fps) RE4's intro would need, from today's measurements:
+
+| Work | Now (15 pictures/s) | At 30 pictures/s |
+|---|---|---|
+| Emulation thread (EE, IOP, VM), one core | 95% at 31.5 emulated fps (32 ms per frame) | about 190%: impossible on one core; needs 2x faster |
+| MPEG decoder (31 ms of CPU per picture) | 45-50% of core 2 | about 95% |
+| SPU2 mixer | 17% of core 2 | about 34% |
+| GPU thread | 65% of core 1 | 65-100% |
+| **Total** | **about 225%** | **about 390% of 300%** |
+
+So the lock needs about 1.4x efficiency everywhere and 2x on the emulation thread,
+where the EE is only half the cost (IOP work, mostly Capcom's software mixer, plus
+the VM, is about 11.5 ms of the 16.6 ms budget by itself). Routes, from most to
+least work:
+1. Tier 2 (AOT_TRANSLATION.md) on the EE **and** the IOP: whole functions in host
+   registers. The design's estimate is 1.5-2.5x on guest code. Several sessions.
+2. Fewer host instructions in the VM loop (timers, DMA, interrupts per slice).
+3. A faster decoder (parsing and colour conversion are 65% of its time) so that it
+   and the SPU2 mixer share core 2 at 30 pictures/s.
+
 ### What a real 30 pictures/s needs
 
 The emulation thread costs about 32 ms per emulated frame against 16.6. It is spread out:
