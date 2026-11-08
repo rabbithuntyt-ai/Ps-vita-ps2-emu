@@ -47,6 +47,7 @@
 #include "CpuScreen.h"
 #include "EmuSession.h"
 #include "EmuProfile.h"
+#include "iop/Iop_SubSystem.h"
 #include "MpegHle.h"
 #include "MpegShadow.h"
 #include "Ps2Const.h"
@@ -196,6 +197,8 @@ namespace
 		bool jitRegions = false; //tier 2 regions: blocks of a function compiled as one
 		bool cheapExits = true; //block exits skip tests the block's code makes needless
 		bool pinnedFields = true; //cycle quota and page table pointer in registers across linked blocks
+		bool iopStayInSlice = true; //IOP kernel calls handled without leaving the time slice
+		bool eeStayInSlice = true; //EE kernel calls handled without leaving the time slice
 		bool threadedSpu = true; //SPU2 audio mixing on the second core
 		bool jitCache = true;    //keep compiled code between runs (ux0:data/VitaPS2/jitcache)
 		bool movieHle = false;   //native movie decoding (libmpeg 2.2 games, docs/HLE_MPEG.md)
@@ -234,6 +237,8 @@ namespace
 		else if(key == "jit_regions") settings.jitRegions = value != 0;
 		else if(key == "cheap_exits") settings.cheapExits = value != 0;
 		else if(key == "pinned_fields") settings.pinnedFields = value != 0;
+		else if(key == "iop_stay_in_slice") settings.iopStayInSlice = value != 0;
+		else if(key == "ee_stay_in_slice") settings.eeStayInSlice = value != 0;
 		else if(key == "threaded_spu") settings.threadedSpu = value != 0;
 		else if(key == "jit_cache") settings.jitCache = value != 0;
 		else if(key == "mpeg_hle") settings.movieHle = value != 0;
@@ -635,6 +640,8 @@ namespace
 		// Before anything is compiled for this game.
 		CEmuSession::SetIndirectDispatch(settings.indirectJit);
 		CEmuSession::SetPinnedFields(settings.pinnedFields);
+		Iop::CSubSystem::g_stayInSlice = settings.iopStayInSlice;
+		Ee::CSubSystem::g_stayInSlice = settings.eeStayInSlice;
 		CEmuSession::SetRegions(settings.jitRegions);
 		CEmuSession::SetCheapExits(settings.cheapExits);
 		CEmuSession::SetSafeJit(settings.safeJit);

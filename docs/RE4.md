@@ -254,6 +254,41 @@ all against 16.6.
   lever is keeping guest registers in host registers across blocks (docs/AOT_TRANSLATION.md
   step 3b), which needs work in the Jitter's register allocator.
 
+### Where the emulation thread's time goes, finer (2026-11-08, patch 0084)
+
+New profiler sections split the old "EE", "IOP" and "other" (perf.csv `ps2_EEio`,
+`ps2_EEkernel`, `ps2_EEticks`, `ps2_IOPio`, `ps2_IOPkernel`, `ps2_IOPticks`). Intro
+movie, share of the emulation thread (31 ms per emulated frame):
+
+| Part | Before | After the changes below |
+|---|---|---|
+| EE compiled code and executor | 45.9% | 48% |
+| IOP compiled code | 13.1% | 13.5% |
+| IOP tick bookkeeping (root counters, BIOS/module timers, SPU2 DMA) | 7.3% | 4.8% |
+| EE kernel calls (HLE) | 6.9% | 7.8% |
+| IOP kernel calls and interrupts | 6.8% | 6.3% |
+| VIF1 DIRECT to the GS | 5.7% | |
+| EE tick bookkeeping (timers, DMA, VIF/GIF/IPU) | 3.5% | 2.2% |
+| SPU2 register reads, SPU, other | 7% | |
+
+The tick bookkeeping split (a diagnostic build): root counters 2.8%, BIOS and module
+timers 3.4%, SPU2 DMA 0.5%. None of it does much per call: it ran after **every** kernel
+call, because a kernel call (on the IOP often an `addiu zero, zero, N` stub) ended
+`ExecuteCpu` and went back to the VM loop. Now kernel calls and interrupt checks are
+handled inside `ExecuteCpu`, which goes on with the rest of its quota (it still returns
+for idle, VU0 calls, TLB and the HLE idle request). Settings `iop_stay_in_slice`,
+`ee_stay_in_slice` (both on). The root counters also skip the division for clock ratios
+of 1, 8, 16 and 256 (the Vita's CPU has no divide instruction).
+
+| RE4 intro, warm | Emulated fps | Pictures/s |
+|---|---|---|
+| Both off | 32.5 | 15.6 |
+| IOP on (two runs) | 33.1, 33.3 | 15.9, 16.0 |
+| IOP and EE on (two runs) | 33.8, 33.8 | 16.2, 16.2 |
+
+Silent Hill 2 on a PC, 1500 frames: the IOP change gives the same final picture; with the
+EE change the same title menu (its animated background a little further on).
+
 ### Is a locked 30 reachable? The CPU budget (2026-11-08)
 
 The Vita gives an app three cores at 444 MHz (already set). At a real 30 pictures/s

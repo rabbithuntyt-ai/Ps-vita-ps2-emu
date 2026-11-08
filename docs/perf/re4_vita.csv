@@ -7,3 +7,4 @@ date,label,title_out_fps,movie_vm_fps,movie_out_fps,movie_pics,jit_ms_block,movi
 2026-11-06,Critical sections and start code scan native,55.5,26.5,26.5,13.0,-,47,-,-,-,-
 2026-11-06,Orange intro: native memcpy; SPU2 priority; input bound by ViBuf,53.0,30.6,30.6,14.2,-,73,-,-,-,-
 2026-11-08,"Faster MPEG decoder, indirect jumps in compiled code (tier 2 step 1)",58.8,32.9,32.9,15.3,-,53,-,-,-,-
+2026-11-08,"Cheaper exits, pinned quota/page table, kernel calls inside the time slice",-,33.8,33.8,16.2,-,48,-,-,-,-

@@ -1,0 +1,223 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -27,12 +27,18 @@
+ 		SECTION_SPU_READ, //waiting for the SPU thread before a register read
+ 		SECTION_VIF_DIRECT, //VIF1 DIRECT: image data and packets to the GS
+ 		SECTION_VIF_UNPACK, //VIF UNPACK into VU memory
++		SECTION_EE_IO, //EE hardware register handlers (called from compiled code)
++		SECTION_EE_KERNEL, //EE exceptions: kernel calls (HLE), interrupts, TLB
++		SECTION_EE_TICKS, //EE timers, DMA and interrupt bookkeeping per slice
++		SECTION_IOP_IO, //IOP hardware register handlers
++		SECTION_IOP_KERNEL, //IOP exceptions: BIOS calls (HLE), interrupts
++		SECTION_IOP_TICKS, //IOP timers, DMA and SPU bookkeeping per slice
+ 		SECTION_COUNT
+ 	};
+ 
+ 	inline const char* GetSectionName(unsigned int section)
+ 	{
+-		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle", "SPUsync", "SPUread", "VIFdirect", "VIFunpack"};
++		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle", "SPUsync", "SPUread", "VIFdirect", "VIFunpack", "EEio", "EEkernel", "EEticks", "IOPio", "IOPkernel", "IOPticks"};
+ 		return (section < SECTION_COUNT) ? names[section] : "?";
+ 	}
+ 
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -258,8 +258,31 @@
+ 	{
+ 		executed = (quota - m_EE.m_executor->Execute(quota));
+ 	}
++	//Kernel calls and interrupt checks: handled, then the rest of the quota runs here
++	//(g_stayInSlice) instead of a return to the VM loop and its tick bookkeeping.
++	//Anything that may idle the EE or needs the VM (VU0 calls, TLB, idle loops) returns.
++	while(g_stayInSlice && !m_EE.m_State.callMsEnabled && (executed < quota) &&
++	      ((m_EE.m_State.nHasException == MIPS_EXCEPTION_SYSCALL) || (m_EE.m_State.nHasException == MIPS_EXCEPTION_CHECKPENDINGINT)))
++	{
++		{
++			EmuProfile::CScope profileScope(EmuProfile::SECTION_EE_KERNEL);
++			if(m_EE.m_State.nHasException == MIPS_EXCEPTION_SYSCALL)
++			{
++				m_os->HandleSyscall();
++			}
++			else
++			{
++				m_EE.m_State.nHasException = MIPS_EXCEPTION_NONE;
++				CheckPendingInterrupts();
++			}
++		}
++		if(m_EE.m_State.nHasException || m_EE.m_State.callMsEnabled || m_os->IsIdle() || CPS2OS::g_hleIdleRequest) return executed;
++		int remaining = quota - executed;
++		executed += (remaining - m_EE.m_executor->Execute(remaining));
++	}
+ 	if(m_EE.m_State.nHasException)
+ 	{
++		EmuProfile::CScope profileScope(EmuProfile::SECTION_EE_KERNEL);
+ 		switch(m_EE.m_State.nHasException)
+ 		{
+ 		case MIPS_EXCEPTION_SYSCALL:
+@@ -312,6 +335,7 @@
+ 
+ void CSubSystem::CountTicks(int ticks)
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_EE_TICKS);
+ 	if(m_vpu0->IsVuReady() || (m_vpu0->IsVuRunning() && !m_vpu0->GetVif().IsWaitingForProgramEnd()))
+ 	{
+ 		m_dmac.ResumeDMA0();
+@@ -484,6 +508,7 @@
+ 
+ uint32 CSubSystem::IOPortReadHandler(uint32 nAddress)
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_EE_IO);
+ 	uint32 nReturn = 0;
+ 	//The IPU works in parallel with the EE: a game polling it (or the DMA
+ 	//channels feeding it) must see the progress that is already possible,
+@@ -625,6 +650,7 @@
+ 
+ uint32 CSubSystem::IOPortWriteHandler(uint32 nAddress, uint32 nData)
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_EE_IO);
+ 	if(nAddress >= 0x10000000 && nAddress <= 0x1000183F)
+ 	{
+ 		m_timer.SetRegister(nAddress, nData);
+diff --git a/Source/ee/Ee_SubSystem.h b/Source/ee/Ee_SubSystem.h
+--- a/Source/ee/Ee_SubSystem.h
++++ b/Source/ee/Ee_SubSystem.h
+@@ -30,6 +30,9 @@
+ 		void Reset(uint32);
+ 		int ExecuteCpu(int);
+ 		bool IsCpuIdle() const;
++		//ExecuteCpu handles kernel calls and interrupt checks and goes on with its quota
++		//instead of returning after each one (on by default)
++		static inline bool g_stayInSlice = true;
+ 		void CountTicks(int);
+ 
+ 		void NotifyVBlankStart();
+diff --git a/Source/iop/Iop_SubSystem.h b/Source/iop/Iop_SubSystem.h
+--- a/Source/iop/Iop_SubSystem.h
++++ b/Source/iop/Iop_SubSystem.h
+@@ -29,6 +29,9 @@
+ 		void Reset();
+ 		int ExecuteCpu(int);
+ 		bool IsCpuIdle();
++		//ExecuteCpu handles kernel calls and interrupt checks and goes on with its quota
++		//instead of returning after each one (on by default)
++		static inline bool g_stayInSlice = true;
+ 		void CountTicks(int);
+ 
+ 		void NotifyVBlankStart();
+diff --git a/Source/iop/Iop_SubSystem.cpp b/Source/iop/Iop_SubSystem.cpp
+--- a/Source/iop/Iop_SubSystem.cpp
++++ b/Source/iop/Iop_SubSystem.cpp
+@@ -252,6 +252,7 @@
+ 
+ uint32 CSubSystem::ReadIoRegister(uint32 address)
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_IOP_IO);
+ 	if(address == 0x1F801814)
+ 	{
+ 		return 0x14802000;
+@@ -338,6 +339,7 @@
+ 
+ uint32 CSubSystem::WriteIoRegister(uint32 address, uint32 value)
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_IOP_IO);
+ 	if(address >= CSpu::SPU_BEGIN && address <= CSpu::SPU_END)
+ 	{
+ 		if(!m_spuQueueWrite || !m_spuQueueWrite(address, value, false))
+@@ -427,6 +429,7 @@
+ 
+ void CSubSystem::CountTicks(int ticks)
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_IOP_TICKS);
+ 	static const int g_dmaUpdateDelay = 10000;
+ 	static const int g_spuIrqCheckDelay = 1000;
+ 	m_counters.Update(ticks);
+@@ -460,29 +463,44 @@
+ int CSubSystem::ExecuteCpu(int quota)
+ {
+ 	int executed = 0;
+-	CheckPendingInterrupts();
+-	if(!m_cpu.m_State.nHasException)
+ 	{
+-		executed = (quota - m_cpu.m_executor->Execute(quota));
++		EmuProfile::CScope profileScope(EmuProfile::SECTION_IOP_KERNEL);
++		CheckPendingInterrupts();
+ 	}
+-	if(m_cpu.m_State.nHasException)
+-	{
+-		switch(m_cpu.m_State.nHasException)
+-		{
+-		case MIPS_EXCEPTION_SYSCALL:
+-			m_bios->HandleException();
+-			assert(m_cpu.m_State.nHasException == MIPS_EXCEPTION_NONE);
++	//Kernel calls (HLE, often `addiu zero, zero, N` stubs) and interrupt checks are
++	//handled here and execution goes on with the rest of the quota (g_stayInSlice):
++	//returning to the VM loop for each one cost a full round of tick bookkeeping
++	//(counters, BIOS and module timers, DMA), thousands of times per frame.
++	while(true)
++	{
++		if(!m_cpu.m_State.nHasException)
++		{
++			int remaining = quota - executed;
++			executed += (remaining - m_cpu.m_executor->Execute(remaining));
++		}
++		if(!m_cpu.m_State.nHasException) break; //quota done
++		{
++			EmuProfile::CScope profileScope(EmuProfile::SECTION_IOP_KERNEL);
++			switch(m_cpu.m_State.nHasException)
++			{
++			case MIPS_EXCEPTION_SYSCALL:
++				m_bios->HandleException();
++				assert(m_cpu.m_State.nHasException == MIPS_EXCEPTION_NONE);
++				break;
++			case MIPS_EXCEPTION_CHECKPENDINGINT:
++			{
++				m_cpu.m_State.nHasException = MIPS_EXCEPTION_NONE;
++				CheckPendingInterrupts();
++				//Needs to be cleared again because exception flag might be set by BIOS interrupt handler
++				m_cpu.m_State.nHasException = MIPS_EXCEPTION_NONE;
++			}
+ 			break;
+-		case MIPS_EXCEPTION_CHECKPENDINGINT:
+-		{
+-			m_cpu.m_State.nHasException = MIPS_EXCEPTION_NONE;
+-			CheckPendingInterrupts();
+-			//Needs to be cleared again because exception flag might be set by BIOS interrupt handler
+-			m_cpu.m_State.nHasException = MIPS_EXCEPTION_NONE;
+-		}
+-		break;
++			}
++			assert(m_cpu.m_State.nHasException == MIPS_EXCEPTION_NONE);
+ 		}
+-		assert(m_cpu.m_State.nHasException == MIPS_EXCEPTION_NONE);
++		if(!g_stayInSlice || m_cpu.m_State.nHasException || (executed >= quota) || IsCpuIdle()) break;
++		EmuProfile::CScope profileScope(EmuProfile::SECTION_IOP_KERNEL);
++		CheckPendingInterrupts();
+ 	}
+ 	return executed;
+ }
+diff --git a/Source/iop/Iop_RootCounters.cpp b/Source/iop/Iop_RootCounters.cpp
+--- a/Source/iop/Iop_RootCounters.cpp
++++ b/Source/iop/Iop_RootCounters.cpp
+@@ -151,8 +151,18 @@
+ 			}
+ 		}
+ 		uint32 totalTicks = counter.clockRemain + ticks;
+-		uint64 countAdd = totalTicks / clockRatio;
+-		counter.clockRemain = totalTicks % clockRatio;
++		uint64 countAdd = 0;
++		if((clockRatio & (clockRatio - 1)) == 0)
++		{
++			//1, 8, 16, 256: no division (the Vita's CPU has no divide instruction)
++			countAdd = totalTicks >> __builtin_ctz(clockRatio);
++			counter.clockRemain = totalTicks & (clockRatio - 1);
++		}
++		else
++		{
++			countAdd = totalTicks / clockRatio;
++			counter.clockRemain = totalTicks % clockRatio;
++		}
+ 		//Update count
+ 		uint64 counterMax = 0;
+ 		if(g_counterSizes[i] == 16)
