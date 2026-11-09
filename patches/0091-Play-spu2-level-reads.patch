@@ -1,7 +1,33 @@
 diff --git a/Source/PS2VM.h b/Source/PS2VM.h
 --- a/Source/PS2VM.h
 +++ b/Source/PS2VM.h
-@@ -253,7 +253,7 @@
+@@ -179,6 +179,25 @@
+ 	void UpdateIop();
+ 	void UpdateSpu();
+ 
++	//The IOP on its own thread (g_parallelIop, ParallelIop.h)
++	void IopWorkerProc();
++	void GrantIop(int ticks);
++	void DrainIop();
++	void StopIopWorker();
++	std::thread m_iopWorker;
++	enum
++	{
++		IOP_BATCH_SLICES = 4,    //credit (in IOP slices) that wakes the parked IOP thread
++		IOP_MAX_LAG_SLICES = 16, //credit at which the EE thread waits for the IOP
++	};
++
++public:
++	//Set before the VM starts (Vita: iop_thread). g_iopThreadInit runs first on that thread.
++	static inline bool g_parallelIop = false;
++	static inline std::function<void()> g_iopThreadInit;
++
++private:
++
+ 	void SetIopOpticalMedia(COpticalMedia*);
+ 
+ 	void RegisterModulesInPadHandler();
+@@ -253,7 +272,7 @@
  	bool m_spuStopWorker = false;
  	bool m_spuWorkerSleeping = false;
  	unsigned int m_spuIdleWaiters = 0;
@@ -13,7 +39,15 @@ diff --git a/Source/PS2VM.h b/Source/PS2VM.h
 diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
 --- a/Source/PS2VM.cpp
 +++ b/Source/PS2VM.cpp
-@@ -850,6 +850,7 @@
+@@ -7,6 +7,7 @@
+ #include "make_unique.h"
+ #include "string_format.h"
+ #include "PS2VM.h"
++#include "ParallelIop.h"
+ #include "EmuProfile.h"
+ #ifdef __vita__
+ extern "C" int vitaps2_jit_should_flush();
+@@ -850,6 +851,7 @@
  		m_iop->m_spuSync = nullptr;
  		m_iop->m_spuQueueWrite = nullptr;
  		m_iop->m_spuReadAccess = nullptr;
@@ -21,7 +55,7 @@ diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
  		return;
  	}
  	m_spuStopWorker = false;
-@@ -859,6 +860,7 @@
+@@ -859,6 +861,7 @@
  	m_iop->m_spuSync = [this]() { SyncSpu(); };
  	m_iop->m_spuQueueWrite = [this](uint32 address, uint32 value, bool spu2) { return QueueSpuWrite(address, value, spu2); };
  	m_iop->m_spuReadAccess = [this](const std::function<void()>& access) { AccessSpuForRead(access); };
@@ -29,6 +63,161 @@ diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
  	m_spuPendingWrites = 0;
  	m_spuPendingRenders = 0;
  	m_spuWorker = std::thread(
+@@ -1090,11 +1093,25 @@
+ #endif
+ 	static_cast<CEeExecutor*>(m_ee->m_EE.m_executor.get())->AddExceptionHandler();
+ 	m_frameLimiter.BeginFrame();
++	if(g_parallelIop)
++	{
++		auto& state = ParallelIop::g_state;
++		state.quit = false;
++		state.credit = 0;
++		state.iopParked = true;
++		state.active = true;
++		m_iopWorker = std::thread([this]() { IopWorkerProc(); });
++	}
+ 	while(1)
+ 	{
+-		while(m_mailBox.IsPending())
++		ParallelIop::EeParkPoint();
++		if(m_mailBox.IsPending())
+ 		{
+-			m_mailBox.ReceiveCall();
++			DrainIop();
++			while(m_mailBox.IsPending())
++			{
++				m_mailBox.ReceiveCall();
++			}
+ 		}
+ 		if(m_nEnd) break;
+ 		if(m_nStatus == PAUSED)
+@@ -1132,6 +1149,8 @@
+ 				//Check vblank stuff
+ 				if(m_vblankTicks <= 0)
+ 				{
++					//The IOP catches up first: it is notified and the pad writes SIO2
++					DrainIop();
+ 					m_inVblank = !m_inVblank;
+ 					if(m_inVblank)
+ 					{
+@@ -1179,10 +1198,17 @@
+ 				}
+ 
+ 				m_eeExecutionTicks += m_eeTickStep;
+-				m_iopExecutionTicks += m_iopTickStep;
+-
+-				UpdateEe();
+-				UpdateIop();
++				if(ParallelIop::g_state.active.load(std::memory_order_relaxed))
++				{
++					GrantIop(m_iopTickStep);
++					UpdateEe();
++				}
++				else
++				{
++					m_iopExecutionTicks += m_iopTickStep;
++					UpdateEe();
++					UpdateIop();
++				}
+ 			}
+ #ifdef DEBUGGER_INCLUDED
+ 			if(
+@@ -1202,8 +1228,95 @@
+ #endif
+ 		}
+ 	}
++	StopIopWorker();
+ 	static_cast<CEeExecutor*>(m_ee->m_EE.m_executor.get())->RemoveExceptionHandler();
+ #ifdef __ANDROID__
+ 	Framework::CJavaVM::DetachCurrentThread();
+ #endif
+ }
++
++void CPS2VM::IopWorkerProc()
++{
++	ParallelIop::t_iopThread = true;
++	EmuProfile::t_section = &EmuProfile::g_iopSection;
++	if(g_iopThreadInit) g_iopThreadInit();
++	auto& s = ParallelIop::g_state;
++	s.workerStage = 1;
++	std::unique_lock<std::mutex> lock(s.mutex);
++	while(true)
++	{
++		auto ready = [&]() {
++			if(s.quit) return true;
++			if(s.pauseIop.load()) return false;
++			int64 need = s.draining ? 1 : static_cast<int64>(IOP_BATCH_SLICES) * std::max(m_iopTickStep, 1);
++			return s.credit.load() >= need;
++		};
++		if(!ready())
++		{
++			s.iopParked = true;
++			s.NotifyAll();
++			s.workerStage = 2;
++			ParallelIop::WaitLogged(lock, "worker", ready, false);
++		}
++		s.workerStage = 3;
++		s.workerWakes++;
++		if(s.quit) break;
++		s.iopParked = false;
++		lock.unlock();
++		while(!s.pauseIop.load(std::memory_order_acquire))
++		{
++			int64 credit = s.credit.load(std::memory_order_acquire);
++			if(credit <= 0) break;
++			int step = static_cast<int>(std::min<int64>(credit, std::max(m_iopTickStep, 1)));
++			m_iopExecutionTicks += step;
++			s.workerStage = 4;
++			UpdateIop();
++			s.workerStage = 5;
++			s.credit.fetch_sub(step, std::memory_order_acq_rel);
++		}
++		lock.lock();
++	}
++	s.iopParked = true;
++	s.NotifyAll();
++}
++
++void CPS2VM::GrantIop(int ticks)
++{
++	auto& s = ParallelIop::g_state;
++	int64 credit = s.credit.fetch_add(ticks, std::memory_order_acq_rel) + ticks;
++	int64 step = std::max(m_iopTickStep, 1);
++	if((credit >= IOP_BATCH_SLICES * step) && s.iopParked.load(std::memory_order_acquire))
++	{
++		std::lock_guard<std::mutex> lock(s.mutex);
++		s.NotifyAll();
++	}
++	if(credit > IOP_MAX_LAG_SLICES * step) DrainIop();
++}
++
++void CPS2VM::DrainIop()
++{
++	auto& s = ParallelIop::g_state;
++	if(!s.active.load(std::memory_order_acquire)) return;
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_IOP_WAIT);
++	std::unique_lock<std::mutex> lock(s.mutex);
++	s.draining = true;
++	s.eeParked = true;
++	s.NotifyAll();
++	ParallelIop::WaitLogged(lock, "DrainIop", [&]() { return s.iopParked.load() && (s.credit.load() <= 0) && !s.pauseEe.load(); });
++	s.draining = false;
++	s.eeParked = false;
++}
++
++void CPS2VM::StopIopWorker()
++{
++	auto& s = ParallelIop::g_state;
++	if(!m_iopWorker.joinable()) return;
++	DrainIop();
++	{
++		std::lock_guard<std::mutex> lock(s.mutex);
++		s.quit = true;
++		s.NotifyAll();
++	}
++	m_iopWorker.join();
++	s.active = false;
++}
 diff --git a/Source/iop/Iop_SubSystem.h b/Source/iop/Iop_SubSystem.h
 --- a/Source/iop/Iop_SubSystem.h
 +++ b/Source/iop/Iop_SubSystem.h

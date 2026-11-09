@@ -15,7 +15,13 @@ diff --git a/Source/MIPS.h b/Source/MIPS.h
 diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
 --- a/Source/ee/Ee_SubSystem.cpp
 +++ b/Source/ee/Ee_SubSystem.cpp
-@@ -467,6 +467,8 @@
+@@ -1,4 +1,5 @@
+ #include "Ee_SubSystem.h"
++#include "../ParallelIop.h"
+ #include "EeExecutor.h"
+ #include "VuExecutor.h"
+ #include "AppConfig.h"
+@@ -467,6 +468,8 @@
  	//and packets are often written through it). Without this every access
  	//takes the handler path (address translation + memory map lookup).
  	m_EE.MapPages(0xA0000000, PS2::EE_RAM_SIZE, m_ram);
@@ -24,6 +30,15 @@ diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
  }
  
  //Registers games poll while waiting for something else to happen (vblank,
+@@ -701,7 +704,7 @@
+ 	else if(nAddress == 0x1000F180)
+ 	{
+ 		//stdout data
+-		m_iopBios.GetIoman()->Write(Iop::CIoman::FID_STDOUT, 1, &nData);
++		{ ParallelIop::CCrossing crossing; m_iopBios.GetIoman()->Write(Iop::CIoman::FID_STDOUT, 1, &nData); }
+ 	}
+ 	else if(nAddress >= 0x1000F520 && nAddress <= 0x1000F59C)
+ 	{
 diff --git a/Source/iop/Iop_SubSystem.cpp b/Source/iop/Iop_SubSystem.cpp
 --- a/Source/iop/Iop_SubSystem.cpp
 +++ b/Source/iop/Iop_SubSystem.cpp

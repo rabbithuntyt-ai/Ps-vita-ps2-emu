@@ -138,7 +138,39 @@ diff --git a/Source/ee/PS2OS.h b/Source/ee/PS2OS.h
 diff --git a/Source/ee/PS2OS.cpp b/Source/ee/PS2OS.cpp
 --- a/Source/ee/PS2OS.cpp
 +++ b/Source/ee/PS2OS.cpp
-@@ -1054,9 +1054,32 @@
+@@ -22,6 +22,7 @@
+ #include "INTC.h"
+ #include "Timer.h"
+ #include "SIF.h"
++#include "../ParallelIop.h"
+ #include "EEAssembler.h"
+ #include "EeExecutor.h"
+ #include "AppConfig.h"
+@@ -306,6 +307,7 @@
+ 
+ void CPS2OS::BootFromVirtualPath(const char* executablePath, const ArgumentList& arguments)
+ {
++	ParallelIop::CCrossing crossing; //the IOP's I/O manager
+ 	auto ioman = m_iopBios.GetIoman();
+ 
+ 	uint32 handle = ioman->Open(Iop::Ioman::CDevice::OPEN_FLAG_RDONLY, executablePath);
+@@ -329,6 +331,7 @@
+ void CPS2OS::BootFromCDROM()
+ {
+ 	std::string executablePath;
++	ParallelIop::CCrossing crossing; //the IOP's I/O manager
+ 	auto ioman = m_iopBios.GetIoman();
+ 
+ 	{
+@@ -524,6 +527,7 @@
+ 
+ uint32 CPS2OS::LoadExecutable(const char* path, const char* section)
+ {
++	ParallelIop::CCrossing crossing; //the IOP's I/O manager
+ 	auto ioman = m_iopBios.GetIoman();
+ 
+ 	uint32 handle = ioman->Open(Iop::Ioman::CDevice::OPEN_FLAG_RDONLY, path);
+@@ -1054,9 +1058,32 @@
  	}
  }
  
@@ -171,7 +203,7 @@ diff --git a/Source/ee/PS2OS.cpp b/Source/ee/PS2OS.cpp
  
  	//Save the context of the current thread
  	{
-@@ -1092,6 +1115,7 @@
+@@ -1092,6 +1119,7 @@
  
  void CPS2OS::ThreadSaveContext(THREAD* thread, bool interrupt)
  {
@@ -179,7 +211,7 @@ diff --git a/Source/ee/PS2OS.cpp b/Source/ee/PS2OS.cpp
  	if(interrupt)
  	{
  		thread->contextPtr = BIOS_ADDRESS_INTERRUPT_THREAD_CONTEXT;
-@@ -1133,6 +1157,7 @@
+@@ -1133,6 +1161,7 @@
  
  void CPS2OS::ThreadLoadContext(THREAD* thread, bool interrupt)
  {
@@ -187,6 +219,24 @@ diff --git a/Source/ee/PS2OS.cpp b/Source/ee/PS2OS.cpp
  	assert(thread->contextPtr != 0);
  	assert(!interrupt || (thread->contextPtr == BIOS_ADDRESS_INTERRUPT_THREAD_CONTEXT));
  
+@@ -3121,7 +3150,7 @@
+ 					assert(sendInfo->size >= 0x0C);
+ 					if(sendInfo->size >= 0x0C)
+ 					{
+-						m_iopBios.GetIoman()->Write(Iop::CIoman::FID_STDOUT, sendInfo->size - 0xC, sendInfo->data);
++						{ ParallelIop::CCrossing crossing; m_iopBios.GetIoman()->Write(Iop::CIoman::FID_STDOUT, sendInfo->size - 0xC, sendInfo->data); }
+ 					}
+ 					buffer->status0 = 0;
+ 				}
+@@ -3156,7 +3185,7 @@
+ 		{
+ 			uint32 stringAddr = *reinterpret_cast<uint32*>(GetStructPtr(param));
+ 			uint8* string = &m_ram[stringAddr];
+-			m_iopBios.GetIoman()->Write(1, static_cast<uint32>(strlen(reinterpret_cast<char*>(string))), string);
++			{ ParallelIop::CCrossing crossing; m_iopBios.GetIoman()->Write(1, static_cast<uint32>(strlen(reinterpret_cast<char*>(string))), string); }
+ 		}
+ 		break;
+ 	default:
 diff --git a/Source/iop/Iop_SubSystem.h b/Source/iop/Iop_SubSystem.h
 --- a/Source/iop/Iop_SubSystem.h
 +++ b/Source/iop/Iop_SubSystem.h

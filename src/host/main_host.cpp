@@ -222,6 +222,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-cheap-exits")) CEmuSession::SetCheapExits(false);
 		else if(!std::strcmp(argv[i], "--no-pinned")) CEmuSession::SetPinnedFields(false);
 		else if(!std::strcmp(argv[i], "--no-fast-ram")) CEmuSession::SetFastRam(false);
+		else if(!std::strcmp(argv[i], "--iop-thread")) CPS2VM::g_parallelIop = true; //the IOP on its own thread
 		else if(!std::strcmp(argv[i], "--no-stay-in-slice")) Iop::CSubSystem::g_stayInSlice = false;
 		else if(!std::strcmp(argv[i], "--no-ee-stay-in-slice")) Ee::CSubSystem::g_stayInSlice = false;
 		else if(!std::strcmp(argv[i], "--regions")) CEmuSession::SetRegions(true);

@@ -53,6 +53,7 @@
 #include "EmuProfile.h"
 #include "iop/Iop_SubSystem.h"
 #include "MpegHle.h"
+#include "ParallelIop.h"
 #include "MpegShadow.h"
 #include "Ps2Const.h"
 #include "ee/Ee_SubSystem.h"
@@ -253,6 +254,9 @@ namespace
 		bool pinnedFields = true; //cycle quota and page table pointer in registers across linked blocks
 		bool fastRam = true; //EE and IOP loads and stores in RAM without the page lookup
 		bool iopStayInSlice = true; //IOP kernel calls handled without leaving the time slice
+		bool iopThread = false; //the IOP on its own thread, beside the EE (ParallelIop.h)
+		uint32_t iopCore = 1;   //its core
+		uint32_t iopPriority = 100; //above the UI/GPU thread (default priority) on its core
 		bool eeStayInSlice = true; //EE kernel calls handled without leaving the time slice
 		bool threadedSpu = true; //SPU2 audio mixing on the second core
 		bool jitCache = true;    //keep compiled code between runs (ux0:data/VitaPS2/jitcache)
@@ -295,6 +299,9 @@ namespace
 		else if(key == "fast_ram") settings.fastRam = value != 0;
 		else if(key == "spu_irq_ticks") Iop::CSubSystem::g_spuIrqCheckDelay = std::max(100, static_cast<int>(value)); //1000 by default
 		else if(key == "iop_stay_in_slice") settings.iopStayInSlice = value != 0;
+		else if(key == "iop_thread") settings.iopThread = value != 0;
+		else if(key == "iop_core") settings.iopCore = value;
+		else if(key == "iop_priority") settings.iopPriority = value;
 		else if(key == "ee_stay_in_slice") settings.eeStayInSlice = value != 0;
 		else if(key == "threaded_spu") settings.threadedSpu = value != 0;
 		else if(key == "jit_cache") settings.jitCache = value != 0;
@@ -664,7 +671,7 @@ namespace
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",ps2_%s", EmuProfile::GetSectionName(i));
 				std::fprintf(perfFile, ",spu_full_waits,spu_read_waits,ipu_idec,ipu_bdec,ipu_out_kb,ipu_stalls,audio_underruns,audio_tempo");
 				std::fprintf(perfFile, ",jit_blocks,jit_writes,jit_write_ms,jit_alloc_ms,jit_free_ranges,jit_translate_ms,jit_finish_ms,jit_install_ms,jit_guest_instr,jit_code_kb,jit_opt_ms,jit_alloc_regs_ms,jit_codegen_ms,jit_statements");
-				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up\n");
+				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop\n");
 			}
 		}
 		const uint64_t runStart = sceKernelGetProcessTimeWide();
@@ -703,6 +710,18 @@ namespace
 		CEmuSession::SetPinnedFields(settings.pinnedFields);
 		CEmuSession::SetFastRam(settings.fastRam);
 		Iop::CSubSystem::g_stayInSlice = settings.iopStayInSlice;
+		CPS2VM::g_parallelIop = settings.iopThread;
+		{
+			// Above the GPU thread on core 1 (it is on the EE's critical path: the EE
+			// waits for it at vblanks and SIF crossings), below the SPU2 mixer on core 2.
+			uint32_t iopCoreMask = 0x10000u << std::min<uint32_t>(settings.iopCore, 2);
+			int iopPriority = static_cast<int>(settings.iopPriority);
+			CPS2VM::g_iopThreadInit = [iopCoreMask, iopPriority]() {
+				sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), iopCoreMask);
+				sceKernelChangeThreadPriority(sceKernelGetThreadId(), iopPriority);
+				ThreadProfiler::RegisterCurrentThread("PS2 IOP");
+			};
+		}
 		Ee::CSubSystem::g_stayInSlice = settings.eeStayInSlice;
 		CEmuSession::SetRegions(settings.jitRegions);
 		CEmuSession::SetCheapExits(settings.cheapExits);
@@ -1334,6 +1353,12 @@ namespace
 							static uint32 lastPictureUploads = 0;
 							std::fprintf(perfFile, ",%u", CGSH_Hardware::g_pictureUploadCount - lastPictureUploads);
 							lastPictureUploads = CGSH_Hardware::g_pictureUploadCount;
+							//SIF crossings with the IOP on its own thread (iop_thread)
+							static uint32 lastEeCrossings = 0, lastIopCrossings = 0;
+							uint32 eeCrossings = ParallelIop::g_state.eeCrossings.load(), iopCrossings = ParallelIop::g_state.iopCrossings.load();
+							std::fprintf(perfFile, ",%u,%u", eeCrossings - lastEeCrossings, iopCrossings - lastIopCrossings);
+							lastEeCrossings = eeCrossings;
+							lastIopCrossings = iopCrossings;
 						}
 						std::fprintf(perfFile, "\n");
 						std::fflush(perfFile);

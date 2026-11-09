@@ -1,0 +1,698 @@
+diff --git a/Source/PS2VM.h b/Source/PS2VM.h
+--- a/Source/PS2VM.h
++++ b/Source/PS2VM.h
+@@ -179,6 +179,25 @@
+ 	void UpdateIop();
+ 	void UpdateSpu();
+ 
++	//The IOP on its own thread (g_parallelIop, ParallelIop.h)
++	void IopWorkerProc();
++	void GrantIop(int ticks);
++	void DrainIop();
++	void StopIopWorker();
++	std::thread m_iopWorker;
++	enum
++	{
++		IOP_BATCH_SLICES = 4,    //credit (in IOP slices) that wakes the parked IOP thread
++		IOP_MAX_LAG_SLICES = 16, //credit at which the EE thread waits for the IOP
++	};
++
++public:
++	//Set before the VM starts (Vita: iop_thread). g_iopThreadInit runs first on that thread.
++	static inline bool g_parallelIop = false;
++	static inline std::function<void()> g_iopThreadInit;
++
++private:
++
+ 	void SetIopOpticalMedia(COpticalMedia*);
+ 
+ 	void RegisterModulesInPadHandler();
+diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
+--- a/Source/PS2VM.cpp
++++ b/Source/PS2VM.cpp
+@@ -7,6 +7,7 @@
+ #include "make_unique.h"
+ #include "string_format.h"
+ #include "PS2VM.h"
++#include "ParallelIop.h"
+ #include "EmuProfile.h"
+ #ifdef __vita__
+ extern "C" int vitaps2_jit_should_flush();
+@@ -1092,11 +1093,25 @@
+ #endif
+ 	static_cast<CEeExecutor*>(m_ee->m_EE.m_executor.get())->AddExceptionHandler();
+ 	m_frameLimiter.BeginFrame();
++	if(g_parallelIop)
++	{
++		auto& state = ParallelIop::g_state;
++		state.quit = false;
++		state.credit = 0;
++		state.iopParked = true;
++		state.active = true;
++		m_iopWorker = std::thread([this]() { IopWorkerProc(); });
++	}
+ 	while(1)
+ 	{
+-		while(m_mailBox.IsPending())
++		ParallelIop::EeParkPoint();
++		if(m_mailBox.IsPending())
+ 		{
+-			m_mailBox.ReceiveCall();
++			DrainIop();
++			while(m_mailBox.IsPending())
++			{
++				m_mailBox.ReceiveCall();
++			}
+ 		}
+ 		if(m_nEnd) break;
+ 		if(m_nStatus == PAUSED)
+@@ -1134,6 +1149,8 @@
+ 				//Check vblank stuff
+ 				if(m_vblankTicks <= 0)
+ 				{
++					//The IOP catches up first: it is notified and the pad writes SIO2
++					DrainIop();
+ 					m_inVblank = !m_inVblank;
+ 					if(m_inVblank)
+ 					{
+@@ -1181,10 +1198,17 @@
+ 				}
+ 
+ 				m_eeExecutionTicks += m_eeTickStep;
+-				m_iopExecutionTicks += m_iopTickStep;
+-
+-				UpdateEe();
+-				UpdateIop();
++				if(ParallelIop::g_state.active.load(std::memory_order_relaxed))
++				{
++					GrantIop(m_iopTickStep);
++					UpdateEe();
++				}
++				else
++				{
++					m_iopExecutionTicks += m_iopTickStep;
++					UpdateEe();
++					UpdateIop();
++				}
+ 			}
+ #ifdef DEBUGGER_INCLUDED
+ 			if(
+@@ -1204,8 +1228,95 @@
+ #endif
+ 		}
+ 	}
++	StopIopWorker();
+ 	static_cast<CEeExecutor*>(m_ee->m_EE.m_executor.get())->RemoveExceptionHandler();
+ #ifdef __ANDROID__
+ 	Framework::CJavaVM::DetachCurrentThread();
+ #endif
+ }
++
++void CPS2VM::IopWorkerProc()
++{
++	ParallelIop::t_iopThread = true;
++	EmuProfile::t_section = &EmuProfile::g_iopSection;
++	if(g_iopThreadInit) g_iopThreadInit();
++	auto& s = ParallelIop::g_state;
++	s.workerStage = 1;
++	std::unique_lock<std::mutex> lock(s.mutex);
++	while(true)
++	{
++		auto ready = [&]() {
++			if(s.quit) return true;
++			if(s.pauseIop.load()) return false;
++			int64 need = s.draining ? 1 : static_cast<int64>(IOP_BATCH_SLICES) * std::max(m_iopTickStep, 1);
++			return s.credit.load() >= need;
++		};
++		if(!ready())
++		{
++			s.iopParked = true;
++			s.NotifyAll();
++			s.workerStage = 2;
++			ParallelIop::WaitLogged(lock, "worker", ready, false);
++		}
++		s.workerStage = 3;
++		s.workerWakes++;
++		if(s.quit) break;
++		s.iopParked = false;
++		lock.unlock();
++		while(!s.pauseIop.load(std::memory_order_acquire))
++		{
++			int64 credit = s.credit.load(std::memory_order_acquire);
++			if(credit <= 0) break;
++			int step = static_cast<int>(std::min<int64>(credit, std::max(m_iopTickStep, 1)));
++			m_iopExecutionTicks += step;
++			s.workerStage = 4;
++			UpdateIop();
++			s.workerStage = 5;
++			s.credit.fetch_sub(step, std::memory_order_acq_rel);
++		}
++		lock.lock();
++	}
++	s.iopParked = true;
++	s.NotifyAll();
++}
++
++void CPS2VM::GrantIop(int ticks)
++{
++	auto& s = ParallelIop::g_state;
++	int64 credit = s.credit.fetch_add(ticks, std::memory_order_acq_rel) + ticks;
++	int64 step = std::max(m_iopTickStep, 1);
++	if((credit >= IOP_BATCH_SLICES * step) && s.iopParked.load(std::memory_order_acquire))
++	{
++		std::lock_guard<std::mutex> lock(s.mutex);
++		s.NotifyAll();
++	}
++	if(credit > IOP_MAX_LAG_SLICES * step) DrainIop();
++}
++
++void CPS2VM::DrainIop()
++{
++	auto& s = ParallelIop::g_state;
++	if(!s.active.load(std::memory_order_acquire)) return;
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_IOP_WAIT);
++	std::unique_lock<std::mutex> lock(s.mutex);
++	s.draining = true;
++	s.eeParked = true;
++	s.NotifyAll();
++	ParallelIop::WaitLogged(lock, "DrainIop", [&]() { return s.iopParked.load() && (s.credit.load() <= 0) && !s.pauseEe.load(); });
++	s.draining = false;
++	s.eeParked = false;
++}
++
++void CPS2VM::StopIopWorker()
++{
++	auto& s = ParallelIop::g_state;
++	if(!m_iopWorker.joinable()) return;
++	DrainIop();
++	{
++		std::lock_guard<std::mutex> lock(s.mutex);
++		s.quit = true;
++		s.NotifyAll();
++	}
++	m_iopWorker.join();
++	s.active = false;
++}
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -36,16 +36,20 @@
+ 		SECTION_IOP_TICKS_COUNTERS, //of which: root counters
+ 		SECTION_IOP_TICKS_BIOS, //of which: BIOS and HLE modules (SIF, CDVD, memory card)
+ 		SECTION_IOP_TICKS_DMA, //of which: SPU DMA resume
++		SECTION_IOP_WAIT, //waiting for the IOP thread (ParallelIop: drains, crossings)
+ 		SECTION_COUNT
+ 	};
+ 
+ 	inline const char* GetSectionName(unsigned int section)
+ 	{
+-		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle", "SPUsync", "SPUread", "VIFdirect", "VIFunpack", "EEio", "EEkernel", "EEticks", "IOPio", "IOPkernel", "IOPticks", "IOPcounters", "IOPbios", "IOPdma"};
++		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle", "SPUsync", "SPUread", "VIFdirect", "VIFunpack", "EEio", "EEkernel", "EEticks", "IOPio", "IOPkernel", "IOPticks", "IOPcounters", "IOPbios", "IOPdma", "IOPwait"};
+ 		return (section < SECTION_COUNT) ? names[section] : "?";
+ 	}
+ 
+ 	inline std::atomic<uint8> g_section{SECTION_OTHER};
++	//The IOP thread's section (ParallelIop), not sampled yet: each thread marks its own
++	inline std::atomic<uint8> g_iopSection{SECTION_OTHER};
++	inline thread_local std::atomic<uint8>* t_section = &g_section;
+ 	// Time the emulation thread sleeps, in microseconds.
+ 	inline std::atomic<uint64_t> g_discReadUs{0};
+ 	inline std::atomic<uint64_t> g_discReads{0};
+@@ -124,18 +128,20 @@
+ 	{
+ 	public:
+ 		explicit CScope(SECTION section)
+-		    : m_previous(g_section.load(std::memory_order_relaxed))
++		    : m_target(*t_section)
++		    , m_previous(m_target.load(std::memory_order_relaxed))
+ 		{
+-			g_section.store(section, std::memory_order_relaxed);
++			m_target.store(section, std::memory_order_relaxed);
+ 		}
+ 		~CScope()
+ 		{
+-			g_section.store(m_previous, std::memory_order_relaxed);
++			m_target.store(m_previous, std::memory_order_relaxed);
+ 		}
+ 		CScope(const CScope&) = delete;
+ 		CScope& operator=(const CScope&) = delete;
+ 
+ 	private:
++		std::atomic<uint8>& m_target;
+ 		uint8 m_previous;
+ 	};
+ }
+diff --git a/Source/ee/SIF.h b/Source/ee/SIF.h
+--- a/Source/ee/SIF.h
++++ b/Source/ee/SIF.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <atomic>
+ #include <map>
+ #include <vector>
+ #include "../SifDefs.h"
+@@ -109,6 +110,10 @@
+ 
+ 	PacketQueue m_packetQueue;
+ 	bool m_packetProcessed;
++	//Work for CountTicks (packets queued, binds waiting), readable without the
++	//other CPU parked (ParallelIop)
++	std::atomic<uint32> m_queuedPackets{0};
++	std::atomic<uint32> m_pendingBinds{0};
+ 
+ 	CallReplyMap m_callReplies;
+ 	BindReplyMap m_bindReplies;
+diff --git a/Source/ee/SIF.cpp b/Source/ee/SIF.cpp
+--- a/Source/ee/SIF.cpp
++++ b/Source/ee/SIF.cpp
+@@ -7,6 +7,7 @@
+ #include "../states/MemoryStateFile.h"
+ #include "../iop/IopBios.h"
+ #include "SIF.h"
++#include "../ParallelIop.h"
+ #include "lexical_cast_ex.h"
+ #include "string_format.h"
+ 
+@@ -82,22 +83,26 @@
+ 	m_cmdBufferSize = 0;
+ 
+ 	m_packetQueue.clear();
++	m_queuedPackets = 0;
+ 	m_packetProcessed = true;
+ 
+ 	m_callReplies.clear();
+ 	m_bindReplies.clear();
++	m_pendingBinds = 0;
+ 
+ 	DeleteModules();
+ }
+ 
+ void CSIF::SetDmaBuffer(uint32 bufferAddress, uint32 size)
+ {
++	ParallelIop::CCrossing crossing;
+ 	m_dmaBufferAddress = bufferAddress;
+ 	m_dmaBufferSize = size;
+ }
+ 
+ void CSIF::SetCmdBuffer(uint32 bufferAddress, uint32 size)
+ {
++	ParallelIop::CCrossing crossing;
+ 	m_cmdBufferAddress = bufferAddress;
+ 	m_cmdBufferSize = size;
+ 	m_nSUBADDR = bufferAddress;
+@@ -105,6 +110,7 @@
+ 
+ void CSIF::RegisterModule(uint32 moduleId, CSifModule* module)
+ {
++	ParallelIop::CCrossing crossing;
+ 	m_modules[moduleId] = module;
+ 
+ 	auto replyIterator(m_bindReplies.find(moduleId));
+@@ -113,6 +119,7 @@
+ 		const auto& requestInfo(replyIterator->second);
+ 		SendPacket(&requestInfo.reply, sizeof(SIFRPCREQUESTEND));
+ 		m_bindReplies.erase(replyIterator);
++		m_pendingBinds = static_cast<uint32>(m_bindReplies.size());
+ 	}
+ }
+ 
+@@ -128,6 +135,7 @@
+ 			requestInfo.reply.serverDataAddr = 0;
+ 			SendPacket(&requestInfo.reply, sizeof(SIFRPCREQUESTEND));
+ 			bindReplyIterator = m_bindReplies.erase(bindReplyIterator);
++			m_pendingBinds = static_cast<uint32>(m_bindReplies.size());
+ 		}
+ 		else
+ 		{
+@@ -139,16 +147,19 @@
+ 
+ bool CSIF::IsModuleRegistered(uint32 moduleId) const
+ {
++	ParallelIop::CCrossing crossing;
+ 	return m_modules.find(moduleId) != std::end(m_modules);
+ }
+ 
+ void CSIF::UnregisterModule(uint32 moduleId)
+ {
++	ParallelIop::CCrossing crossing;
+ 	m_modules.erase(moduleId);
+ }
+ 
+ void CSIF::DeleteModules()
+ {
++	ParallelIop::CCrossing crossing;
+ 	m_modules.clear();
+ }
+ 
+@@ -160,6 +171,7 @@
+ uint32 CSIF::ReceiveDMA6(uint32 nSrcAddr, uint32 nSize, uint32 nDstAddr, bool isTagIncluded)
+ {
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_SIF);
++	ParallelIop::CCrossing crossing;
+ 	assert(!isTagIncluded);
+ 
+ 	//Humm, this is kinda odd, but it ors the address with 0x20000000
+@@ -251,6 +263,7 @@
+ 
+ void CSIF::SendPacketToAddress(const void* packet, uint32 size, uint32 dstAddr)
+ {
++	ParallelIop::CCrossing crossing;
+ 	m_packetQueue.insert(m_packetQueue.end(),
+ 	                     reinterpret_cast<const uint8*>(&size),
+ 	                     reinterpret_cast<const uint8*>(&size) + 4);
+@@ -260,10 +273,14 @@
+ 	m_packetQueue.insert(m_packetQueue.end(),
+ 	                     reinterpret_cast<const uint8*>(packet),
+ 	                     reinterpret_cast<const uint8*>(packet) + size);
++	m_queuedPackets++;
+ }
+ 
+ void CSIF::CountTicks(uint32 ticks)
+ {
++	//Every EE slice: crosses to the IOP's side only when there is work
++	if((m_pendingBinds == 0) && !(m_packetProcessed && (m_queuedPackets != 0))) return;
++	ParallelIop::CCrossing crossing;
+ 	CheckPendingBindRequests(ticks);
+ 
+ 	if(m_packetProcessed && !m_packetQueue.empty())
+@@ -273,6 +290,7 @@
+ 		uint32 dstAddr = *reinterpret_cast<uint32*>(&m_packetQueue[4]);
+ 		SendDMA(&m_packetQueue[8], dstAddr, size);
+ 		m_packetQueue.erase(m_packetQueue.begin(), m_packetQueue.begin() + 8 + size);
++		m_queuedPackets--;
+ 		m_packetProcessed = false;
+ 	}
+ }
+@@ -310,6 +328,15 @@
+ 
+ 	m_callReplies = LoadCallReplies(archive);
+ 	m_bindReplies = LoadBindReplies(archive);
++	m_pendingBinds = static_cast<uint32>(m_bindReplies.size());
++	{
++		uint32 packets = 0;
++		for(size_t position = 0; position + 8 <= m_packetQueue.size(); packets++)
++		{
++			position += 8 + *reinterpret_cast<const uint32*>(&m_packetQueue[position]);
++		}
++		m_queuedPackets = packets;
++	}
+ }
+ 
+ void CSIF::SaveState(Framework::CZipArchiveWriter& archive)
+@@ -565,6 +592,7 @@
+ 		requestInfo.reply = rend;
+ 		requestInfo.timeout = SIF_BIND_TIMEOUT_TICKS;
+ 		m_bindReplies[bind->serverId] = requestInfo;
++		m_pendingBinds = static_cast<uint32>(m_bindReplies.size());
+ 	}
+ }
+ 
+@@ -657,6 +685,7 @@
+ 
+ void CSIF::SendCallReply(uint32 serverId, const void* returnData)
+ {
++	ParallelIop::CCrossing crossing;
+ 	CLog::GetInstance().Print(LOG_NAME, "Processing call reply from serverId: 0x%08X\r\n", serverId);
+ 
+ 	auto replyIterator(m_callReplies.find(serverId));
+diff --git a/Source/ee/PS2OS.cpp b/Source/ee/PS2OS.cpp
+--- a/Source/ee/PS2OS.cpp
++++ b/Source/ee/PS2OS.cpp
+@@ -22,6 +22,7 @@
+ #include "INTC.h"
+ #include "Timer.h"
+ #include "SIF.h"
++#include "../ParallelIop.h"
+ #include "EEAssembler.h"
+ #include "EeExecutor.h"
+ #include "AppConfig.h"
+@@ -306,6 +307,7 @@
+ 
+ void CPS2OS::BootFromVirtualPath(const char* executablePath, const ArgumentList& arguments)
+ {
++	ParallelIop::CCrossing crossing; //the IOP's I/O manager
+ 	auto ioman = m_iopBios.GetIoman();
+ 
+ 	uint32 handle = ioman->Open(Iop::Ioman::CDevice::OPEN_FLAG_RDONLY, executablePath);
+@@ -329,6 +331,7 @@
+ void CPS2OS::BootFromCDROM()
+ {
+ 	std::string executablePath;
++	ParallelIop::CCrossing crossing; //the IOP's I/O manager
+ 	auto ioman = m_iopBios.GetIoman();
+ 
+ 	{
+@@ -524,6 +527,7 @@
+ 
+ uint32 CPS2OS::LoadExecutable(const char* path, const char* section)
+ {
++	ParallelIop::CCrossing crossing; //the IOP's I/O manager
+ 	auto ioman = m_iopBios.GetIoman();
+ 
+ 	uint32 handle = ioman->Open(Iop::Ioman::CDevice::OPEN_FLAG_RDONLY, path);
+@@ -3146,7 +3150,7 @@
+ 					assert(sendInfo->size >= 0x0C);
+ 					if(sendInfo->size >= 0x0C)
+ 					{
+-						m_iopBios.GetIoman()->Write(Iop::CIoman::FID_STDOUT, sendInfo->size - 0xC, sendInfo->data);
++						{ ParallelIop::CCrossing crossing; m_iopBios.GetIoman()->Write(Iop::CIoman::FID_STDOUT, sendInfo->size - 0xC, sendInfo->data); }
+ 					}
+ 					buffer->status0 = 0;
+ 				}
+@@ -3181,7 +3185,7 @@
+ 		{
+ 			uint32 stringAddr = *reinterpret_cast<uint32*>(GetStructPtr(param));
+ 			uint8* string = &m_ram[stringAddr];
+-			m_iopBios.GetIoman()->Write(1, static_cast<uint32>(strlen(reinterpret_cast<char*>(string))), string);
++			{ ParallelIop::CCrossing crossing; m_iopBios.GetIoman()->Write(1, static_cast<uint32>(strlen(reinterpret_cast<char*>(string))), string); }
+ 		}
+ 		break;
+ 	default:
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -1,4 +1,5 @@
+ #include "Ee_SubSystem.h"
++#include "../ParallelIop.h"
+ #include "EeExecutor.h"
+ #include "VuExecutor.h"
+ #include "AppConfig.h"
+@@ -703,7 +704,7 @@
+ 	else if(nAddress == 0x1000F180)
+ 	{
+ 		//stdout data
+-		m_iopBios.GetIoman()->Write(Iop::CIoman::FID_STDOUT, 1, &nData);
++		{ ParallelIop::CCrossing crossing; m_iopBios.GetIoman()->Write(Iop::CIoman::FID_STDOUT, 1, &nData); }
+ 	}
+ 	else if(nAddress >= 0x1000F520 && nAddress <= 0x1000F59C)
+ 	{
+diff --git a/Source/ParallelIop.h b/Source/ParallelIop.h
+new file mode 100644
+--- /dev/null
++++ b/Source/ParallelIop.h
+@@ -0,0 +1,204 @@
++#pragma once
++
++#include <atomic>
++#include <condition_variable>
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <mutex>
++#include <thread>
++#ifdef __vita__
++#include <psp2/kernel/threadmgr.h>
++#endif
++#include "EmuProfile.h"
++
++//The IOP on its own thread (CPS2VM::g_parallelIop). The emulation thread runs the
++//EE and grants the IOP its ticks slice by slice (credit); the IOP thread runs them,
++//a few slices behind at most. They meet:
++//- at vblanks and VM calls (state saves...): the EE thread waits until the IOP has
++//  run all its credit (Drain);
++//- where one CPU's code touches the other's side (the SIF: DMA, registers, HLE
++//  modules): CCrossing makes the other CPU park first. The IOP parks between its
++//  slices, the EE at the top of the VM loop (between its slices).
++namespace ParallelIop
++{
++	struct STATE
++	{
++		std::mutex mutex;
++		//One per waiting thread (one shared by a timed and an untimed waiter lost
++		//wakeups on the Vita); every state change wakes both
++		std::condition_variable cvEe, cvIop;
++		void NotifyAll()
++		{
++#ifdef __vita__
++			//The IOP thread sleeps on a kernel semaphore (keeps the signal: no lost wakeups)
++			if(iopSema >= 0) sceKernelSignalSema(iopSema, 1);
++#endif
++			cvEe.notify_all();
++			cvIop.notify_all();
++		}
++#ifdef __vita__
++		SceUID iopSema = -1;
++#endif
++		std::atomic<bool> active{false};      //the IOP thread runs the IOP
++		std::atomic<int64_t> credit{0};       //IOP ticks granted, not run yet
++		std::atomic<bool> iopParked{true};    //IOP between slices (or waiting to cross)
++		std::atomic<bool> eeParked{false};    //EE thread between slices
++		std::atomic<bool> pauseIop{false};    //the EE thread crosses: IOP stays parked
++		std::atomic<bool> pauseEe{false};     //the IOP thread crosses: EE stays parked
++		bool draining = false;                //the EE thread waits for the credit to be run
++		bool quit = false;
++		std::atomic<uint32_t> eeCrossings{0}, iopCrossings{0};
++		std::atomic<int> workerStage{0}; //diagnostics: 1 started, 2 waiting, 3 woken, 4 in UpdateIop, 5 slice done
++		std::atomic<uint32_t> workerWakes{0};
++	};
++	inline STATE g_state;
++	inline thread_local bool t_iopThread = false;
++	inline thread_local int t_crossingDepth = 0;
++
++	//Diagnostics: a wait longer than 2 s writes the state (Vita: iopsync.txt)
++	inline void LogStall(const char* where)
++	{
++#ifdef __vita__
++		auto& s = g_state;
++		if(FILE* file = std::fopen("ux0:data/VitaPS2/iopsync.txt", "a"))
++		{
++			std::fprintf(file, "%s: credit %lld iopParked %d eeParked %d pauseIop %d pauseEe %d draining %d quit %d crossings ee %u iop %u stage %d wakes %u\n", where,
++			             static_cast<long long>(s.credit.load()), s.iopParked.load() ? 1 : 0, s.eeParked.load() ? 1 : 0, s.pauseIop.load() ? 1 : 0,
++			             s.pauseEe.load() ? 1 : 0, s.draining ? 1 : 0, s.quit ? 1 : 0, s.eeCrossings.load(), s.iopCrossings.load(), s.workerStage.load(), s.workerWakes.load());
++			std::fclose(file);
++		}
++#endif
++	}
++	//Polls: the condition is checked, the lock released for 50 us, again (condition
++	//variables lost wakeups on the Vita, even with timed waits). Logs every 2 s stuck.
++	template <typename Predicate>
++	inline void WaitLogged(std::unique_lock<std::mutex>& lock, const char* where, Predicate predicate, bool log = true)
++	{
++		auto start = std::chrono::steady_clock::now();
++		while(!predicate())
++		{
++			lock.unlock();
++			//The EE thread has its core to itself and is the critical path: it spins,
++			//without the lock (taking it in a tight loop kept the IOP thread from parking).
++			//The IOP thread shares its core: it sleeps.
++			if(!t_iopThread)
++			{
++				for(int spin = 0; (spin < 4096) && !predicate(); spin++)
++				{
++				}
++			}
++			else
++			{
++#ifdef __vita__
++				if(g_state.iopSema < 0) g_state.iopSema = sceKernelCreateSema("PS2 IOP wake", 0, 0, 1, nullptr);
++				SceUInt timeout = 1000;
++				sceKernelWaitSema(g_state.iopSema, 1, &timeout);
++#else
++				std::this_thread::sleep_for(std::chrono::microseconds(50));
++#endif
++			}
++			lock.lock();
++			if(log && (std::chrono::steady_clock::now() - start > std::chrono::seconds(2)))
++			{
++				LogStall(where);
++				start = std::chrono::steady_clock::now();
++			}
++		}
++	}
++
++	//EE thread: returns once the IOP is parked; it stays parked until ResumeIop
++	inline void PauseIop()
++	{
++		EmuProfile::CScope profileScope(EmuProfile::SECTION_IOP_WAIT);
++		auto& s = g_state;
++		std::unique_lock<std::mutex> lock(s.mutex);
++		s.pauseIop = true;
++		s.NotifyAll();
++		WaitLogged(lock, "PauseIop", [&]() { return s.iopParked.load(); });
++	}
++
++	inline void ResumeIop()
++	{
++		auto& s = g_state;
++		std::lock_guard<std::mutex> lock(s.mutex);
++		s.pauseIop = false;
++		s.NotifyAll();
++	}
++
++	//IOP thread: returns once the EE thread is parked; it stays parked until ResumeEe.
++	//Meanwhile the IOP counts as parked (an EE crossing may go first).
++	inline void PauseEe()
++	{
++		auto& s = g_state;
++		std::unique_lock<std::mutex> lock(s.mutex);
++		s.pauseEe = true;
++		s.iopParked = true;
++		s.NotifyAll();
++		WaitLogged(lock, "PauseEe", [&]() { return s.eeParked.load() && !s.pauseIop.load(); });
++		s.iopParked = false;
++	}
++
++	inline void ResumeEe()
++	{
++		auto& s = g_state;
++		std::lock_guard<std::mutex> lock(s.mutex);
++		s.pauseEe = false;
++		s.NotifyAll();
++	}
++
++	//EE thread, top of the VM loop: parks while the IOP crosses
++	inline void EeParkPoint()
++	{
++		auto& s = g_state;
++		if(!s.pauseEe.load(std::memory_order_acquire)) return;
++		std::unique_lock<std::mutex> lock(s.mutex);
++		s.eeParked = true;
++		s.NotifyAll();
++		WaitLogged(lock, "EeParkPoint", [&]() { return !s.pauseEe.load(); });
++		s.eeParked = false;
++	}
++
++	//Code touching the other CPU's side. Nested crossings on the same thread count once.
++	class CCrossing
++	{
++	public:
++		CCrossing()
++		{
++			if(!g_state.active.load(std::memory_order_acquire)) return;
++			if(t_crossingDepth++ != 0)
++			{
++				m_counted = true;
++				return;
++			}
++			m_counted = true;
++			m_paused = true;
++			if(t_iopThread)
++			{
++				g_state.iopCrossings.fetch_add(1, std::memory_order_relaxed);
++				PauseEe();
++			}
++			else
++			{
++				g_state.eeCrossings.fetch_add(1, std::memory_order_relaxed);
++				PauseIop();
++			}
++		}
++		~CCrossing()
++		{
++			if(!m_counted) return;
++			t_crossingDepth--;
++			if(!m_paused) return;
++			if(t_iopThread)
++				ResumeEe();
++			else
++				ResumeIop();
++		}
++		CCrossing(const CCrossing&) = delete;
++		CCrossing& operator=(const CCrossing&) = delete;
++
++	private:
++		bool m_counted = false;
++		bool m_paused = false;
++	};
++}

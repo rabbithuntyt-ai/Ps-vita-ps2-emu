@@ -389,6 +389,27 @@ Found on the way:
 
 **Now: 21.1 pictures/s, 44.0 emulated fps** (from 16.2 / 33.8 this morning).
 
+### The IOP on its own thread (2026-11-08, patch 0093, `iop_thread`, off by default)
+
+The IOP and what goes with it (its code, kernel calls, ticks, SPU2 waits) is about 7.6 of
+the emulation thread's 23 ms per frame, and cores 1 and 2 have room. `iop_thread=1` runs the
+IOP on its own thread (`ParallelIop.h`): the EE thread grants it each slice's ticks
+(credit), the IOP thread runs them a few slices behind; at vblanks and VM calls the EE thread
+waits until the IOP has caught up; where one CPU's code touches the other's side (the SIF:
+DMA, packets, HLE module calls, the IOP's I/O manager) the other CPU parks first
+(`CCrossing`, about 160 a second in RE4's intro).
+
+It runs correctly (boot, title, intro; Silent Hill 2 on the PC) but **is slower**: 17.0
+pictures/s against 20.3 without it, the IOP thread on core 1 above the GPU thread (core 2:
+15.0). The EE thread's own work per frame drops only by about 4 of the 7.6 ms moved off (two
+cores share caches and memory), and it waits for the IOP about 6 ms per frame (crossings,
+vblank drains). Found on the way, for anything threaded on the Vita: condition variables
+lost wakeups (a waiter sharing one with a timed waiter never woke; one each with timed
+waits still stalled for seconds), so the IOP thread sleeps on a kernel semaphore and the EE
+thread spins; and a 50 us sleep lasts far longer, so polling with sleeps starved the IOP.
+Left as a setting for later work: fewer crossings (the SIF packet queue), a cheaper
+drain.
+
 Silent Hill 2 checked on the same build (2026-11-08): its movie hangs with threaded VU1
 (HLE_MPEG.md open bug 1, there since the threaded VU1 change of 2026-11-06), and runs at
 2 fps without it (VU1 colour conversion on the emulation thread). Title screen 34 emulated
