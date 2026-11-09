@@ -380,8 +380,10 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 {
 	if(!IsColorPsm(psm) || (fbw == 0)) return nullptr;
 	minHeight = std::min<uint32>(minHeight, 1024);
-	// Rows up to the next target in use (drawn in this frame or the last
-	// two): a scissor reaching past it does not make the buffer that tall
+	// Rows up to the next target in use (drawn, sampled or displayed in the
+	// last 60 frames: on the Vita a movie field takes ~15 frames to convert
+	// while the other buffer is only shown): a scissor reaching past it does
+	// not make the buffer that tall
 	// (Silent Hill 2's movies draw 192 rows of 512x256 buffers at 0x200000 and
 	// 0x280000 with a 448 row scissor).
 	uint32 roomRows = ~0u;
@@ -391,7 +393,7 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 		uint32 rowBytes = std::max<uint32>(surface.pagesPerRow, 1) * 8192;
 		for(const auto& other : m_targets)
 		{
-			if((other->fbp <= fbp) || (m_frameNumber - other->lastUseFrame > 2)) continue;
+			if((other->fbp <= fbp) || (m_frameNumber - other->lastUseFrame > 60)) continue;
 			roomRows = std::min(roomRows, ((other->fbp - fbp) / rowBytes) << surface.phShift);
 		}
 		if((roomRows >= 256) && (roomRows < minHeight)) minHeight = roomRows;
@@ -1034,6 +1036,7 @@ void CGSH_Hardware::BindTexture()
 		uint32 sampledRows = offsetY + s.th;
 		if(target->drawnRows > 2) sampledRows = std::min(sampledRows, std::max(target->drawnRows - 2, offsetY + 1));
 		EnsureValidRows(*target, sampledRows);
+		target->lastUseFrame = m_frameNumber; //sampled: still in use (see FindTarget)
 
 		GLuint texture = target->colorTexture;
 		if(target.get() == m_currentTarget)
@@ -1986,6 +1989,7 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 			m_displayStats.fromTarget++;
 			uint32 x = baseX + layer.offsetX, y = baseY + layer.offsetY;
 			EnsureValidRows(*target, y + height);
+			target->lastUseFrame = m_frameNumber; //displayed: still in use
 			m_display.texture = target->colorTexture;
 			m_display.textureWidth = target->width;
 			m_display.textureHeight = target->height;
