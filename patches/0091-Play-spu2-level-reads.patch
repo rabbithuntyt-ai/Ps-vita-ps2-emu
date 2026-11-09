@@ -1,33 +1,42 @@
 diff --git a/Source/PS2VM.h b/Source/PS2VM.h
 --- a/Source/PS2VM.h
 +++ b/Source/PS2VM.h
-@@ -179,6 +179,25 @@
+@@ -20,6 +20,7 @@
+ #include "sound/SoundHandler.h"
+ #include "FrameLimiter.h"
+ #include "Profiler.h"
++#include "EmuProfile.h"
+ 
+ class CPS2VM : public CVirtualMachine
+ {
+@@ -179,6 +180,26 @@
  	void UpdateIop();
  	void UpdateSpu();
  
 +	//The IOP on its own thread (g_parallelIop, ParallelIop.h)
 +	void IopWorkerProc();
 +	void GrantIop(int ticks);
-+	void DrainIop();
++	void DrainIop(EmuProfile::SECTION = EmuProfile::SECTION_IOP_DRAIN);
 +	void StopIopWorker();
 +	std::thread m_iopWorker;
-+	enum
-+	{
-+		IOP_BATCH_SLICES = 4,    //credit (in IOP slices) that wakes the parked IOP thread
-+		IOP_MAX_LAG_SLICES = 16, //credit at which the EE thread waits for the IOP
-+	};
 +
 +public:
 +	//Set before the VM starts (Vita: iop_thread). g_iopThreadInit runs first on that thread.
 +	static inline bool g_parallelIop = false;
 +	static inline std::function<void()> g_iopThreadInit;
++	//Credit (in IOP slices) that wakes the parked IOP thread, and at which the EE thread waits for it
++	static inline int g_iopBatchSlices = 4;
++	static inline int g_iopMaxLagSlices = 16;
++	//Drains find the IOP thread asleep: the EE thread runs the credit left itself
++	static inline bool g_iopInlineDrain = true;
++	static inline std::atomic<uint32> g_iopInlineDrains{0};
 +
 +private:
 +
  	void SetIopOpticalMedia(COpticalMedia*);
  
  	void RegisterModulesInPadHandler();
-@@ -253,7 +272,7 @@
+@@ -253,7 +274,7 @@
  	bool m_spuStopWorker = false;
  	bool m_spuWorkerSleeping = false;
  	unsigned int m_spuIdleWaiters = 0;
@@ -122,7 +131,7 @@ diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
  			}
  #ifdef DEBUGGER_INCLUDED
  			if(
-@@ -1202,8 +1228,95 @@
+@@ -1202,8 +1228,124 @@
  #endif
  		}
  	}
@@ -145,17 +154,20 @@ diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
 +	{
 +		auto ready = [&]() {
 +			if(s.quit) return true;
-+			if(s.pauseIop.load()) return false;
-+			int64 need = s.draining ? 1 : static_cast<int64>(IOP_BATCH_SLICES) * std::max(m_iopTickStep, 1);
++			if(s.pauseIop.load() || s.eeRunsIop) return false;
++			int64 need = s.draining ? 1 : static_cast<int64>(g_iopBatchSlices) * std::max(m_iopTickStep, 1);
 +			return s.credit.load() >= need;
 +		};
 +		if(!ready())
 +		{
 +			s.iopParked = true;
++			s.iopIdle = true;
 +			s.NotifyAll();
 +			s.workerStage = 2;
++			EmuProfile::CScope parkedScope(EmuProfile::SECTION_IOP_PARK);
 +			ParallelIop::WaitLogged(lock, "worker", ready, false);
 +		}
++		s.iopIdle = false;
 +		s.workerStage = 3;
 +		s.workerWakes++;
 +		if(s.quit) break;
@@ -183,20 +195,46 @@ diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
 +	auto& s = ParallelIop::g_state;
 +	int64 credit = s.credit.fetch_add(ticks, std::memory_order_acq_rel) + ticks;
 +	int64 step = std::max(m_iopTickStep, 1);
-+	if((credit >= IOP_BATCH_SLICES * step) && s.iopParked.load(std::memory_order_acquire))
++	if((credit >= g_iopBatchSlices * step) && s.iopParked.load(std::memory_order_acquire))
 +	{
 +		std::lock_guard<std::mutex> lock(s.mutex);
 +		s.NotifyAll();
 +	}
-+	if(credit > IOP_MAX_LAG_SLICES * step) DrainIop();
++	if(credit > g_iopMaxLagSlices * step) DrainIop(EmuProfile::SECTION_IOP_LAG);
 +}
 +
-+void CPS2VM::DrainIop()
++void CPS2VM::DrainIop(EmuProfile::SECTION section)
 +{
 +	auto& s = ParallelIop::g_state;
 +	if(!s.active.load(std::memory_order_acquire)) return;
-+	EmuProfile::CScope profileScope(EmuProfile::SECTION_IOP_WAIT);
++	EmuProfile::CScope profileScope(section);
 +	std::unique_lock<std::mutex> lock(s.mutex);
++	if(g_iopInlineDrain && s.iopIdle.load() && !s.pauseEe.load())
++	{
++		//The IOP thread is asleep: waking it costs more than the work left. The EE
++		//thread runs the credit itself (the IOP thread stays out: eeRunsIop).
++		s.eeRunsIop = true;
++		lock.unlock();
++		{
++			EmuProfile::CScope iopScope(EmuProfile::SECTION_IOP);
++			ParallelIop::t_crossingDepth++; //one thread runs both CPUs: no crossing
++			int64 step = std::max(m_iopTickStep, 1);
++			while(true)
++			{
++				int64 credit = s.credit.load(std::memory_order_acquire);
++				if(credit <= 0) break;
++				int ticks = static_cast<int>(std::min<int64>(credit, step));
++				m_iopExecutionTicks += ticks;
++				UpdateIop();
++				s.credit.fetch_sub(ticks, std::memory_order_acq_rel);
++			}
++			ParallelIop::t_crossingDepth--;
++		}
++		g_iopInlineDrains++;
++		lock.lock();
++		s.eeRunsIop = false;
++		return;
++	}
 +	s.draining = true;
 +	s.eeParked = true;
 +	s.NotifyAll();

@@ -410,6 +410,21 @@ thread spins; and a 50 us sleep lasts far longer, so polling with sleeps starved
 Left as a setting for later work: fewer crossings (the SIF packet queue), a cheaper
 drain.
 
+Tuning (2026-11-09). New settings: `iop_core`, `iop_priority` (default 100), `spu_core`,
+`spu_priority`, `mpeg_copy_core`, `mpeg_copy_priority`, `iop_batch` (slices of credit
+that wake the IOP thread, default 4), `iop_lag` (credit at which the EE thread waits,
+default 16), `iop_inline_drain` (default on). The IOP thread's sections are sampled too
+(`iopt_*` columns in perf.csv). Best layout: the IOP thread on core 2 at priority 100, the
+SPU2 mixer on core 1 at 120, the movie copy thread on core 0, `iop_batch=8 iop_lag=32`:
+**20.1 pictures/s against 20.5 serial** (same build, back to back; core 1: 15–17; batch 4:
+18.9; batch 16: 19.6). With inline drain, a drain that finds the IOP thread asleep runs the
+credit left on the EE thread instead of waking it (about 30 a second); no measurable gain.
+Why it can't win yet: all three cores are full. Core 2 holds the decoder (62%), the IOP
+thread (31%) and the copy thread (7%). Every millisecond the IOP thread takes, the decoder
+loses: 62% decoder time against 71% serial, so fewer pictures. The EE thread still waits
+about 6 ms per frame (IOPlag 4.4, drain 1.5). The IOP thread only pays off once the decoder or
+the GPU thread frees a core's worth of time.
+
 Silent Hill 2 checked on the same build (2026-11-08): its movie hangs with threaded VU1
 (HLE_MPEG.md open bug 1, there since the threaded VU1 change of 2026-11-06), and runs at
 2 fps without it (VU1 colour conversion on the emulation thread). Title screen 34 emulated

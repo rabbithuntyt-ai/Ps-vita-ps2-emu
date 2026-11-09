@@ -257,6 +257,10 @@ namespace
 		bool iopThread = false; //the IOP on its own thread, beside the EE (ParallelIop.h)
 		uint32_t iopCore = 1;   //its core
 		uint32_t iopPriority = 100; //above the UI/GPU thread (default priority) on its core
+		uint32_t spuCore = 2;       //core of the SPU2 mixer
+		uint32_t spuPriority = 160; //its priority (above the decoder)
+		uint32_t mpegCopyCore = 2;  //core of the movie copy thread (movie_async_copy)
+		uint32_t mpegCopyPriority = 191; //its priority (the lowest)
 		bool eeStayInSlice = true; //EE kernel calls handled without leaving the time slice
 		bool threadedSpu = true; //SPU2 audio mixing on the second core
 		bool jitCache = true;    //keep compiled code between runs (ux0:data/VitaPS2/jitcache)
@@ -302,6 +306,13 @@ namespace
 		else if(key == "iop_thread") settings.iopThread = value != 0;
 		else if(key == "iop_core") settings.iopCore = value;
 		else if(key == "iop_priority") settings.iopPriority = value;
+		else if(key == "spu_core") settings.spuCore = value;
+		else if(key == "spu_priority") settings.spuPriority = value;
+		else if(key == "mpeg_copy_core") settings.mpegCopyCore = value;
+		else if(key == "mpeg_copy_priority") settings.mpegCopyPriority = value;
+		else if(key == "iop_batch") CPS2VM::g_iopBatchSlices = std::max(1, static_cast<int>(value));
+		else if(key == "iop_lag") CPS2VM::g_iopMaxLagSlices = std::max(2, static_cast<int>(value));
+		else if(key == "iop_inline_drain") CPS2VM::g_iopInlineDrain = value != 0;
 		else if(key == "ee_stay_in_slice") settings.eeStayInSlice = value != 0;
 		else if(key == "threaded_spu") settings.threadedSpu = value != 0;
 		else if(key == "jit_cache") settings.jitCache = value != 0;
@@ -671,7 +682,11 @@ namespace
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",ps2_%s", EmuProfile::GetSectionName(i));
 				std::fprintf(perfFile, ",spu_full_waits,spu_read_waits,ipu_idec,ipu_bdec,ipu_out_kb,ipu_stalls,audio_underruns,audio_tempo");
 				std::fprintf(perfFile, ",jit_blocks,jit_writes,jit_write_ms,jit_alloc_ms,jit_free_ranges,jit_translate_ms,jit_finish_ms,jit_install_ms,jit_guest_instr,jit_code_kb,jit_opt_ms,jit_alloc_regs_ms,jit_codegen_ms,jit_statements");
-				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop\n");
+				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop");
+				//The IOP thread's sections (iop_thread)
+				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",iopt_%s", EmuProfile::GetSectionName(i));
+				std::fprintf(perfFile, ",iop_inline_drains");
+				std::fprintf(perfFile, "\n");
 			}
 		}
 		const uint64_t runStart = sceKernelGetProcessTimeWide();
@@ -759,9 +774,11 @@ namespace
 		// mixer waited for a whole picture, and the emulation thread for the mixer
 		// (335 ms per second in Resident Evil 4's intro). Mixing is short, and nothing
 		// here is as urgent: it goes first. (Threads start at 191, the lowest.)
-		config.spuThreadInit = []() {
-			sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */);
-			sceKernelChangeThreadPriority(sceKernelGetThreadId(), 160);
+		uint32_t spuCoreMask = 0x10000u << std::min<uint32_t>(settings.spuCore, 2);
+		int spuPriority = static_cast<int>(settings.spuPriority);
+		config.spuThreadInit = [spuCoreMask, spuPriority]() {
+			sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), spuCoreMask);
+			sceKernelChangeThreadPriority(sceKernelGetThreadId(), spuPriority);
 		};
 		// The profiler samples every 1 ms and does almost nothing: above the decoder
 		// and the mixer, or it only samples while they sleep (a decoder at equal
@@ -822,8 +839,9 @@ namespace
 				mpegHle.Enable(session->GetVm()->m_ee->m_ram, "ux0:data/VitaPS2/mpeghle.txt", [mpegCoreMask]() {
 					sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mpegCoreMask);
 					ThreadProfiler::RegisterCurrentThread("MPEG decoder");
-				}, [mpegCoreMask]() {
-					sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mpegCoreMask);
+				}, [copyCoreMask = 0x10000u << std::min<uint32_t>(settings.mpegCopyCore, 2), copyPriority = static_cast<int>(settings.mpegCopyPriority)]() {
+					sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), copyCoreMask);
+					sceKernelChangeThreadPriority(sceKernelGetThreadId(), copyPriority);
 					ThreadProfiler::RegisterCurrentThread("MPEG copy");
 				});
 			}
@@ -1359,6 +1377,12 @@ namespace
 							std::fprintf(perfFile, ",%u,%u", eeCrossings - lastEeCrossings, iopCrossings - lastIopCrossings);
 							lastEeCrossings = eeCrossings;
 							lastIopCrossings = iopCrossings;
+							auto iopProfile = session->TakeProfile(true);
+							for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",%.3f", iopProfile.share[i]);
+							static uint32 lastInlineDrains = 0;
+							uint32 inlineDrains = CPS2VM::g_iopInlineDrains.load();
+							std::fprintf(perfFile, ",%u", inlineDrains - lastInlineDrains);
+							lastInlineDrains = inlineDrains;
 						}
 						std::fprintf(perfFile, "\n");
 						std::fflush(perfFile);

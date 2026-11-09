@@ -134,6 +134,7 @@ CEmuSession::CEmuSession(const CONFIG& config)
 	if(config.soundFactory) m_vm->CreateSoundHandler(config.soundFactory);
 
 	for(auto& count : m_profileCounts) count = 0;
+	for(auto& count : m_iopProfileCounts) count = 0;
 	m_profiler = std::thread([this, init = config.profilerThreadInit]() {
 		ThreadProfiler::RegisterCurrentThread("Profiler");
 		if(init) init();
@@ -364,6 +365,8 @@ void CEmuSession::ProfilerProc()
 		std::this_thread::sleep_for(std::chrono::microseconds(1000));
 		unsigned int section = EmuProfile::g_section.load(std::memory_order_relaxed);
 		if(section < EmuProfile::SECTION_COUNT) m_profileCounts[section]++;
+		unsigned int iopSection = EmuProfile::g_iopSection.load(std::memory_order_relaxed);
+		if(iopSection < EmuProfile::SECTION_COUNT) m_iopProfileCounts[iopSection]++;
 		unsigned int stage = Mpeg2Profile::g_stage.load(std::memory_order_relaxed);
 		if(stage < Mpeg2Profile::STAGE_COUNT) Mpeg2Profile::g_samples[stage].fetch_add(1, std::memory_order_relaxed);
 		// Racy reads of the PC: blocks store it when they exit, so it points
@@ -431,13 +434,13 @@ void CEmuSession::WriteHotspots(std::FILE* file, unsigned int count, const char*
 	}
 }
 
-CEmuSession::PROFILE CEmuSession::TakeProfile()
+CEmuSession::PROFILE CEmuSession::TakeProfile(bool iopThread)
 {
 	PROFILE profile;
 	uint32_t counts[EmuProfile::SECTION_COUNT];
 	for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++)
 	{
-		counts[i] = m_profileCounts[i].exchange(0);
+		counts[i] = (iopThread ? m_iopProfileCounts[i] : m_profileCounts[i]).exchange(0);
 		profile.samples += counts[i];
 	}
 	if(profile.samples != 0)

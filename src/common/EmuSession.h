@@ -138,7 +138,7 @@ public:
 		float share[EmuProfile::SECTION_COUNT] = {};
 		uint32_t samples = 0;
 	};
-	PROFILE TakeProfile();
+	PROFILE TakeProfile(bool iopThread = false);
 
 	// EE hotspots: while the emulation thread runs EE code the profiler also
 	// samples the EE PC (32 byte buckets). Writes the hottest buckets with
@@ -194,6 +194,7 @@ private:
 	std::thread m_profiler;
 	std::atomic<bool> m_stopProfiler{false};
 	std::atomic<uint32_t> m_profileCounts[EmuProfile::SECTION_COUNT];
+	std::atomic<uint32_t> m_iopProfileCounts[EmuProfile::SECTION_COUNT]; //the IOP thread (iop_thread)
 	static constexpr unsigned int EE_HOTSPOT_SLOTS = 4096;
 	std::atomic<uint32_t> m_eeHotPc[EE_HOTSPOT_SLOTS] = {};
 	std::atomic<uint32_t> m_eeHotCount[EE_HOTSPOT_SLOTS] = {};
