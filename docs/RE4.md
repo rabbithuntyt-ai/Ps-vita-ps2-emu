@@ -466,6 +466,24 @@ against 20.7 serial. Off by default (0). The IOP thread can only win where the E
 of its own while the IOP runs. RE4's intro has little of that, so faster EE and IOP code
 (tier 2) is the better route.
 
+### The SPU2 interrupt storm (2026-11-09, `spu_irq_edge`, off)
+
+IOPkernel (HLE BIOS calls and interrupts) is 3.3 ms per emulated frame, as much as the
+IOP's own code. Counting calls (`ee_hot_after=50`, iopcalls.txt; that file is stale on
+runs without it): about 15000 IOP interrupts a second, 5600 of them on line 9 (SPU2):
+one per IOP slice. RE4's sound driver never clears the SPU2's IRQ flag (no IRQINFO read,
+no IRQ bit cleared), and Play raises the line at every check while the flag is up. The
+IRQ address is hit about 157 times a second. Tried, both slower:
+- raise the line once when the flag goes up: IOPkernel 2.7 -> 1.75 ms, but the driver
+  polls the SPU2 and its own code grows (IOP 3.4 -> 4.8 ms, SPU2 reads 1.3 ms): 20.3
+  pictures/s against 20.7;
+- once per IRQ address hit (`spu_irq_edge=1`): line 9 366000 -> 5300 interrupts, but
+  its driver calls libsd function 6 four times as often (95000 -> 382000) and the
+  emulated frame rate drops (43.0 -> 40.7): 20.3 against 20.6.
+The driver seems to rely on the extra interrupts to move on (its thread wakes from
+them). Kept as a setting; a cheaper path for that interrupt (the BIOS stub at 0x200 is
+10.6% of IOP samples) is the way to save that time instead.
+
 ### Is a locked 30 reachable? The CPU budget (2026-11-08)
 
 The Vita gives an app three cores at 444 MHz (already set). At a real 30 pictures/s

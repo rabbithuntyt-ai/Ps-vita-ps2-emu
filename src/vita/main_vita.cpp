@@ -301,6 +301,7 @@ namespace
 		else if(key == "cheap_exits") settings.cheapExits = value != 0;
 		else if(key == "pinned_fields") settings.pinnedFields = value != 0;
 		else if(key == "fast_ram") settings.fastRam = value != 0;
+		else if(key == "spu_irq_edge") Iop::CSubSystem::g_spuIrqEdge = value != 0;
 		else if(key == "spu_irq_ticks") Iop::CSubSystem::g_spuIrqCheckDelay = std::max(100, static_cast<int>(value)); //1000 by default
 		else if(key == "iop_stay_in_slice") settings.iopStayInSlice = value != 0;
 		else if(key == "iop_thread") settings.iopThread = value != 0;

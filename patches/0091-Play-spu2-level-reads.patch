@@ -306,7 +306,21 @@ diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
 diff --git a/Source/iop/Iop_SubSystem.h b/Source/iop/Iop_SubSystem.h
 --- a/Source/iop/Iop_SubSystem.h
 +++ b/Source/iop/Iop_SubSystem.h
-@@ -63,6 +63,11 @@
+@@ -39,6 +39,13 @@
+ 		//IOP ticks between SPU2 IRQ line updates: the line is asserted again while the
+ 		//IRQ flag stays set (a driver that never clears it gets an interrupt each time)
+ 		static inline int g_spuIrqCheckDelay = 1000;
++		//SPU2 interrupt raised once per IRQ address hit (as on the hardware), not at every
++		//check while the flag stays up: RE4 never clears the flag, which raised an
++		//interrupt every IOP slice (about 5600 a second, for about 157 hits). Raising it
++		//only when the flag goes up (no later hits) starved its sound driver (it polled).
++		//Once per hit: line 9 366000 -> 5300 interrupts, but its driver then calls libsd
++		//4x as often (it loops on it) and the intro is slower (20.3 against 20.6). Off.
++		static inline bool g_spuIrqEdge = false;
+ 		static inline uint64 g_tickPartUs[5] = {};
+ 
+ 		void NotifyVBlankStart();
+@@ -63,6 +70,11 @@
  		//When set, runs a register read or DMA with the mixer paused, after all
  		//queued writes (mixing may lag a few blocks behind instead of a full sync).
  		std::function<void(const std::function<void()>&)> m_spuReadAccess;
@@ -318,6 +332,13 @@ diff --git a/Source/iop/Iop_SubSystem.h b/Source/iop/Iop_SubSystem.h
  
  		CMIPS m_cpu;
  		CMA_MIPSIV m_cpuArch;
+@@ -105,5 +117,6 @@
+ 
+ 		int m_dmaUpdateTicks = 0;
+ 		int m_spuIrqUpdateTicks = 0;
++		uint32 m_spuIrqHitsSeen = 0; //g_spuIrqEdge: IRQ address hits already raised
+ 	};
+ }
 diff --git a/Source/iop/Iop_SubSystem.cpp b/Source/iop/Iop_SubSystem.cpp
 --- a/Source/iop/Iop_SubSystem.cpp
 +++ b/Source/iop/Iop_SubSystem.cpp
@@ -339,7 +360,7 @@ diff --git a/Source/iop/Iop_SubSystem.cpp b/Source/iop/Iop_SubSystem.cpp
  		if(m_spuReadAccess)
  		{
  			uint32 result = 0;
-@@ -435,31 +446,24 @@
+@@ -435,40 +446,37 @@
  {
  	EmuProfile::CScope profileScope(EmuProfile::SECTION_IOP_TICKS);
  	static const int g_dmaUpdateDelay = 10000;
@@ -381,3 +402,17 @@ diff --git a/Source/iop/Iop_SubSystem.cpp b/Source/iop/Iop_SubSystem.cpp
  	m_spuIrqUpdateTicks += ticks;
  	if(m_spuIrqUpdateTicks >= g_spuIrqCheckDelay)
  	{
+ 		bool irqPending = false;
+ 		irqPending |= m_spuCore0.GetIrqPending();
+ 		irqPending |= m_spuCore1.GetIrqPending();
++		//Hits since the last check (the mixer sets the flag again at each one)
++		uint32 hits = CSpuBase::g_irqStats[0].load(std::memory_order_relaxed) + CSpuBase::g_irqStats[1].load(std::memory_order_relaxed);
++		bool newHit = (hits != m_spuIrqHitsSeen);
++		m_spuIrqHitsSeen = hits;
+ 		if(irqPending)
+ 		{
+-			m_intc.AssertLine(CIntc::LINE_SPU2);
++			if(!g_spuIrqEdge || newHit) m_intc.AssertLine(CIntc::LINE_SPU2);
+ 		}
+ 		else
+ 		{
