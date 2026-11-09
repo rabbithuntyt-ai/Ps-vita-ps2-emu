@@ -1,5 +1,6 @@
 #include "TextureCache.h"
 #include <algorithm>
+#include <cstring>
 #include "GsMemory.h"
 #include "xxhash.h"
 
@@ -25,6 +26,13 @@ void CTextureCache::MarkPagesWritten(uint32 firstPage, uint32 pageCount)
 void CTextureCache::MarkBytesWritten(uint32 start, uint32 size)
 {
 	if(size == 0) return;
+	ApplyPendingWrite();
+	if(!m_pictureSources.empty())
+	{
+		m_pendingWrite = true;
+		m_pendingStart = start;
+		m_pendingSize = size;
+	}
 	uint32 firstPage = start >> GS_SURFACE::PAGE_SHIFT;
 	uint32 lastPage = (start + size - 1) >> GS_SURFACE::PAGE_SHIFT;
 	MarkPagesWritten(firstPage, lastPage - firstPage + 1);
@@ -32,6 +40,8 @@ void CTextureCache::MarkBytesWritten(uint32 start, uint32 size)
 
 void CTextureCache::MarkAllWritten()
 {
+	m_pictureSources.clear();
+	m_pendingWrite = false;
 	MarkPagesWritten(0, PAGE_COUNT);
 }
 
@@ -103,9 +113,122 @@ uint64 CTextureCache::HashPages(const CTexture& texture) const
 	return (hash != 0) ? hash : 1;
 }
 
+void CTextureCache::ApplyPendingWrite()
+{
+	if(!m_pendingWrite) return;
+	m_pendingWrite = false;
+	uint32 start = m_pendingStart, end = m_pendingStart + m_pendingSize;
+	m_pictureSources.erase(std::remove_if(m_pictureSources.begin(), m_pictureSources.end(),
+	                                      [&](const PICTURE_SOURCE& source) { return (source.start < end) && (start < source.end); }),
+	                       m_pictureSources.end());
+}
+
+void CTextureCache::AddPictureSource(uint32 dbp, uint32 dbw, uint32 x, uint32 y, uint32 w, uint32 h, std::shared_ptr<const uint8> data)
+{
+	GS_SURFACE surface;
+	if(!data || (w == 0) || (h == 0) || !surface.Init(CGSHandler::PSMCT32, dbp, dbw)) return;
+	PICTURE_SOURCE added;
+	added.dbp = dbp;
+	added.dbw = dbw;
+	added.x = x;
+	added.y = y;
+	added.w = w;
+	added.h = h;
+	added.start = surface.RowBase(y);
+	added.end = surface.RowBase(y + h - 1) + (surface.pagesPerRow << GS_SURFACE::PAGE_SHIFT);
+	added.data = std::move(data);
+	// The transfer that wrote it (pending) overwrote only its own rectangle among the
+	// sources on the same buffer; others it may overlap go.
+	if(m_pendingWrite)
+	{
+		m_pendingWrite = false;
+		uint32 start = m_pendingStart, end = m_pendingStart + m_pendingSize;
+		m_pictureSources.erase(std::remove_if(m_pictureSources.begin(), m_pictureSources.end(),
+		                                      [&](const PICTURE_SOURCE& source) {
+			                                      if(!((source.start < end) && (start < source.end))) return false;
+			                                      if((source.dbp != dbp) || (source.dbw != dbw)) return true;
+			                                      return (source.x < x + w) && (x < source.x + source.w) && (source.y < y + h) && (y < source.y + source.h);
+		                                      }),
+		                       m_pictureSources.end());
+	}
+	// The same rectangle sent again (an unchanged transfer marks nothing written)
+	m_pictureSources.erase(std::remove_if(m_pictureSources.begin(), m_pictureSources.end(),
+	                                      [&](const PICTURE_SOURCE& source) {
+		                                      return (source.dbp == dbp) && (source.dbw == dbw) && (source.x == x) && (source.y == y) &&
+		                                             (source.w == w) && (source.h == h);
+	                                      }),
+	                       m_pictureSources.end());
+	if(m_pictureSources.size() >= MAX_PICTURE_SOURCES) m_pictureSources.erase(m_pictureSources.begin());
+	m_pictureSources.push_back(std::move(added));
+}
+
+void CTextureCache::FillFromPictures(CTexture& texture)
+{
+	ApplyPendingWrite();
+	const auto& key = texture.m_key;
+	// Spans of invalid tiles a source covers, per tile row; written row by row so that
+	// the texels are written in order (tile by tile, each 32 byte piece lands 2 KB from
+	// the previous one: as slow as de-swizzling).
+	struct SPAN
+	{
+		const uint32* texels;
+		uint32 sourceX, sourceY, sourceW;
+		uint32 tx0, tx1;
+	};
+	uint32 tilesH = texture.m_tileCount / texture.m_tilesW;
+	std::vector<std::vector<SPAN>> rows(tilesH);
+	for(const auto& source : m_pictureSources)
+	{
+		if((source.dbp != key.tbp) || (source.dbw != key.tbw)) continue;
+		// Whole 8x8 tiles inside both the source and the texture
+		uint32 tx0 = (source.x + 7) / 8, ty0 = (source.y + 7) / 8;
+		uint32 tx1 = std::min(source.x + source.w, key.tw) / 8, ty1 = std::min(std::min(source.y + source.h, key.th) / 8, tilesH);
+		auto texels = reinterpret_cast<const uint32*>(source.data.get());
+		for(uint32 ty = ty0; ty < ty1; ty++)
+		{
+			for(uint32 tx = tx0; tx < tx1;)
+			{
+				if(texture.m_tileValid[ty * texture.m_tilesW + tx].load(std::memory_order_relaxed))
+				{
+					tx++;
+					continue;
+				}
+				uint32 end = tx + 1;
+				while((end < tx1) && !texture.m_tileValid[ty * texture.m_tilesW + end].load(std::memory_order_relaxed)) end++;
+				rows[ty].push_back(SPAN{texels, source.x, source.y, source.w, tx, end});
+				tx = end;
+			}
+		}
+	}
+	for(uint32 ty = 0; ty < tilesH; ty++)
+	{
+		auto& spans = rows[ty];
+		if(spans.empty()) continue;
+		std::sort(spans.begin(), spans.end(), [](const SPAN& a, const SPAN& b) { return a.tx0 < b.tx0; });
+		for(uint32 r = 0; r < 8; r++)
+		{
+			uint32 v = ty * 8 + r;
+			uint32* row = texture.m_texels.data() + v * key.tw;
+			for(const auto& span : spans)
+			{
+				std::memcpy(row + span.tx0 * 8, span.texels + (v - span.sourceY) * span.sourceW + (span.tx0 * 8 - span.sourceX), (span.tx1 - span.tx0) * 8 * 4);
+			}
+		}
+		for(const auto& span : spans)
+		{
+			for(uint32 tx = span.tx0; tx < span.tx1; tx++)
+			{
+				texture.m_tileValid[ty * texture.m_tilesW + tx].store(1, std::memory_order_release);
+				m_decodedTiles++;
+			}
+		}
+	}
+}
+
 CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 {
 	m_useCounter++;
+	ApplyPendingWrite();
 	for(auto& texture : m_textures)
 	{
 		if(texture->m_key == key)
@@ -458,6 +581,7 @@ void CTextureCache::CTexture::DecodeCt32PageRow(uint32 pageRow)
 
 void CTextureCache::CTexture::DecodeAll()
 {
+	if((m_key.tpsm == CGSHandler::PSMCT32) && !m_cache->m_pictureSources.empty()) m_cache->FillFromPictures(*this);
 	uint32 tilesH = m_tileCount / m_tilesW;
 	bool ct32Pages = m_hasSurface && ((m_key.tpsm == CGSHandler::PSMCT32) || (m_key.tpsm == CGSHandler::PSMCT32_UNK)) &&
 	                 ((m_key.tbp & ((1u << GS_SURFACE::PAGE_SHIFT) - 1)) == 0) && ((m_key.tw & 63) == 0) && ((m_key.th & 31) == 0) &&
@@ -494,6 +618,52 @@ void CTextureCache::CTexture::DecodeAll()
 			m_cache->m_decodedTiles += m_tilesW;
 			continue;
 		}
+		for(uint32 tx = 0; tx < m_tilesW; tx++)
+		{
+			if(!m_tileValid[ty * m_tilesW + tx].load(std::memory_order_acquire)) DecodeTile(tx, ty);
+		}
+	}
+}
+
+uint32 CTextureCache::GetPictureBand(const CTexture& texture, std::vector<PICTURE_RECT>& rects)
+{
+	ApplyPendingWrite();
+	rects.clear();
+	const auto& key = texture.m_key;
+	if(key.tpsm != CGSHandler::PSMCT32) return 0;
+	uint32 height = 0;
+	for(const auto& source : m_pictureSources)
+	{
+		if((source.dbp != key.tbp) || (source.dbw != key.tbw)) continue;
+		if((source.y != 0) || (source.x + source.w > key.tw) || (source.h > key.th)) return 0;
+		if((height != 0) && (source.h != height)) return 0;
+		height = source.h;
+		PICTURE_RECT rect;
+		rect.x = source.x;
+		rect.y = source.y;
+		rect.w = source.w;
+		rect.h = source.h;
+		rect.data = source.data;
+		rects.push_back(std::move(rect));
+	}
+	if(rects.empty()) return 0;
+	std::sort(rects.begin(), rects.end(), [](const PICTURE_RECT& a, const PICTURE_RECT& b) { return a.x < b.x; });
+	uint32 x = 0;
+	for(const auto& rect : rects)
+	{
+		if(rect.x != x) return 0;
+		x += rect.w;
+	}
+	if(x != key.tw) return 0;
+	return height;
+}
+
+void CTextureCache::CTexture::DecodeRows(uint32 v0, uint32 v1)
+{
+	uint32 tilesH = m_tileCount / m_tilesW;
+	uint32 ty1 = std::min((v1 + 7) / 8, tilesH);
+	for(uint32 ty = v0 / 8; ty < ty1; ty++)
+	{
 		for(uint32 tx = 0; tx < m_tilesW; tx++)
 		{
 			if(!m_tileValid[ty * m_tilesW + tx].load(std::memory_order_acquire)) DecodeTile(tx, ty);

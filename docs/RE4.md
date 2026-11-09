@@ -378,7 +378,21 @@ Found on the way:
   threads share the memory bus). Something reading the picture from EE RAM right after
   `sceMpegGetPicture` could see it half written; RE4 doesn't.
 
-**Now: 19.9 pictures/s, 41.5 emulated fps** (from 16.2 / 33.8 this morning).
+- **Movie pictures uploaded to GL from the decoder's buffers** (`picture_textures`, on by
+  default): the GPU thread was at 85-93% and decoded the 512x512 movie texture from GS
+  memory for each picture (11 ms). Picture-backed transfers are now recorded by the texture
+  cache (`AddPictureSource`, dropped when anything else writes there), and when they cover
+  the sampled rows exactly, each 16x336 column goes to `glTexSubImage2D` straight from the
+  decoder's buffer; only the rows below are decoded. Decode 11.1 -> 0 ms, GL 1.9 -> 5.4 ms
+  per picture, GPU thread 85-93% -> 67-70%. Frames checked. (A first version filled the
+  texture cache's texels from the buffers instead: memory-bound, 9 ms, no gain.)
+
+**Now: 21.1 pictures/s, 44.0 emulated fps** (from 16.2 / 33.8 this morning).
+
+Silent Hill 2 checked on the same build (2026-11-08): its movie hangs with threaded VU1
+(HLE_MPEG.md open bug 1, there since the threaded VU1 change of 2026-11-06), and runs at
+2 fps without it (VU1 colour conversion on the emulation thread). Title screen 34 emulated
+fps, 17 shown, threaded VU1 off.
 
 ### Is a locked 30 reachable? The CPU budget (2026-11-08)
 

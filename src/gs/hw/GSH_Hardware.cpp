@@ -1115,7 +1115,43 @@ void CGSH_Hardware::BindTexture()
 	uint64 regionKey = static_cast<uint64>(regionU.origin) | (static_cast<uint64>(regionU.size) << 16) |
 	                   (static_cast<uint64>(regionV.origin) << 32) | (static_cast<uint64>(regionV.size) << 48);
 	auto& glTexture = m_glTextures[{texture->GetUniqueId(), regionKey}];
-	if(!glTexture.texture || (glTexture.generation != texture->GetGeneration()))
+	// Movie pictures: rows the decoder's buffers hold go to GL from there, column by
+	// column (TextureCache::GetPictureBand); only the rows below are decoded.
+	std::vector<CTextureCache::PICTURE_RECT> pictureRects;
+	uint32 pictureRows = 0;
+	// (the region sampled: from 0, 0 and the texture's whole width; often fewer rows)
+	if((!glTexture.texture || (glTexture.generation != texture->GetGeneration())) && g_pictureTextures &&
+	   (regionU.size == s.tw) && (regionV.size <= s.th) && (regionU.origin == 0) && (regionV.origin == 0))
+	{
+		pictureRows = m_textureCache.GetPictureBand(*texture, pictureRects);
+	}
+	if(pictureRows != 0)
+	{
+		uint32 rows = regionV.size;
+		uint64 decodeStart = NowUs();
+		if(pictureRows < rows) texture->DecodeRows(pictureRows, rows);
+		GetTimes().texDecodeUs += NowUs() - decodeStart;
+		if(!glTexture.texture) glGenTextures(1, &glTexture.texture);
+		glBindTexture(GL_TEXTURE_2D, glTexture.texture);
+		uint64 glStart = NowUs();
+		// New storage, as below
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, s.tw, rows, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		for(const auto& rect : pictureRects)
+		{
+			//The first rows of a rectangle are the first bytes of its data
+			glTexSubImage2D(GL_TEXTURE_2D, 0, rect.x, rect.y, rect.w, std::min(rect.h, rows), GL_RGBA, GL_UNSIGNED_BYTE, rect.data.get());
+		}
+		if(pictureRows < rows)
+		{
+			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, pictureRows, s.tw, rows - pictureRows, GL_RGBA, GL_UNSIGNED_BYTE, texture->Texels() + pictureRows * s.tw);
+		}
+		GetTimes().texGlUs += NowUs() - glStart;
+		glTexture.generation = texture->GetGeneration();
+		m_stats.textureUploads++;
+		m_stats.pictureUploads++;
+		g_pictureUploadCount++;
+	}
+	else if(!glTexture.texture || (glTexture.generation != texture->GetGeneration()))
 	{
 		uint64 decodeStart = NowUs();
 		texture->DecodeAll();

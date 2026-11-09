@@ -93,6 +93,8 @@ public:
 		// Decodes every tile that is not valid yet; afterwards Texels() can be
 		// indexed directly without per-fetch validity checks.
 		void DecodeAll();
+		// Same for the tiles of rows [v0, v1) only.
+		void DecodeRows(uint32 v0, uint32 v1);
 		const uint32* Texels() const
 		{
 			return m_texels.data();
@@ -137,6 +139,23 @@ public:
 	void MarkBytesWritten(uint32 start, uint32 size);
 	void MarkAllWritten();
 
+	// A whole PSMCT32 image transfer whose data is still held in host memory (a native
+	// movie picture, CGSHandler::g_imageDataSource), right after the transfer's
+	// MarkBytesWritten: decodes of CT32 textures at the same base and width copy those
+	// texels from there instead of de-swizzling GS memory, until something else writes
+	// over them.
+	void AddPictureSource(uint32 dbp, uint32 dbw, uint32 x, uint32 y, uint32 w, uint32 h, std::shared_ptr<const uint8> data);
+
+	struct PICTURE_RECT
+	{
+		uint32 x = 0, y = 0, w = 0, h = 0;
+		std::shared_ptr<const uint8> data; //w x h texels, row by row
+	};
+	// Picture sources that cover the top rows of a CT32 texture exactly (side by side
+	// from x = 0 to its width, all from row 0, same height): returns that height and
+	// the rectangles (uploaded as they are), else 0.
+	uint32 GetPictureBand(const CTexture&, std::vector<PICTURE_RECT>&);
+
 	// GS memory pages (8KB) a texture may read, as a possibly wrapping range.
 	static void GetPageRange(const KEY&, uint32& firstPage, uint32& pageCount);
 
@@ -174,6 +193,26 @@ private:
 
 	bool IsValid(const CTexture&) const;
 	void Reset(CTexture&);
+
+	struct PICTURE_SOURCE
+	{
+		uint32 dbp = 0, dbw = 0, x = 0, y = 0, w = 0, h = 0;
+		uint32 start = 0, end = 0; //GS memory bytes it may span (whole page rows)
+		std::shared_ptr<const uint8> data;
+	};
+	enum
+	{
+		MAX_PICTURE_SOURCES = 128,
+	};
+	std::vector<PICTURE_SOURCE> m_pictureSources;
+	// The last MarkBytesWritten, applied to the picture sources when anything else
+	// happens: AddPictureSource right after it only drops the sources its rectangle
+	// covers (neighbouring 16 pixel columns share pages).
+	bool m_pendingWrite = false;
+	uint32 m_pendingStart = 0, m_pendingSize = 0;
+	void ApplyPendingWrite();
+	// Fills the tiles of a CT32 texture that picture sources cover; returns how many
+	void FillFromPictures(CTexture&);
 	uint64 HashPages(const CTexture&) const;
 
 	uint8* m_ram = nullptr;

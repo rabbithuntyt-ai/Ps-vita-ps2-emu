@@ -1,7 +1,7 @@
 diff --git a/Source/gs/GSHandler.h b/Source/gs/GSHandler.h
 --- a/Source/gs/GSHandler.h
 +++ b/Source/gs/GSHandler.h
-@@ -851,6 +851,11 @@
+@@ -851,6 +851,16 @@
  	void ResetVBlank();
  
  	void FeedImageData(const void*, uint32);
@@ -10,13 +10,18 @@ diff --git a/Source/gs/GSHandler.h b/Source/gs/GSHandler.h
 +	//it has none for [data, data + length); else it holds length + 0x10 readable bytes
 +	//and stays alive as long as the returned pointer.
 +	static inline std::function<std::shared_ptr<const uint8>(const void* data, uint32 length)> g_imageDataSource;
++	//GS thread, after a whole PSMCT32 transfer whose data came from g_imageDataSource
++	//(rectangle in the destination buffer): the renderer may keep it as the texels' source
++	virtual void OnImageDataSource(uint32 dbp, uint32 dbw, uint32 x, uint32 y, uint32 w, uint32 h, const std::shared_ptr<const uint8>& data)
++	{
++	}
  	void ReadImageData(void*, uint32);
  
  	inline void WriteRegister(const RegisterWrite& write)
 diff --git a/Source/gs/GSHandler.cpp b/Source/gs/GSHandler.cpp
 --- a/Source/gs/GSHandler.cpp
 +++ b/Source/gs/GSHandler.cpp
-@@ -641,6 +641,18 @@
+@@ -641,6 +641,28 @@
  	m_transferCount++;
  #endif
  
@@ -26,7 +31,17 @@ diff --git a/Source/gs/GSHandler.cpp b/Source/gs/GSHandler.cpp
 +		{
 +			SendGSCall(
 +			    [this, source, length]() {
++				    //A whole PSMCT32 transfer: the renderer may read its texels from the source
++				    auto bltBuf = make_convertible<BITBLTBUF>(m_nReg[GS_REG_BITBLTBUF]);
++				    auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
++				    auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
++				    bool whole = (bltBuf.nDstPsm == PSMCT32) && (m_trxCtx.nRRX == 0) && (m_trxCtx.nRRY == 0) &&
++				                 (m_trxCtx.nSize == length) && (length == trxReg.nRRW * trxReg.nRRH * 4) && (trxPos.nDIR == 0);
 +				    FeedImageDataImpl(source.get(), length);
++				    if(whole)
++				    {
++					    OnImageDataSource(bltBuf.GetDstPtr(), bltBuf.nDstWidth, trxPos.nDSAX, trxPos.nDSAY, trxReg.nRRW, trxReg.nRRH, source);
++				    }
 +			    });
 +			return;
 +		}

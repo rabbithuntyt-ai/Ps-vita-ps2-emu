@@ -89,6 +89,7 @@ public:
 		uint32 depthRestores = 0; //depth set again after a new GPU scene (Vita)
 		uint32 targetUploads = 0;
 		uint32 textureUploads = 0;
+		uint32 pictureUploads = 0; //of them, movie pictures sent from the decoder's buffers
 		uint32 downloadedPixels = 0;
 		uint32 uploadedPixels = 0;
 		uint32 approximateBlends = 0;
@@ -169,6 +170,16 @@ protected:
 
 	void OnStateChanged() override;
 	void OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND, const CSoftwareRasterizer::VERTEX*) override;
+	// Movie pictures' texels come from the decoder's buffer, not from GS memory (TextureCache)
+	void OnImageDataSource(uint32 dbp, uint32 dbw, uint32 x, uint32 y, uint32 w, uint32 h, const std::shared_ptr<const uint8>& data) override
+	{
+		if(g_pictureTextures) m_textureCache.AddPictureSource(dbp, dbw, x, y, w, h, data);
+	}
+
+public:
+	// Movie picture texels from the pictures' buffers (OnImageDataSource), on by default
+	static inline bool g_pictureTextures = true;
+	static inline uint32 g_pictureUploadCount = 0; //movie pictures uploaded from their buffers (perf.csv gpu_pic_up)
 
 public:
 	// Diagnostics: the picture of the next flip goes to this file (PPM). Same
