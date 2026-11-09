@@ -447,6 +447,12 @@ Parsing instructions (callgrind, 300 pictures): 632M -> 486M (-23%). On the Vita
 warm, two runs each): decoder CPU 60% at 20.67 pictures/s against 68% at 20.47, about 12%
 less per picture; parse share of the decoder's busy time 21% -> 18%.
 
+The IOP thread again on this build (best layout, two runs each, alternating): **20.50
+pictures/s against 20.70 serial**. The gap halved (it was 20.1 against 20.5): the decoder
+now gets about the same CPU with or without the IOP thread on its core. The EE thread
+still waits about 6 ms per frame for the IOP (IOPlag 4.5, drain 1.7) and 3.2 ms for the GS,
+which is about all it saves. Still off by default.
+
 ### Is a locked 30 reachable? The CPU budget (2026-11-08)
 
 The Vita gives an app three cores at 444 MHz (already set). At a real 30 pictures/s
