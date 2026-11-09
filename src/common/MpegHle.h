@@ -72,6 +72,9 @@ public:
 	//RGB32 pictures given to the GS from their buffer when the game sends them on
 	//(no copy of the EE RAM bytes for the GS thread; `movie_zero_copy`, on by default)
 	static inline bool g_zeroCopy = true;
+	//With g_zeroCopy, the copy into EE RAM (for anything else reading the picture there)
+	//runs on a helper thread on the decoder's core, off the EE thread (`movie_async_copy`)
+	static inline bool g_asyncCopy = true;
 
 private:
 	struct PICTURE
@@ -150,11 +153,32 @@ private:
 	size_t m_working = 0;            //bytes the decoder holds
 	std::deque<PICTURE> m_pictures;
 	std::vector<std::vector<uint8_t>> m_freeBuffers; //macroblock buffers given back by the EE thread
-	//The last RGB32 picture given to the game, the GS's source for it (EE thread)
-	std::shared_ptr<std::vector<uint8_t>> m_shownPicture;
-	uint32_t m_shownAddress = 0, m_shownBytes = 0, m_shownVblank = 0;
+	//The last RGB32 pictures given to the game, the GS's source for them (EE thread)
+	struct SHOWN
+	{
+		std::shared_ptr<std::vector<uint8_t>> picture;
+		uint32_t address = 0, bytes = 0, vblank = 0;
+	};
+	enum
+	{
+		SHOWN_MAX = 3,
+		SHOWN_VBLANKS = 16,
+	};
+	std::vector<SHOWN> m_shown;
 	std::thread::id m_shownThread;
-	uint32_t m_sourceLogs = 0;
+	//Copies of pictures into EE RAM done off the EE thread (g_asyncCopy)
+	struct COPY_JOB
+	{
+		std::shared_ptr<std::vector<uint8_t>> picture;
+		uint32_t address = 0;
+		size_t bytes = 0;
+	};
+	void CopyThread();
+	std::thread m_copyThread;
+	std::mutex m_copyMutex;
+	std::condition_variable m_copyWake;
+	std::deque<COPY_JOB> m_copyJobs;
+	bool m_copyQuit = false;
 	std::shared_ptr<const uint8_t> ImageDataSource(const void*, uint32_t);
 	uint32_t m_generation = 0;       //bumped by resets
 	bool m_quit = false;

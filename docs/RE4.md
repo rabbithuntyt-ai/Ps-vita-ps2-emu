@@ -361,10 +361,24 @@ Found on the way:
 - **The SPU2 IRQ re-assertion is wanted by RE4's driver**: `spu_irq_ticks` (IOP ticks
   between re-assertions, 1000 by default) at 4000 or 8000 gives 17.3-17.4 pictures/s
   against 18.35.
-- **Movie pictures don't reach the GIF from where `sceMpegGetPicture` put them**: a
-  zero-copy hand-off of the picture buffer to the GS thread (`movie_zero_copy`, patch
-  0090) caught only about 28 KB per 688 KB picture and changed nothing. Where the GIF's
-  image data comes from is logged next (`image data` lines in `mpeghle.txt`).
+- **Movie pictures go to the GS without a copy** (`movie_zero_copy`, on by default, patch
+  0090): RE4 decodes into a ring of three EE RAM buffers and sends a picture in 16-pixel
+  columns a few vblanks later. `FeedImageData` used to copy each column for the GS thread;
+  now, when a column lies in one of the last three pictures' places (until a newer picture
+  is written there, at most 16 vblanks), the GS thread reads the decoder's own buffer. All
+  688 KB of each picture go that way. **19.5 pictures/s (40.7 emulated fps)** against 18.3,
+  twice each. Frames checked: the same pictures. A first version kept only the newest
+  picture and caught 28 KB per picture: the game shows an older one of the ring.
+- **SPU2 voice levels read without pausing the mixer** (`spu_fast_reads`, on by default,
+  patch 0091): RE4's driver polls ENVX of 24 voices; these reads (ENVX, VOLXL, VOLXR) no
+  longer wait for the mixer thread's block when no register write is queued. +0.7%.
+- **The copy into EE RAM off the emulation thread** (`movie_async_copy`, on by default):
+  with zero copy the GS no longer reads that copy, so a helper thread on the decoder's core
+  does it. 19.5 -> 19.9 pictures/s (two runs each; less than its 2.7 ms suggests: both
+  threads share the memory bus). Something reading the picture from EE RAM right after
+  `sceMpegGetPicture` could see it half written; RE4 doesn't.
+
+**Now: 19.9 pictures/s, 41.5 emulated fps** (from 16.2 / 33.8 this morning).
 
 ### Is a locked 30 reachable? The CPU budget (2026-11-08)
 

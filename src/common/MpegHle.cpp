@@ -325,6 +325,8 @@ void CMpegHle::Enable(uint8_t* eeRam, const char* logPath, std::function<void()>
 	m_decoderThreadInit = std::move(decoderThreadInit);
 	m_quit = false;
 	m_thread = std::thread([this]() { DecoderThread(); });
+	m_copyQuit = false;
+	m_copyThread = std::thread([this]() { CopyThread(); });
 	CIPU::SetResetObserver(&CMpegHle::OnIpuReset, this);
 	CPS2OS::SetHleHooks(&CMpegHle::OnSyscall, &CMpegHle::OnVBlank, this);
 	CGSHandler::g_imageDataSource = [this](const void* data, uint32_t length) { return ImageDataSource(data, length); };
@@ -337,7 +339,7 @@ void CMpegHle::Disable()
 	if(!m_ram) return;
 	CPS2OS::SetHleHooks(nullptr, nullptr, nullptr);
 	CGSHandler::g_imageDataSource = nullptr;
-	m_shownPicture.reset();
+	m_shown.clear();
 	CPS2OS::g_dispatchLockAddress = 0;
 	m_threadLockPatched = false;
 	CIPU::SetResetObserver(nullptr, nullptr);
@@ -349,6 +351,12 @@ void CMpegHle::Disable()
 	m_wake.notify_all();
 	m_pictureReady.notify_all();
 	if(m_thread.joinable()) m_thread.join();
+	{
+		std::lock_guard<std::mutex> lock(m_copyMutex);
+		m_copyQuit = true;
+	}
+	m_copyWake.notify_all();
+	if(m_copyThread.joinable()) m_copyThread.join();
 	if(m_inputDump) std::fclose(m_inputDump);
 	m_inputDump = nullptr;
 	if(m_log) std::fclose(m_log);
@@ -380,30 +388,43 @@ void CMpegHle::Log(const char* format, ...)
 	std::fflush(m_log);
 }
 
-// EE thread (FeedImageData): image data read from the last RGB32 picture's place in EE
-// RAM, while the game sends it (a few vblanks), comes from the picture's buffer. Bytes
-// the game changed there in between would not be seen: RE4 only sends them.
+// EE thread (FeedImageData): image data read from where a recent RGB32 picture was put in
+// EE RAM comes from the picture's buffer, until a newer picture is written over it (or
+// SHOWN_VBLANKS pass). Bytes the game changed there in between would not be seen: RE4
+// only sends them.
 std::shared_ptr<const uint8_t> CMpegHle::ImageDataSource(const void* data, uint32_t length)
 {
-	if(!m_shownPicture || !m_ram) return nullptr;
-	//Only the thread that owns m_shownPicture (a threaded VU1 also sends image data)
+	if(m_shown.empty() || !m_ram) return nullptr;
+	//Only the thread that owns m_shown (a threaded VU1 also sends image data)
 	if(std::this_thread::get_id() != m_shownThread) return nullptr;
-	if((m_vblanks - m_shownVblank) > 4) return nullptr;
 	auto address = static_cast<const uint8_t*>(data);
-	const uint8_t* begin = m_ram + m_shownAddress;
-	if(m_sourceLogs < 64)
+	for(const auto& shown : m_shown)
 	{
-		//Where image data comes from while a picture is shown (EE RAM offset, or outside it)
-		m_sourceLogs++;
-		bool inRam = (address >= m_ram) && (address < (m_ram + 0x02000000));
-		Log("image data %u bytes from %s 0x%08X (picture at 0x%08X)\n", length, inRam ? "EE RAM" : "outside EE RAM",
-		    inRam ? static_cast<uint32_t>(address - m_ram) : 0, m_shownAddress);
+		if((m_vblanks - shown.vblank) > SHOWN_VBLANKS) continue;
+		const uint8_t* begin = m_ram + shown.address;
+		if((address < begin) || ((address + length) > (begin + shown.bytes))) continue;
+		size_t offset = address - begin;
+		if((offset + length + 0x10) > shown.picture->size()) continue;
+		m_stats.zeroCopyBytes += length;
+		return std::shared_ptr<const uint8_t>(shown.picture, shown.picture->data() + offset);
 	}
-	if((address < begin) || ((address + length) > (begin + m_shownBytes))) return nullptr;
-	size_t offset = address - begin;
-	if((offset + length + 0x10) > m_shownPicture->size()) return nullptr;
-	m_stats.zeroCopyBytes += length;
-	return std::shared_ptr<const uint8_t>(m_shownPicture, m_shownPicture->data() + offset);
+	return nullptr;
+}
+
+void CMpegHle::CopyThread()
+{
+	if(m_decoderThreadInit) m_decoderThreadInit();
+	std::unique_lock<std::mutex> lock(m_copyMutex);
+	while(true)
+	{
+		m_copyWake.wait(lock, [this]() { return !m_copyJobs.empty() || m_copyQuit; });
+		if(m_copyJobs.empty()) break; //quit, nothing left
+		auto job = std::move(m_copyJobs.front());
+		m_copyJobs.pop_front();
+		lock.unlock();
+		std::memcpy(m_ram + job.address, job.picture->data(), job.bytes);
+		lock.lock();
+	}
 }
 
 void CMpegHle::OnVBlank(void* context, CMIPS& ee)
@@ -1029,31 +1050,63 @@ void CMpegHle::HandleGetPicture(CMIPS& ee, bool first)
 			//Silent Hill 2 gets RAW8 macroblocks (it converts the colours on VU1),
 			//Resident Evil 4 RGB32 ones (columns of them go to the GS as textures).
 			size_t bytes = std::min<size_t>(picture.macroblocks.size(), static_cast<size_t>(m_mbCount) * (variant.rgb ? 0x400 : 0x180));
+			//The GS's source (ImageDataSource): RGB32 pictures with zero copy
+			std::shared_ptr<std::vector<uint8_t>> shared;
+			if(variant.rgb && g_zeroCopy) shared = std::make_shared<std::vector<uint8_t>>(std::move(picture.macroblocks));
 			auto copyStart = std::chrono::steady_clock::now();
-			if((m_buffer + bytes) <= 0x02000000) std::memcpy(m_ram + m_buffer, picture.macroblocks.data(), bytes);
+			if((m_buffer + bytes) <= 0x02000000)
+			{
+				if(shared && g_asyncCopy)
+				{
+					{
+						std::lock_guard<std::mutex> lock(m_copyMutex);
+						COPY_JOB job;
+						job.picture = shared;
+						job.address = m_buffer;
+						job.bytes = bytes;
+						m_copyJobs.push_back(std::move(job));
+					}
+					m_copyWake.notify_one();
+				}
+				else
+				{
+					std::memcpy(m_ram + m_buffer, shared ? shared->data() : picture.macroblocks.data(), bytes);
+				}
+			}
 			m_stats.copyMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - copyStart).count();
 			if(m_frameIndex < 3) Log("give picture %u after %u waits\n", m_frameIndex, m_waitsThisPicture);
 			// The buffer goes back to the decoder: no new 688 KB to clear per picture.
-			// RGB32 pictures stay as the GS's source of the same bytes for a few vblanks
-			// (ImageDataSource): the GIF sends them in columns right after this call.
+			// RGB32 pictures stay as the GS's source of the same bytes (ImageDataSource):
+			// the game sends them in columns a few vblanks later, from a ring of buffers
+			// (RE4: three), so the last few are kept until a newer one is written over them.
 			{
 				std::lock_guard<std::mutex> lock(m_mutex);
-				auto recycle = [&](std::vector<uint8_t>&& buffer) {
-					if(m_freeBuffers.size() < 4) m_freeBuffers.push_back(std::move(buffer));
+				auto recycle = [&](std::shared_ptr<std::vector<uint8_t>>& shown) {
+					if(shown && (shown.use_count() == 1) && (m_freeBuffers.size() < 4)) m_freeBuffers.push_back(std::move(*shown));
+					shown.reset();
 				};
-				if(m_shownPicture && (m_shownPicture.use_count() == 1)) recycle(std::move(*m_shownPicture));
-				m_shownPicture.reset();
-				if(variant.rgb && g_zeroCopy)
+				uint32_t end = m_buffer + static_cast<uint32_t>(bytes);
+				for(auto it = m_shown.begin(); it != m_shown.end();)
 				{
-					m_shownPicture = std::make_shared<std::vector<uint8_t>>(std::move(picture.macroblocks));
-					m_shownAddress = m_buffer;
-					m_shownBytes = static_cast<uint32_t>(bytes);
-					m_shownVblank = m_vblanks;
+					bool overlaps = (it->address < end) && (m_buffer < (it->address + it->bytes));
+					if(!overlaps && (m_shown.size() < SHOWN_MAX)) { ++it; continue; }
+					if(!overlaps && (it != m_shown.begin())) { ++it; continue; }
+					recycle(it->picture);
+					it = m_shown.erase(it);
+				}
+				if(shared)
+				{
+					SHOWN shown;
+					shown.picture = shared;
+					shown.address = m_buffer;
+					shown.bytes = static_cast<uint32_t>(bytes);
+					shown.vblank = m_vblanks;
+					m_shown.push_back(std::move(shown));
 					m_shownThread = std::this_thread::get_id();
 				}
 				else
 				{
-					recycle(std::move(picture.macroblocks));
+					if(m_freeBuffers.size() < 4) m_freeBuffers.push_back(std::move(picture.macroblocks));
 				}
 			}
 			//libmpeg's per-picture fields (docs/HLE_MPEG.md): picture size (set

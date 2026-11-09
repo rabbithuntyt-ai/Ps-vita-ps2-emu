@@ -300,6 +300,8 @@ namespace
 		else if(key == "jit_cache") settings.jitCache = value != 0;
 		else if(key == "mpeg_hle") settings.movieHle = value != 0;
 		else if(key == "movie_zero_copy") CMpegHle::g_zeroCopy = value != 0;
+		else if(key == "movie_async_copy") CMpegHle::g_asyncCopy = value != 0;
+		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
 	}
 
 	// What the first-boot tuner found for a game (CAutoTuner).

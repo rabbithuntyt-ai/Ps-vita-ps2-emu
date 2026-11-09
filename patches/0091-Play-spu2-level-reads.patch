@@ -1,0 +1,64 @@
+diff --git a/Source/PS2VM.h b/Source/PS2VM.h
+--- a/Source/PS2VM.h
++++ b/Source/PS2VM.h
+@@ -253,7 +253,7 @@
+ 	bool m_spuStopWorker = false;
+ 	bool m_spuWorkerSleeping = false;
+ 	unsigned int m_spuIdleWaiters = 0;
+-	unsigned int m_spuPendingWrites = 0;
++	std::atomic<unsigned int> m_spuPendingWrites{0}; //read without the lock by m_iop->m_spuWritesPending
+ 	unsigned int m_spuPendingRenders = 0;
+ 	std::atomic<uint32> m_spuFullSyncs = 0;
+ 	std::atomic<uint32> m_spuReadAccesses = 0;
+diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
+--- a/Source/PS2VM.cpp
++++ b/Source/PS2VM.cpp
+@@ -850,6 +850,7 @@
+ 		m_iop->m_spuSync = nullptr;
+ 		m_iop->m_spuQueueWrite = nullptr;
+ 		m_iop->m_spuReadAccess = nullptr;
++		m_iop->m_spuWritesPending = nullptr;
+ 		return;
+ 	}
+ 	m_spuStopWorker = false;
+@@ -859,6 +860,7 @@
+ 	m_iop->m_spuSync = [this]() { SyncSpu(); };
+ 	m_iop->m_spuQueueWrite = [this](uint32 address, uint32 value, bool spu2) { return QueueSpuWrite(address, value, spu2); };
+ 	m_iop->m_spuReadAccess = [this](const std::function<void()>& access) { AccessSpuForRead(access); };
++	m_iop->m_spuWritesPending = [this]() { return m_spuPendingWrites.load(std::memory_order_acquire) != 0; };
+ 	m_spuPendingWrites = 0;
+ 	m_spuPendingRenders = 0;
+ 	m_spuWorker = std::thread(
+diff --git a/Source/iop/Iop_SubSystem.h b/Source/iop/Iop_SubSystem.h
+--- a/Source/iop/Iop_SubSystem.h
++++ b/Source/iop/Iop_SubSystem.h
+@@ -63,6 +63,11 @@
+ 		//When set, runs a register read or DMA with the mixer paused, after all
+ 		//queued writes (mixing may lag a few blocks behind instead of a full sync).
+ 		std::function<void(const std::function<void()>&)> m_spuReadAccess;
++		//Register writes queued for the mixer thread and not applied yet
++		std::function<bool()> m_spuWritesPending;
++		//Voice envelope and volume levels (ENVX, VOLXL, VOLXR: values the mixer only
++		//produces) read without pausing the mixer when no write is queued (on by default)
++		static inline bool g_fastSpuLevelReads = true;
+ 
+ 		CMIPS m_cpu;
+ 		CMA_MIPSIV m_cpuArch;
+diff --git a/Source/iop/Iop_SubSystem.cpp b/Source/iop/Iop_SubSystem.cpp
+--- a/Source/iop/Iop_SubSystem.cpp
++++ b/Source/iop/Iop_SubSystem.cpp
+@@ -297,6 +297,14 @@
+ #endif
+ 	else if(address >= CSpu2::REGS_BEGIN && address <= CSpu2::REGS_END)
+ 	{
++		//A sound driver polls voices' levels (RE4: ENVX of 24 voices, over and over):
++		//aligned loads of values the mixer writes, so no pause is needed for them
++		uint32 offset = address - CSpu2::REGS_BEGIN;
++		bool levelRead = ((offset & ~0x400U) < 0x180) && ((offset & 0xF) >= 0xA);
++		if(levelRead && g_fastSpuLevelReads && m_spuWritesPending && !m_spuWritesPending())
++		{
++			return m_spu2.ReadRegister(address);
++		}
+ 		if(m_spuReadAccess)
+ 		{
+ 			uint32 result = 0;
