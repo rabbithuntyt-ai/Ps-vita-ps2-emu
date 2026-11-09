@@ -313,6 +313,7 @@ namespace
 		else if(key == "iop_batch") CPS2VM::g_iopBatchSlices = std::max(1, static_cast<int>(value));
 		else if(key == "iop_lag") CPS2VM::g_iopMaxLagSlices = std::max(2, static_cast<int>(value));
 		else if(key == "iop_inline_drain") CPS2VM::g_iopInlineDrain = value != 0;
+		else if(key == "iop_spin_us") CPS2VM::g_iopSpinUs = std::max(0, static_cast<int>(value));
 		else if(key == "ee_stay_in_slice") settings.eeStayInSlice = value != 0;
 		else if(key == "threaded_spu") settings.threadedSpu = value != 0;
 		else if(key == "jit_cache") settings.jitCache = value != 0;
@@ -685,7 +686,7 @@ namespace
 				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop");
 				//The IOP thread's sections (iop_thread)
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",iopt_%s", EmuProfile::GetSectionName(i));
-				std::fprintf(perfFile, ",iop_inline_drains");
+				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms");
 				std::fprintf(perfFile, "\n");
 			}
 		}
@@ -1383,6 +1384,19 @@ namespace
 							uint32 inlineDrains = CPS2VM::g_iopInlineDrains.load();
 							std::fprintf(perfFile, ",%u", inlineDrains - lastInlineDrains);
 							lastInlineDrains = inlineDrains;
+							//IOP thread timings (ms and counts per interval)
+							auto& ps = ParallelIop::g_state;
+							uint64_t timings[10] = {ps.busyUs.load(), ps.sleepUs.load(), ps.wakeLatencyUs.load(), ps.wakeRequests.load(), ps.workerWakes.load(),
+							                        ps.lagUs.load(), ps.lagWaits.load(), ps.drainUs.load(), ps.drainWaits.load(), ps.spinUs.load()};
+							static uint64_t lastTimings[10] = {};
+							for(unsigned int i = 0; i < 10; i++)
+							{
+								uint64_t delta = timings[i] - lastTimings[i];
+								bool microseconds = (i == 0) || (i == 1) || (i == 2) || (i == 5) || (i == 7) || (i == 9);
+								if(microseconds) std::fprintf(perfFile, ",%.1f", delta / 1000.0);
+								else std::fprintf(perfFile, ",%llu", static_cast<unsigned long long>(delta));
+								lastTimings[i] = timings[i];
+							}
 						}
 						std::fprintf(perfFile, "\n");
 						std::fflush(perfFile);

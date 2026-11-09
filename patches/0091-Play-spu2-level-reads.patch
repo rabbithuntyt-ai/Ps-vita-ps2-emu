@@ -9,7 +9,7 @@ diff --git a/Source/PS2VM.h b/Source/PS2VM.h
  
  class CPS2VM : public CVirtualMachine
  {
-@@ -179,6 +180,26 @@
+@@ -179,6 +180,28 @@
  	void UpdateIop();
  	void UpdateSpu();
  
@@ -29,6 +29,8 @@ diff --git a/Source/PS2VM.h b/Source/PS2VM.h
 +	static inline int g_iopMaxLagSlices = 16;
 +	//Drains find the IOP thread asleep: the EE thread runs the credit left itself
 +	static inline bool g_iopInlineDrain = true;
++	//The IOP thread polls for credit this long before it sleeps (0: sleeps at once)
++	static inline int g_iopSpinUs = 0;
 +	static inline std::atomic<uint32> g_iopInlineDrains{0};
 +
 +private:
@@ -36,7 +38,7 @@ diff --git a/Source/PS2VM.h b/Source/PS2VM.h
  	void SetIopOpticalMedia(COpticalMedia*);
  
  	void RegisterModulesInPadHandler();
-@@ -253,7 +274,7 @@
+@@ -253,7 +276,7 @@
  	bool m_spuStopWorker = false;
  	bool m_spuWorkerSleeping = false;
  	unsigned int m_spuIdleWaiters = 0;
@@ -131,7 +133,7 @@ diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
  			}
  #ifdef DEBUGGER_INCLUDED
  			if(
-@@ -1202,8 +1228,124 @@
+@@ -1202,8 +1228,169 @@
  #endif
  		}
  	}
@@ -158,14 +160,40 @@ diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
 +			int64 need = s.draining ? 1 : static_cast<int64>(g_iopBatchSlices) * std::max(m_iopTickStep, 1);
 +			return s.credit.load() >= need;
 +		};
-+		if(!ready())
++		if(!ready() && (g_iopSpinUs > 0) && !s.quit)
++		{
++			//Waking a sleeping thread from another core takes about half a timer tick on
++			//the Vita (0.55 ms on average): poll for the next slice of credit a while first
++			//(the EE thread grants one every few tens of microseconds while it runs).
++			lock.unlock();
++			uint64 spinStart = ParallelIop::NowUs();
++			int64 step = std::max(m_iopTickStep, 1);
++			for(unsigned int spin = 0;; spin++)
++			{
++				if(s.pauseIop.load(std::memory_order_acquire) || s.eeParked.load(std::memory_order_acquire)) break; //the EE thread waits for a park
++				if(s.credit.load(std::memory_order_acquire) >= step) break;
++				if(((spin & 63) == 63) && (ParallelIop::NowUs() - spinStart >= static_cast<uint64>(g_iopSpinUs))) break;
++			}
++			s.spinUs += ParallelIop::NowUs() - spinStart;
++			lock.lock();
++		}
++		auto spinReady = [&]() {
++			//After a spin, one slice of credit is enough to start
++			return !s.quit && !s.pauseIop.load() && !s.eeRunsIop && (s.credit.load() >= std::max(m_iopTickStep, 1));
++		};
++		if(!ready() && !((g_iopSpinUs > 0) && spinReady()))
 +		{
 +			s.iopParked = true;
 +			s.iopIdle = true;
 +			s.NotifyAll();
 +			s.workerStage = 2;
 +			EmuProfile::CScope parkedScope(EmuProfile::SECTION_IOP_PARK);
++			uint64 sleepStart = ParallelIop::NowUs();
 +			ParallelIop::WaitLogged(lock, "worker", ready, false);
++			uint64 now = ParallelIop::NowUs();
++			s.sleepUs += now - sleepStart;
++			uint64 requested = s.wakeRequestTime.exchange(0);
++			if(requested != 0) s.wakeLatencyUs += now - std::min(now, requested);
 +		}
 +		s.iopIdle = false;
 +		s.workerStage = 3;
@@ -173,6 +201,7 @@ diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
 +		if(s.quit) break;
 +		s.iopParked = false;
 +		lock.unlock();
++		uint64 busyStart = ParallelIop::NowUs();
 +		while(!s.pauseIop.load(std::memory_order_acquire))
 +		{
 +			int64 credit = s.credit.load(std::memory_order_acquire);
@@ -184,6 +213,7 @@ diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
 +			s.workerStage = 5;
 +			s.credit.fetch_sub(step, std::memory_order_acq_rel);
 +		}
++		s.busyUs += ParallelIop::NowUs() - busyStart;
 +		lock.lock();
 +	}
 +	s.iopParked = true;
@@ -197,6 +227,11 @@ diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
 +	int64 step = std::max(m_iopTickStep, 1);
 +	if((credit >= g_iopBatchSlices * step) && s.iopParked.load(std::memory_order_acquire))
 +	{
++		if(s.wakeRequestTime.load(std::memory_order_relaxed) == 0)
++		{
++			s.wakeRequestTime = ParallelIop::NowUs();
++			s.wakeRequests++;
++		}
 +		std::lock_guard<std::mutex> lock(s.mutex);
 +		s.NotifyAll();
 +	}
@@ -238,7 +273,19 @@ diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
 +	s.draining = true;
 +	s.eeParked = true;
 +	s.NotifyAll();
++	uint64 waitStart = ParallelIop::NowUs();
 +	ParallelIop::WaitLogged(lock, "DrainIop", [&]() { return s.iopParked.load() && (s.credit.load() <= 0) && !s.pauseEe.load(); });
++	uint64 waited = ParallelIop::NowUs() - waitStart;
++	if(section == EmuProfile::SECTION_IOP_LAG)
++	{
++		s.lagUs += waited;
++		s.lagWaits++;
++	}
++	else
++	{
++		s.drainUs += waited;
++		s.drainWaits++;
++	}
 +	s.draining = false;
 +	s.eeParked = false;
 +}

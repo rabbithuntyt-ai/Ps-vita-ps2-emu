@@ -453,6 +453,19 @@ now gets about the same CPU with or without the IOP thread on its core. The EE t
 still waits about 6 ms per frame for the IOP (IOPlag 4.5, drain 1.7) and 3.2 ms for the GS,
 which is about all it saves. Still off by default.
 
+Why, timed directly (perf.csv `iopt_busy_ms`, `iopt_sleep_ms`, `iopt_wake_latency_ms`,
+`iop_lag_ms`... per second of the intro): the IOP thread runs 350 ms and sleeps 650 ms. It
+is woken about 290 times, and each wake takes **0.4-0.55 ms** from the EE thread's signal to
+the IOP thread running: about half a 1 ms timer tick, so the Vita seems to deliver a wakeup
+from another core only at the next scheduler tick. Almost every wake ends in an EE wait
+(about 190 lag waits, 200 ms; 70 drains, 60-100 ms). In those phases the EE thread is
+idle-looping for an IOP reply (its 32 slices of lead go by in well under 0.4 ms), so the
+waits are a real dependency, not scheduling slack. Polling for credit before sleeping
+(`iop_spin_us`, 300 and 1000 us) caught only about 60 wakes a second: 20.2 pictures/s
+against 20.7 serial. Off by default (0). The IOP thread can only win where the EE has work
+of its own while the IOP runs. RE4's intro has little of that, so faster EE and IOP code
+(tier 2) is the better route.
+
 ### Is a locked 30 reachable? The CPU budget (2026-11-08)
 
 The Vita gives an app three cores at 444 MHz (already set). At a real 30 pictures/s
