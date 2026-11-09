@@ -1326,11 +1326,14 @@ void CMpegHle::DecoderThread()
 			// Macroblocks column by column (libmpeg's output order: Silent Hill
 			// 2 shows 16 pixel wide strips of the wrong blocks otherwise; its
 			// reference frames in sys+0xFC.. are row by row).
-			uint8_t* out = picture.macroblocks.data();
-			for(uint32_t mbx = 0; mbx < mbWidth; mbx++)
+			// Read row by row (the planes in memory order), each macroblock written to
+			// its place in the column order.
+			const uint32_t mbBytes = rgb ? 0x400 : 0x180;
+			for(uint32_t mby = 0; mby < mbHeight; mby++)
 			{
-				for(uint32_t mby = 0; mby < mbHeight; mby++, out += (rgb ? 0x400 : 0x180))
+				for(uint32_t mbx = 0; mbx < mbWidth; mbx++)
 				{
+					uint8_t* out = picture.macroblocks.data() + (mbx * mbHeight + mby) * mbBytes;
 					if(rgb)
 					{
 						uint32_t chromaStride = frame.width / 2;

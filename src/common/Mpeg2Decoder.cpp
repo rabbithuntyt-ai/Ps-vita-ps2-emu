@@ -93,7 +93,7 @@ namespace
 
 // MSB-first reader over the stream for the Framework VLC tables. Running out
 // of data throws NEED_DATA (pictures are decoded whole or not at all).
-struct CMpeg2Decoder::BITS : public Framework::CBitStream
+struct CMpeg2Decoder::BITS final : public Framework::CBitStream
 {
 	const uint8_t* data;
 	size_t size;
@@ -162,8 +162,24 @@ struct CMpeg2Decoder::BITS : public Framework::CBitStream
 		return true;
 	}
 
+	// Up to 25 bits from one unaligned big endian load, when 4 bytes are left
+	// (all but the last bytes of the data): no virtual call, one bounds check.
+	bool FastRoom() const
+	{
+		return (bitPosition >> 3) + 4 <= size;
+	}
+
+	uint32_t FastPeek(uint8 count) const
+	{
+		uint32_t word;
+		std::memcpy(&word, data + (bitPosition >> 3), 4);
+		word = __builtin_bswap32(word);
+		return (word << (bitPosition & 7)) >> (32 - count);
+	}
+
 	uint32_t Peek(uint8 count)
 	{
+		if((count != 0) && (count <= 25) && FastRoom()) return FastPeek(count);
 		uint32 value = 0;
 		if(!TryPeekBits_MSBF(count, value)) Fail(RESULT_NEED_DATA);
 		return value;
@@ -220,6 +236,7 @@ struct CMpeg2Decoder::BITS : public Framework::CBitStream
 	// The next LUT_BITS bits, zero padded at the end of the data.
 	uint32_t PeekLut()
 	{
+		if(FastRoom()) return FastPeek(LUT_BITS);
 		uint32 value = 0;
 		size_t available = size * 8 - std::min(bitPosition, size * 8);
 		if(available >= LUT_BITS)
@@ -266,6 +283,15 @@ namespace
 		uint8_t run[LUT_SIZE];
 		uint8_t length[LUT_SIZE];
 		uint8_t kind[LUT_SIZE];
+		//The same in one word: level (bits 0-15), run (16-23), length (24-28), kind (29-31)
+		uint32_t packed[LUT_SIZE];
+		void Pack()
+		{
+			for(uint32_t code = 0; code < LUT_SIZE; code++)
+			{
+				packed[code] = (kind[code] == DCT_SLOW) ? 0 : (static_cast<uint16_t>(level[code]) | (static_cast<uint32_t>(run[code]) << 16) | (static_cast<uint32_t>(length[code] & 0x1F) << 24) | (static_cast<uint32_t>(kind[code]) << 29));
+			}
+		}
 	};
 
 	// A stream of 'code' (LUT_BITS bits, or 'bits', MSB first) followed by zeros.
@@ -385,8 +411,13 @@ namespace
 			BuildDctLut(dct[0], CDctCoefficientTable0::GetInstance());
 			BuildDctLut(dct[1], CDctCoefficientTable1::GetInstance());
 			BuildDctLut(dctFirst, CDctCoefficientTable0::GetInstance(), true);
+			dct[0].Pack();
+			dct[1].Pack();
+			dctFirst.Pack();
 		}
 	};
+
+	const LUTS* g_luts = nullptr; //set by the first decoder made (GetLuts)
 
 	const LUTS& GetLuts()
 	{
@@ -394,24 +425,44 @@ namespace
 		return *luts;
 	}
 
-	uint32_t FastSymbol(CMpeg2Decoder::BITS& bits, CVLCTable& table)
+	// Index in LUTS::symbols
+	enum SYMBOL_TABLE
 	{
-		const LUTS& luts = GetLuts();
-		for(const auto& lut : luts.symbols)
+		SYMBOLS_MB_ADDRESS_INCREMENT,
+		SYMBOLS_MB_TYPE_I,
+		SYMBOLS_MB_TYPE_P,
+		SYMBOLS_MB_TYPE_B,
+		SYMBOLS_CODED_BLOCK_PATTERN,
+		SYMBOLS_MOTION_CODE,
+		SYMBOLS_DC_SIZE_LUMINANCE,
+		SYMBOLS_DC_SIZE_CHROMINANCE,
+	};
+
+	inline uint32_t FastSymbol(CMpeg2Decoder::BITS& bits, SYMBOL_TABLE index)
+	{
+		const SYMBOL_LUT& lut = g_luts->symbols[index];
+		if(bits.FastRoom())
 		{
-			if(lut.table != &table) continue;
-			uint32_t code = bits.PeekLut();
-			if(lut.length[code] == 0) break;
-			if(bits.bitPosition + lut.length[code] > bits.size * 8) Fail(CMpeg2Decoder::RESULT_NEED_DATA);
-			bits.bitPosition += lut.length[code];
-			return lut.value[code];
+			uint32_t code = bits.FastPeek(CMpeg2Decoder::BITS::LUT_BITS);
+			uint32_t length = lut.length[code];
+			if(length != 0)
+			{
+				bits.bitPosition += length;
+				return lut.value[code];
+			}
+			return bits.Symbol(*lut.table);
 		}
-		return bits.Symbol(table);
+		uint32_t code = bits.PeekLut();
+		if(lut.length[code] == 0) return bits.Symbol(*lut.table);
+		if(bits.bitPosition + lut.length[code] > bits.size * 8) Fail(CMpeg2Decoder::RESULT_NEED_DATA);
+		bits.bitPosition += lut.length[code];
+		return lut.value[code];
 	}
 }
 
 CMpeg2Decoder::CMpeg2Decoder()
 {
+	g_luts = &GetLuts();
 	Reset();
 }
 
@@ -718,7 +769,7 @@ CMpeg2Decoder::RESULT CMpeg2Decoder::DecodeMacroblock(BITS& bits, uint32_t& mbAd
 			break;
 		}
 	}
-	increment += FastSymbol(bits, *CMacroblockAddressIncrementTable::GetInstance());
+	increment += FastSymbol(bits, SYMBOLS_MB_ADDRESS_INCREMENT);
 
 	// Skipped macroblocks (not at the start of a slice).
 	if(!first && (increment > 1))
@@ -749,8 +800,8 @@ CMpeg2Decoder::RESULT CMpeg2Decoder::DecodeMacroblock(BITS& bits, uint32_t& mbAd
 	if(mbAddress >= mbCount) return RESULT_ERROR;
 	uint32_t mbx = mbAddress % mbWidth, mby = mbAddress / mbWidth;
 
-	CVLCTable* typeTable = (m_pictureType == PICTURE_I) ? CMacroblockTypeITable::GetInstance() : (m_pictureType == PICTURE_P) ? CMacroblockTypePTable::GetInstance() : CMacroblockTypeBTable::GetInstance();
-	int mbType = FastSymbol(bits, *typeTable);
+	SYMBOL_TABLE typeTable = (m_pictureType == PICTURE_I) ? SYMBOLS_MB_TYPE_I : (m_pictureType == PICTURE_P) ? SYMBOLS_MB_TYPE_P : SYMBOLS_MB_TYPE_B;
+	int mbType = FastSymbol(bits, typeTable);
 	bool intra = (mbType & MB_INTRA) != 0;
 
 	int motionType = MOTION_FRAME;
@@ -779,7 +830,7 @@ CMpeg2Decoder::RESULT CMpeg2Decoder::DecodeMacroblock(BITS& bits, uint32_t& mbAd
 	int cbp = 0;
 	if(mbType & MB_PATTERN)
 	{
-		cbp = FastSymbol(bits, *CCodedBlockPatternTable::GetInstance());
+		cbp = FastSymbol(bits, SYMBOLS_CODED_BLOCK_PATTERN);
 	}
 	else if(intra)
 	{
@@ -828,7 +879,7 @@ bool CMpeg2Decoder::DecodeMotionVectors(BITS& bits, int s, int vectorCount, int 
 			int fCode = m_fCode[s][t];
 			if((fCode < 1) || (fCode > 9)) return false;
 			int rSize = fCode - 1;
-			int code = static_cast<int16_t>(FastSymbol(bits, *CMotionCodeTable::GetInstance()));
+			int code = static_cast<int16_t>(FastSymbol(bits, SYMBOLS_MOTION_CODE));
 			int residual = ((rSize != 0) && (code != 0)) ? static_cast<int>(bits.Get(static_cast<uint8>(rSize))) : 0;
 			int f = 1 << rSize;
 			int high = 16 * f - 1, low = -16 * f, range = 32 * f;
@@ -866,10 +917,45 @@ bool CMpeg2Decoder::DecodeMotionVectors(BITS& bits, int s, int vectorCount, int 
 
 bool CMpeg2Decoder::DecodeBlock(BITS& bits, int component, bool intra, int16_t* raster)
 {
-	int coefficients[64]; //scan order, valid at used[]
-	uint8_t used[64];
-	unsigned int usedCount = 0;
 	unsigned int index = 0;
+	// Each coefficient is inverse scanned, inverse quantised and saturated as it
+	// is decoded (indexes only grow: each is set once).
+	const uint8_t* rasterOfScan = Zigzag().rasterOfScan[m_alternateScan ? 1 : 0];
+	const uint8_t* matrix = intra ? m_intraMatrix : m_nonIntraMatrix;
+	const int quantiserScale = m_quantiserScale;
+	const bool ipuQuantisation = m_ipuCompatibleQuantisation;
+	int16_t input[64] = {};
+	int sum = 0;
+	auto put = [&](unsigned int i, int qf) {
+		if(qf == 0) return;
+		unsigned int position = rasterOfScan[i];
+		int value;
+		if(intra && (i == 0))
+		{
+			value = qf * (8 >> m_intraDcPrecision);
+		}
+		else
+		{
+			if(intra)
+			{
+				value = (qf * matrix[position] * quantiserScale * 2) / 32;
+			}
+			else
+			{
+				int sign = (qf > 0) - (qf < 0);
+				value = ((2 * qf + sign) * matrix[position] * quantiserScale) / 32;
+			}
+			if(ipuQuantisation && (value != 0) && ((value & 1) == 0))
+			{
+				// Play!'s IPU: MPEG-1 oddification of every AC coefficient.
+				int sign = (qf > 0) ? 1 : -1;
+				value = (value - sign) | 1;
+			}
+		}
+		value = std::clamp(value, -2048, 2047);
+		input[position] = static_cast<int16_t>(value);
+		sum += value;
+	};
 	CDctCoefficientTable& table = (intra && m_intraVlcFormat) ? static_cast<CDctCoefficientTable&>(CDctCoefficientTable1::GetInstance())
 	                                                         : static_cast<CDctCoefficientTable&>(CDctCoefficientTable0::GetInstance());
 	auto check = [](CVLCTable::DECODE_STATUS status) {
@@ -878,7 +964,7 @@ bool CMpeg2Decoder::DecodeBlock(BITS& bits, int component, bool intra, int16_t* 
 	};
 	if(intra)
 	{
-		CVLCTable& dcTable = (component == 0) ? *CDcSizeLuminanceTable::GetInstance() : *CDcSizeChrominanceTable::GetInstance();
+		SYMBOL_TABLE dcTable = (component == 0) ? SYMBOLS_DC_SIZE_LUMINANCE : SYMBOLS_DC_SIZE_CHROMINANCE;
 		uint32_t dcSize = FastSymbol(bits, dcTable);
 		int diff = 0;
 		if(dcSize != 0)
@@ -887,8 +973,7 @@ bool CMpeg2Decoder::DecodeBlock(BITS& bits, int component, bool intra, int16_t* 
 			diff = (value & (1u << (dcSize - 1))) ? static_cast<int>(value) : static_cast<int>(value) - static_cast<int>((1u << dcSize) - 1);
 		}
 		m_dcPredictor[component] += diff;
-		coefficients[0] = m_dcPredictor[component];
-		used[usedCount++] = 0;
+		put(0, m_dcPredictor[component]);
 		index = 1;
 	}
 	else
@@ -899,7 +984,7 @@ bool CMpeg2Decoder::DecodeBlock(BITS& bits, int component, bool intra, int16_t* 
 		{
 			bits.bitPosition += first.length[code];
 			index = first.run[code];
-			coefficients[index] = first.level[code];
+			put(index, first.level[code]);
 		}
 		else
 		{
@@ -907,14 +992,29 @@ bool CMpeg2Decoder::DecodeBlock(BITS& bits, int component, bool intra, int16_t* 
 			check(table.TryGetRunLevelPairDc(&bits, &pair, m_isMpeg2));
 			index = pair.run;
 			if(index >= 64) return false;
-			coefficients[index] = static_cast<int16_t>(pair.level);
+			put(index, static_cast<int16_t>(pair.level));
 		}
-		used[usedCount++] = static_cast<uint8_t>(index);
 		index++;
 	}
-	const DCT_LUT& lut = GetLuts().dct[(intra && m_intraVlcFormat) ? 1 : 0];
+	const DCT_LUT& lut = g_luts->dct[(intra && m_intraVlcFormat) ? 1 : 0];
 	while(true)
 	{
+		if(bits.FastRoom())
+		{
+			// One load per code (level, run, length and kind packed)
+			uint32_t entry = lut.packed[bits.FastPeek(BITS::LUT_BITS)];
+			uint32_t kind = entry >> 29;
+			if(kind != DCT_SLOW)
+			{
+				bits.bitPosition += (entry >> 24) & 0x1F;
+				if(kind == DCT_EOB) break;
+				index += (entry >> 16) & 0xFF;
+				if(index >= 64) return false;
+				put(index, static_cast<int16_t>(entry & 0xFFFF));
+				index++;
+				continue;
+			}
+		}
 		uint32_t code = bits.PeekLut();
 		uint8_t kind = lut.kind[code];
 		if((kind != DCT_SLOW) && (bits.bitPosition + lut.length[code] <= bits.size * 8))
@@ -923,8 +1023,7 @@ bool CMpeg2Decoder::DecodeBlock(BITS& bits, int component, bool intra, int16_t* 
 			if(kind == DCT_EOB) break;
 			index += lut.run[code];
 			if(index >= 64) return false;
-			coefficients[index] = lut.level[code];
-			used[usedCount++] = static_cast<uint8_t>(index);
+			put(index, lut.level[code]);
 			index++;
 			continue;
 		}
@@ -938,8 +1037,7 @@ bool CMpeg2Decoder::DecodeBlock(BITS& bits, int component, bool intra, int16_t* 
 				bits.bitPosition += longLut.length[longCode];
 				index += longLut.run[longCode];
 				if(index >= 64) return false;
-				coefficients[index] = longLut.level[longCode];
-				used[usedCount++] = static_cast<uint8_t>(index);
+				put(index, longLut.level[longCode]);
 				index++;
 				continue;
 			}
@@ -979,8 +1077,7 @@ bool CMpeg2Decoder::DecodeBlock(BITS& bits, int component, bool intra, int16_t* 
 			}
 			index += run;
 			if(index >= 64) return false;
-			coefficients[index] = level;
-			used[usedCount++] = static_cast<uint8_t>(index);
+			put(index, level);
 			index++;
 			continue;
 		}
@@ -995,46 +1092,10 @@ bool CMpeg2Decoder::DecodeBlock(BITS& bits, int component, bool intra, int16_t* 
 		check(table.TryGetRunLevelPair(&bits, &pair, m_isMpeg2));
 		index += pair.run;
 		if(index >= 64) return false;
-		coefficients[index] = static_cast<int16_t>(pair.level);
-		used[usedCount++] = static_cast<uint8_t>(index);
+		put(index, static_cast<int16_t>(pair.level));
 		index++;
 	}
 
-	// Inverse scan, inverse quantisation, saturation, mismatch control.
-	const uint8_t* rasterOfScan = Zigzag().rasterOfScan[m_alternateScan ? 1 : 0];
-	const uint8_t* matrix = intra ? m_intraMatrix : m_nonIntraMatrix;
-	int16_t input[64] = {};
-	int sum = 0;
-	for(unsigned int u = 0; u < usedCount; u++)
-	{
-		unsigned int i = used[u];
-		int qf = coefficients[i];
-		if(qf == 0) continue;
-		unsigned int position = rasterOfScan[i];
-		int value;
-		if(intra && (i == 0))
-		{
-			value = qf * (8 >> m_intraDcPrecision);
-		}
-		else if(intra)
-		{
-			value = (qf * matrix[position] * m_quantiserScale * 2) / 32;
-		}
-		else
-		{
-			int sign = (qf > 0) - (qf < 0);
-			value = ((2 * qf + sign) * matrix[position] * m_quantiserScale) / 32;
-		}
-		if(m_ipuCompatibleQuantisation && !(intra && (i == 0)) && (value != 0) && ((value & 1) == 0))
-		{
-			// Play!'s IPU: MPEG-1 oddification of every AC coefficient.
-			int sign = (qf > 0) ? 1 : -1;
-			value = (value - sign) | 1;
-		}
-		value = std::clamp(value, -2048, 2047);
-		input[position] = static_cast<int16_t>(value);
-		sum += value;
-	}
 	// MPEG-2 mismatch control (the emulated IPU does not apply it).
 	if(!m_ipuCompatibleQuantisation && ((sum & 1) == 0)) input[63] += (input[63] & 1) ? -1 : 1;
 	Mpeg2Profile::Set(Mpeg2Profile::STAGE_IDCT);

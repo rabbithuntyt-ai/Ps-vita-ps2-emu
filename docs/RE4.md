@@ -430,6 +430,23 @@ Silent Hill 2 checked on the same build (2026-11-08): its movie hangs with threa
 2 fps without it (VU1 colour conversion on the emulation thread). Title screen 34 emulated
 fps, 17 shown, threaded VU1 off.
 
+### The native decoder's parsing, faster (2026-11-09)
+
+Freeing core 2 for the IOP thread (above) starts with the decoder. Changes, all with the same
+decoded bytes (`mpeg2_decoder_tests` on a 1900-picture RE4 stream dump, same checksum):
+- The bit reader is `final` and peeks with one unaligned load when 4 bytes are left (it
+  was a virtual call with three bounds checks per symbol).
+- Symbol lookups index their table directly (they searched the table list by pointer).
+- The DCT table entries are packed in one 32-bit word (level, run, length, kind): one
+  load per coefficient instead of four.
+- Coefficients are inverse scanned and quantised as they are decoded (no second pass).
+- The output stage reads the planes row by row and writes each macroblock to its slot in
+  libmpeg's column order (it read them column by column).
+
+Parsing instructions (callgrind, 300 pictures): 632M -> 486M (-23%). On the Vita (serial,
+warm, two runs each): decoder CPU 60% at 20.67 pictures/s against 68% at 20.47, about 12%
+less per picture; parse share of the decoder's busy time 21% -> 18%.
+
 ### Is a locked 30 reachable? The CPU budget (2026-11-08)
 
 The Vita gives an app three cores at 444 MHz (already set). At a real 30 pictures/s
