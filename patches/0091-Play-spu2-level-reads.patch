@@ -47,14 +47,17 @@ diff --git a/Source/iop/Iop_SubSystem.h b/Source/iop/Iop_SubSystem.h
 diff --git a/Source/iop/Iop_SubSystem.cpp b/Source/iop/Iop_SubSystem.cpp
 --- a/Source/iop/Iop_SubSystem.cpp
 +++ b/Source/iop/Iop_SubSystem.cpp
-@@ -297,6 +297,14 @@
+@@ -297,6 +297,17 @@
  #endif
  	else if(address >= CSpu2::REGS_BEGIN && address <= CSpu2::REGS_END)
  	{
 +		//A sound driver polls voices' levels (RE4: ENVX of 24 voices, over and over):
 +		//aligned loads of values the mixer writes, so no pause is needed for them
 +		uint32 offset = address - CSpu2::REGS_BEGIN;
-+		bool levelRead = ((offset & ~0x400U) < 0x180) && ((offset & 0xF) >= 0xA);
++		uint32 coreOffset = offset & ~0x400U;
++		bool levelRead = (coreOffset < 0x180) && ((offset & 0xF) >= 0xA);
++		//Also plain loads: P_MMIX (not kept), CORE_ATTR and A_TS_MODE (as written), ENDX (voice end flags)
++		levelRead |= (offset < 0x800) && ((coreOffset == 0x198) || (coreOffset == 0x19A) || (coreOffset == 0x1B0) || (coreOffset == 0x340) || (coreOffset == 0x342));
 +		if(levelRead && g_fastSpuLevelReads && m_spuWritesPending && !m_spuWritesPending())
 +		{
 +			return m_spu2.ReadRegister(address);
@@ -62,3 +65,45 @@ diff --git a/Source/iop/Iop_SubSystem.cpp b/Source/iop/Iop_SubSystem.cpp
  		if(m_spuReadAccess)
  		{
  			uint32 result = 0;
+@@ -435,31 +446,24 @@
+ {
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_IOP_TICKS);
+ 	static const int g_dmaUpdateDelay = 10000;
+-	bool timing = CIopBios::g_callCounting;
+-	auto now = [timing]() -> uint64 { return timing ? static_cast<uint64>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()) : 0; };
+-	uint64 t0 = now();
+-	m_counters.Update(ticks);
+-	uint64 t1 = now();
++	if(CIopBios::g_callCounting) g_tickCalls++;
++	{
++		EmuProfile::CScope scope(EmuProfile::SECTION_IOP_TICKS_COUNTERS);
++		m_counters.Update(ticks);
++	}
+ 	m_speed.CountTicks(ticks);
+-	uint64 t2 = now();
+-	m_bios->CountTicks(ticks);
+-	uint64 t3 = now();
++	{
++		EmuProfile::CScope scope(EmuProfile::SECTION_IOP_TICKS_BIOS);
++		m_bios->CountTicks(ticks);
++	}
+ 	m_dmaUpdateTicks += ticks;
+ 	if(m_dmaUpdateTicks >= g_dmaUpdateDelay)
+ 	{
++		EmuProfile::CScope scope(EmuProfile::SECTION_IOP_TICKS_DMA);
+ 		m_dmac.ResumeDma(Iop::CDmac::CHANNEL_SPU0);
+ 		m_dmac.ResumeDma(Iop::CDmac::CHANNEL_SPU1);
+ 		m_dmaUpdateTicks -= g_dmaUpdateDelay;
+ 	}
+-	uint64 t4 = now();
+-	if(timing)
+-	{
+-		g_tickCalls++;
+-		g_tickPartUs[0] += t1 - t0;
+-		g_tickPartUs[1] += t2 - t1;
+-		g_tickPartUs[2] += t3 - t2;
+-		g_tickPartUs[3] += t4 - t3;
+-	}
+ 	m_spuIrqUpdateTicks += ticks;
+ 	if(m_spuIrqUpdateTicks >= g_spuIrqCheckDelay)
+ 	{

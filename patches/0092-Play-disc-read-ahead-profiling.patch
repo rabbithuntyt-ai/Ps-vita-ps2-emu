@@ -1,0 +1,161 @@
+diff --git a/Source/DiskUtils.cpp b/Source/DiskUtils.cpp
+--- a/Source/DiskUtils.cpp
++++ b/Source/DiskUtils.cpp
+@@ -37,7 +37,11 @@
+ #endif
+ #ifdef __vita__
+ #include <psp2/io/fcntl.h>
++#include <psp2/kernel/threadmgr.h>
++#include <condition_variable>
++#include <mutex>
+ #include <stdexcept>
++#include <thread>
+ #include <vector>
+ 
+ //Disc image reader with 64-bit offsets (images over 2GB) and read-ahead:
+@@ -56,13 +60,33 @@
+ 		m_size = sceIoLseek(m_fd, 0, SCE_SEEK_END);
+ 		if(m_size < 0) m_size = 0;
+ 		m_buffer.resize(BUFFER_SIZE);
++		//Read-ahead of the next block on its own handle, off the emulation thread
++		//(movies stream sequentially; each block read is a memory card system call)
++		m_aheadFd = sceIoOpen(path, SCE_O_RDONLY, 0);
++		if(g_asyncReadAhead && (m_aheadFd >= 0))
++		{
++			m_ahead.resize(BUFFER_SIZE);
++			m_aheadThread = std::thread([this]() { AheadThread(); });
++		}
+ 	}
+ 
+ 	~CVitaImageStream() override
+ 	{
++		if(m_aheadThread.joinable())
++		{
++			{
++				std::lock_guard<std::mutex> lock(m_aheadMutex);
++				m_aheadQuit = true;
++			}
++			m_aheadWake.notify_all();
++			m_aheadThread.join();
++		}
++		if(m_aheadFd >= 0) sceIoClose(m_aheadFd);
+ 		if(m_fd >= 0) sceIoClose(m_fd);
+ 	}
+ 
++	static inline bool g_asyncReadAhead = true;
++
+ 	void Seek(int64 position, Framework::STREAM_SEEK_DIRECTION direction) override
+ 	{
+ 		switch(direction)
+@@ -111,14 +135,19 @@
+ 					continue;
+ 				}
+ 				int64 start = m_position - (m_position % SECTOR_SIZE);
+-				if(sceIoLseek(m_fd, start, SCE_SEEK_SET) != start) break;
++				int result = 0;
+ 				auto readStart = std::chrono::steady_clock::now();
+-				int result = sceIoRead(m_fd, m_buffer.data(), BUFFER_SIZE);
++				if(!TakeAhead(start, result))
++				{
++					if(sceIoLseek(m_fd, start, SCE_SEEK_SET) != start) break;
++					result = sceIoRead(m_fd, m_buffer.data(), BUFFER_SIZE);
++				}
+ 				EmuProfile::g_discReadUs += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - readStart).count();
+ 				EmuProfile::g_discReads++;
+ 				if(result <= 0) break;
+ 				m_bufferStart = start;
+ 				m_bufferValid = result;
++				RequestAhead(start + result);
+ 				if(m_position >= m_bufferStart + m_bufferValid) break;
+ 			}
+ 			uint64 offset = m_position - m_bufferStart;
+@@ -148,6 +177,69 @@
+ 		SECTOR_SIZE = 2048,
+ 		BUFFER_SIZE = 128 * 1024,
+ 	};
++	//The read-ahead block: requested at m_aheadStart, filled by the thread
++	void RequestAhead(int64 start)
++	{
++		if(!m_aheadThread.joinable() || (start >= m_size)) return;
++		{
++			std::lock_guard<std::mutex> lock(m_aheadMutex);
++			if(m_aheadBusy) return; //still reading an older one
++			m_aheadStart = start;
++			m_aheadReady = false;
++			m_aheadRequested = true;
++		}
++		m_aheadWake.notify_one();
++	}
++
++	//The block at start from the read-ahead (waits if it is being read)
++	bool TakeAhead(int64 start, int& result)
++	{
++		if(!m_aheadThread.joinable()) return false;
++		std::unique_lock<std::mutex> lock(m_aheadMutex);
++		if(m_aheadStart != start) return false;
++		m_aheadDone.wait(lock, [this]() { return m_aheadReady || (!m_aheadRequested && !m_aheadBusy); });
++		if(!m_aheadReady) return false;
++		m_aheadReady = false;
++		m_aheadStart = -1;
++		std::swap(m_buffer, m_ahead);
++		result = m_aheadValid;
++		return true;
++	}
++
++	void AheadThread()
++	{
++		sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x20000 /* SCE_KERNEL_CPU_MASK_USER_1 */);
++		std::unique_lock<std::mutex> lock(m_aheadMutex);
++		while(true)
++		{
++			m_aheadWake.wait(lock, [this]() { return m_aheadRequested || m_aheadQuit; });
++			if(m_aheadQuit) break;
++			m_aheadRequested = false;
++			m_aheadBusy = true;
++			int64 start = m_aheadStart;
++			lock.unlock();
++			int result = -1;
++			if(sceIoLseek(m_aheadFd, start, SCE_SEEK_SET) == start) result = sceIoRead(m_aheadFd, m_ahead.data(), BUFFER_SIZE);
++			lock.lock();
++			m_aheadBusy = false;
++			if(m_aheadStart == start)
++			{
++				m_aheadValid = result;
++				m_aheadReady = (result > 0);
++			}
++			m_aheadDone.notify_all();
++		}
++	}
++
++	SceUID m_aheadFd = -1;
++	std::vector<uint8> m_ahead;
++	std::thread m_aheadThread;
++	std::mutex m_aheadMutex;
++	std::condition_variable m_aheadWake, m_aheadDone;
++	int64 m_aheadStart = -1;
++	int m_aheadValid = 0;
++	bool m_aheadReady = false, m_aheadRequested = false, m_aheadBusy = false, m_aheadQuit = false;
++
+ 	SceUID m_fd = -1;
+ 	int64 m_size = 0;
+ 	int64 m_position = 0;
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -33,12 +33,15 @@
+ 		SECTION_IOP_IO, //IOP hardware register handlers
+ 		SECTION_IOP_KERNEL, //IOP exceptions: BIOS calls (HLE), interrupts
+ 		SECTION_IOP_TICKS, //IOP timers, DMA and SPU bookkeeping per slice
++		SECTION_IOP_TICKS_COUNTERS, //of which: root counters
++		SECTION_IOP_TICKS_BIOS, //of which: BIOS and HLE modules (SIF, CDVD, memory card)
++		SECTION_IOP_TICKS_DMA, //of which: SPU DMA resume
+ 		SECTION_COUNT
+ 	};
+ 
+ 	inline const char* GetSectionName(unsigned int section)
+ 	{
+-		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle", "SPUsync", "SPUread", "VIFdirect", "VIFunpack", "EEio", "EEkernel", "EEticks", "IOPio", "IOPkernel", "IOPticks"};
++		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle", "SPUsync", "SPUread", "VIFdirect", "VIFunpack", "EEio", "EEkernel", "EEticks", "IOPio", "IOPkernel", "IOPticks", "IOPcounters", "IOPbios", "IOPdma"};
+ 		return (section < SECTION_COUNT) ? names[section] : "?";
+ 	}
+ 

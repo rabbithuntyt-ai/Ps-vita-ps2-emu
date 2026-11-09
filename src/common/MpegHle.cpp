@@ -317,8 +317,9 @@ CMpegHle::~CMpegHle()
 	Disable();
 }
 
-void CMpegHle::Enable(uint8_t* eeRam, const char* logPath, std::function<void()> decoderThreadInit)
+void CMpegHle::Enable(uint8_t* eeRam, const char* logPath, std::function<void()> decoderThreadInit, std::function<void()> copyThreadInit)
 {
+	m_copyThreadInit = std::move(copyThreadInit);
 	Disable();
 	m_ram = eeRam;
 	m_log = std::fopen(logPath, "w");
@@ -413,7 +414,7 @@ std::shared_ptr<const uint8_t> CMpegHle::ImageDataSource(const void* data, uint3
 
 void CMpegHle::CopyThread()
 {
-	if(m_decoderThreadInit) m_decoderThreadInit();
+	if(m_copyThreadInit) m_copyThreadInit();
 	std::unique_lock<std::mutex> lock(m_copyMutex);
 	while(true)
 	{

@@ -803,6 +803,9 @@ namespace
 				mpegHle.Enable(session->GetVm()->m_ee->m_ram, "ux0:data/VitaPS2/mpeghle.txt", [mpegCoreMask]() {
 					sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mpegCoreMask);
 					ThreadProfiler::RegisterCurrentThread("MPEG decoder");
+				}, [mpegCoreMask]() {
+					sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mpegCoreMask);
+					ThreadProfiler::RegisterCurrentThread("MPEG copy");
 				});
 			}
 			// Scripted runs: gs_diag=N logs N flips (buffers, targets) to gsdiag.txt.
@@ -1215,9 +1218,8 @@ namespace
 							if(FILE* calls = std::fopen("ux0:data/VitaPS2/iopcalls.txt", "w"))
 							{
 								for(const auto& entry : CIopBios::g_callCounts) std::fprintf(calls, "%s %u\n", entry.first.c_str(), entry.second);
-								const auto& tick = Iop::CSubSystem::g_tickPartUs;
-								std::fprintf(calls, "ticks calls %u counters_us %llu speed_us %llu bios_us %llu dma_us %llu\n", Iop::CSubSystem::g_tickCalls,
-								             static_cast<unsigned long long>(tick[0]), static_cast<unsigned long long>(tick[1]), static_cast<unsigned long long>(tick[2]), static_cast<unsigned long long>(tick[3]));
+								//Their parts: the IOPcounters, IOPbios and IOPdma profiler sections
+								std::fprintf(calls, "ticks calls %u\n", Iop::CSubSystem::g_tickCalls);
 								const auto& irq = Iop::CSpuBase::g_irqStats;
 								std::fprintf(calls, "spu_irq set_input %u set_watcher %u watcher_hits %u cleared_read %u cleared_ctrl %u\n",
 								             irq[0].load(), irq[1].load(), irq[2].load(), irq[3].load(), irq[4].load());

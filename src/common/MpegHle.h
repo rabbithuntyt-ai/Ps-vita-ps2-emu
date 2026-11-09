@@ -35,8 +35,9 @@ class CMpegHle
 public:
 	~CMpegHle();
 
-	// decoderThreadInit runs first on the decoder thread (core affinity).
-	void Enable(uint8_t* eeRam, const char* logPath, std::function<void()> decoderThreadInit);
+	// decoderThreadInit runs first on the decoder thread (core affinity), copyThreadInit
+	// on the thread copying pictures into EE RAM (g_asyncCopy).
+	void Enable(uint8_t* eeRam, const char* logPath, std::function<void()> decoderThreadInit, std::function<void()> copyThreadInit = nullptr);
 	void Disable();
 	// Resident Evil 4 (USA): its critical sections become a counter in guest code.
 	void EnableThreadLockHle()
@@ -100,6 +101,7 @@ private:
 	size_t m_inputDumpLeft = 0;
 	uint32_t m_errorsLogged = 0;
 	std::function<void()> m_decoderThreadInit;
+	std::function<void()> m_copyThreadInit;
 
 	// EE thread: code patch and the current sceMpegGetPicture call.
 	void PatchThreadLock(CMIPS&);
