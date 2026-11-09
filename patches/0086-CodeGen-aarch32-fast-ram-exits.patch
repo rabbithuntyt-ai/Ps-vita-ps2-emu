@@ -1,0 +1,922 @@
+diff --git a/include/AArch32Assembler.h b/include/AArch32Assembler.h
+--- a/include/AArch32Assembler.h
++++ b/include/AArch32Assembler.h
+@@ -241,6 +241,7 @@
+ 	void Mvn(REGISTER, REGISTER);
+ 	void Mvn(REGISTER, const ImmediateAluOperand&);
+ 	void Or(REGISTER, REGISTER, REGISTER);
++	void Orrs(REGISTER, REGISTER, REGISTER);
+ 	void Or(REGISTER, REGISTER, const ImmediateAluOperand&);
+ 	void Or(CONDITION, REGISTER, REGISTER, const ImmediateAluOperand&);
+ 	void Rsb(REGISTER, REGISTER, const ImmediateAluOperand&);
+@@ -255,8 +256,10 @@
+ 	void Sub(REGISTER, REGISTER, REGISTER);
+ 	void Sub(REGISTER, REGISTER, const ImmediateAluOperand&);
+ 	void Subs(REGISTER, REGISTER, REGISTER);
++	void Subs(REGISTER, REGISTER, const ImmediateAluOperand&);
+ 	void Teq(REGISTER, const ImmediateAluOperand&);
+ 	void Tst(REGISTER, REGISTER);
++	void Tst(REGISTER, const ImmediateAluOperand&);
+ 	void Udiv(REGISTER, REGISTER, REGISTER);
+ 	void Umull(REGISTER, REGISTER, REGISTER, REGISTER);
+ 
+diff --git a/src/AArch32Assembler.cpp b/src/AArch32Assembler.cpp
+--- a/src/AArch32Assembler.cpp
++++ b/src/AArch32Assembler.cpp
+@@ -554,6 +554,11 @@
+ 	GenericAlu(ALU_OPCODE_ORR, false, rd, rn, rm);
+ }
+ 
++void CAArch32Assembler::Orrs(REGISTER rd, REGISTER rn, REGISTER rm)
++{
++	GenericAlu(ALU_OPCODE_ORR, true, rd, rn, rm);
++}
++
+ void CAArch32Assembler::Or(REGISTER rd, REGISTER rn, const ImmediateAluOperand& operand)
+ {
+ 	GenericAlu(ALU_OPCODE_ORR, false, rd, rn, operand);
+@@ -678,6 +683,11 @@
+ 	GenericAlu(ALU_OPCODE_SUB, true, rd, rn, rm);
+ }
+ 
++void CAArch32Assembler::Subs(REGISTER rd, REGISTER rn, const ImmediateAluOperand& operand)
++{
++	GenericAlu(ALU_OPCODE_SUB, true, rd, rn, operand);
++}
++
+ void CAArch32Assembler::Teq(REGISTER rn, const ImmediateAluOperand& operand)
+ {
+ 	InstructionAlu instruction;
+@@ -697,6 +707,20 @@
+ 	GenericAlu(ALU_OPCODE_TST, true, CAArch32Assembler::r0, rn, rm);
+ }
+ 
++void CAArch32Assembler::Tst(REGISTER rn, const ImmediateAluOperand& operand)
++{
++	InstructionAlu instruction;
++	instruction.operand = *reinterpret_cast<const unsigned int*>(&operand);
++	instruction.rn = rn;
++	instruction.rd = 0;
++	instruction.setFlags = 1;
++	instruction.opcode = ALU_OPCODE_TST;
++	instruction.immediate = 1;
++	instruction.condition = CONDITION_AL;
++	uint32 opcode = *reinterpret_cast<uint32*>(&instruction);
++	WriteWord(opcode);
++}
++
+ void CAArch32Assembler::Udiv(REGISTER rd, REGISTER rn, REGISTER rm)
+ {
+ 	uint32 opcode = 0x0730F010;
+diff --git a/include/Jitter.h b/include/Jitter.h
+--- a/include/Jitter.h
++++ b/include/Jitter.h
+@@ -134,6 +134,9 @@
+ 		//Handler: void (*)(void* ctx, uint32 value, uint32 address) up to 4 bytes,
+ 		//         void (*)(void* ctx, uint32 address, const void* value) for 8 and 16 bytes
+ 		void GuestStore(uint32 pageTableOffset, uint32 size, void* handler);
++		//Fast RAM path for the next guest memory ops (GUEST_MEMOP_INFO::FAST_RAM_*): the RAM's host
++		//base pointer is the field after the page table pointer. 0 turns it off.
++		void SetGuestFastRam(uint32 kind);
+ 		//Relative symbols in [begin, end) are not touched by guest memory handlers
+ 		//and may stay in host registers across guest memory ops.
+ 		void AddGuestMemorySafeRange(uint32 begin, uint32 end);
+@@ -416,6 +419,7 @@
+ 
+ 		bool m_blockStarted = false;
+ 		std::vector<std::pair<uint32, uint32>> m_guestMemorySafeRanges;
++		uint32 m_guestFastRam = 0;
+ 
+ 		CArrayStack<SymbolPtr> m_shadow;
+ 		IntStack m_ifStack;
+diff --git a/src/Jitter.cpp b/src/Jitter.cpp
+--- a/src/Jitter.cpp
++++ b/src/Jitter.cpp
+@@ -502,7 +502,7 @@
+ 
+ 	STATEMENT statement;
+ 	statement.op = OP_GUESTLOAD;
+-	statement.memInfo = GUEST_MEMOP_INFO::Make(pageTableOffset, size, signExtend);
++	statement.memInfo = GUEST_MEMOP_INFO::Make(pageTableOffset, size, signExtend, m_guestFastRam);
+ 	statement.src3 = MakeSymbolRef(MakeConstantPtr(reinterpret_cast<uintptr_t>(handler)));
+ 	statement.src1 = MakeSymbolRef(m_shadow.Pull());
+ 	statement.dst = MakeSymbolRef(tempSym);
+@@ -517,13 +517,18 @@
+ 
+ 	STATEMENT statement;
+ 	statement.op = OP_GUESTSTORE;
+-	statement.memInfo = GUEST_MEMOP_INFO::Make(pageTableOffset, size, false);
++	statement.memInfo = GUEST_MEMOP_INFO::Make(pageTableOffset, size, false, m_guestFastRam);
+ 	statement.src3 = MakeSymbolRef(MakeConstantPtr(reinterpret_cast<uintptr_t>(handler)));
+ 	statement.src2 = MakeSymbolRef(m_shadow.Pull());
+ 	statement.src1 = MakeSymbolRef(m_shadow.Pull());
+ 	InsertStatement(statement);
+ }
+ 
++void CJitter::SetGuestFastRam(uint32 kind)
++{
++	m_guestFastRam = kind;
++}
++
+ void CJitter::AddGuestMemorySafeRange(uint32 begin, uint32 end)
+ {
+ 	m_guestMemorySafeRanges.emplace_back(begin, end);
+diff --git a/include/Jitter_Statement.h b/include/Jitter_Statement.h
+--- a/include/Jitter_Statement.h
++++ b/include/Jitter_Statement.h
+@@ -214,11 +214,24 @@
+ 	//Packed in STATEMENT::memInfo
+ 	struct GUEST_MEMOP_INFO
+ 	{
+-		static uint32 Make(uint32 pageTableOffset, uint32 size, bool signExtend)
++		//Fast RAM path: addresses in RAM (or its mirrors) are accessed at the host base
++		//pointer (the field after the page table pointer) without a page lookup.
++		enum
++		{
++			FAST_RAM_NONE = 0,
++			FAST_RAM_EE = 1,  //32 MB at 0: (address & 0xFE000000) == 0, offset = address
++			FAST_RAM_IOP = 2, //2 MB mirrored in 8 MB at 0 and 0x80000000, offset = address & 0x1FFFFF
++		};
++		static uint32 Make(uint32 pageTableOffset, uint32 size, bool signExtend, uint32 fastRam = FAST_RAM_NONE)
+ 		{
+ 			assert((size == 1) || (size == 2) || (size == 4) || (size == 8) || (size == 16));
+ 			assert(pageTableOffset < (1 << 24));
+-			return (pageTableOffset << 8) | (signExtend ? 0x20 : 0) | size;
++			assert(fastRam < 4);
++			return (pageTableOffset << 8) | (fastRam << 6) | (signExtend ? 0x20 : 0) | size;
++		}
++		static uint32 GetFastRam(uint32 info)
++		{
++			return (info >> 6) & 3;
+ 		}
+ 		static uint32 GetSize(uint32 info)
+ 		{
+diff --git a/include/Jitter_CodeGen_AArch32.h b/include/Jitter_CodeGen_AArch32.h
+--- a/include/Jitter_CodeGen_AArch32.h
++++ b/include/Jitter_CodeGen_AArch32.h
+@@ -65,6 +65,13 @@
+ 		// -1: off. Set before any code is generated.
+ 		static void SetPinnedFields(int32 rwField, int32 pointerField);
+ 		static bool GetPinnedFields();
++		//With pinned fields: after a guest memory handler call, a non-zero word at
++		//exceptionField sets the top two bits of the pinned read/write register (the cycle
++		//quota, then about -2^30), so the block's exit sees no quota left and leaves through
++		//its slow path, which adds 2^30 back (CBasicBlock). The exit then needn't test the
++		//exception. -1: off.
++		static void SetExceptionPoison(int32 exceptionField);
++		static bool GetExceptionPoison();
+ 
+ 		uint32 GetLinkEntryOffset() const override;
+ 		bool IsSymbolPinned(const CSymbol*) const override;
+@@ -623,6 +630,22 @@
+ 		void Emit_GuestLoad128(const STATEMENT&);
+ 		void Emit_GuestStore128(const STATEMENT&);
+ 		void Emit_GuestMemoryWideAddress(uint32, uint32, CAArch32Assembler::REGISTER, CAArch32Assembler::LABEL);
++		//Fast RAM path (GUEST_MEMOP_INFO::GetFastRam): branches to coldLabel unless the address is in RAM,
++		//else leaves the host address's base in the returned register and the offset in offsetReg
++		//(which may be addressReg itself).
++		CAArch32Assembler::REGISTER Emit_GuestFastRamCheck(uint32 info, CAArch32Assembler::REGISTER addressReg, CAArch32Assembler::REGISTER baseTmpReg,
++		                                                   CAArch32Assembler::REGISTER offsetTmpReg, CAArch32Assembler::REGISTER& offsetReg, CAArch32Assembler::LABEL coldLabel);
++		//Code emitted after the function's return (slow paths): run in order by GenerateCode
++		bool Emit_PinnedSubs(const STATEMENT&);
++		enum
++		{
++			INVALID_FLAGS_REGISTER = -1
++		};
++		int m_flagsValidReg = INVALID_FLAGS_REGISTER; //flags hold this register compared to 0
++		int m_flagsNextReg = INVALID_FLAGS_REGISTER;
++		void AddColdCode(std::function<void()>);
++		void Emit_GuestSlowPath(uint32 info, CAArch32Assembler::LABEL slowLabel, CAArch32Assembler::LABEL doneLabel, std::function<void()> body);
++		std::vector<std::function<void()>> m_coldCode;
+ 		void LoadStackOrContextAddress(CAArch32Assembler::REGISTER, CAArch32Assembler::REGISTER, uint32);
+ 		void LoadMemorySymbolAddress(CAArch32Assembler::REGISTER, CSymbol*);
+ 
+diff --git a/src/Jitter_CodeGen_AArch32.cpp b/src/Jitter_CodeGen_AArch32.cpp
+--- a/src/Jitter_CodeGen_AArch32.cpp
++++ b/src/Jitter_CodeGen_AArch32.cpp
+@@ -373,6 +373,18 @@
+ 	return (g_pinnedRwField >= 0) && (g_pinnedPointerField >= 0);
+ }
+ 
++static int32 g_exceptionPoisonField = -1;
++
++void CCodeGen_AArch32::SetExceptionPoison(int32 exceptionField)
++{
++	g_exceptionPoisonField = ((exceptionField >= 0) && (exceptionField < 0x1000)) ? exceptionField : -1;
++}
++
++bool CCodeGen_AArch32::GetExceptionPoison()
++{
++	return (g_exceptionPoisonField >= 0) && GetPinnedFields();
++}
++
+ unsigned int CCodeGen_AArch32::GetAvailableRegisterCount() const
+ {
+ 	static_assert(MAX_REGISTERS == 7, "the pinned registers are the last two");
+@@ -601,6 +613,7 @@
+ 
+ 	m_chained = g_chainedFrames;
+ 	m_pinned = m_chained && GetPinnedFields();
++	m_coldCode.clear();
+ 	m_chainedExtraStack = 0;
+ 	m_linkEntryOffset = 0;
+ 	if(m_chained)
+@@ -647,8 +660,14 @@
+ 
+ 	Emit_Prolog();
+ 
++	m_flagsNextReg = INVALID_FLAGS_REGISTER;
+ 	for(const auto& statement : statements)
+ 	{
++		//Flags set by the previous statement only (Emit_PinnedSubs)
++		m_flagsValidReg = m_flagsNextReg;
++		m_flagsNextReg = INVALID_FLAGS_REGISTER;
++		if((statement.op == OP_SUB) && Emit_PinnedSubs(statement)) continue;
++
+ 		bool found = false;
+ 		auto begin = m_matchers.lower_bound(statement.op);
+ 		auto end = m_matchers.upper_bound(statement.op);
+@@ -674,6 +693,13 @@
+ 	Emit_Epilog();
+ 	m_assembler.Bx(CAArch32Assembler::rLR);
+ 
++	//Slow paths, out of the hot code
++	for(size_t i = 0; i < m_coldCode.size(); i++)
++	{
++		m_coldCode[i]();
++	}
++	m_coldCode.clear();
++
+ 	m_assembler.ResolveLabelReferences();
+ 	m_assembler.ClearLabels();
+ 	m_assembler.ResolveLiteralReferences();
+@@ -1519,6 +1545,15 @@
+ 	{
+ 		m_assembler.Vpop(firstMd, mdCount);
+ 	}
++	if(m_pinned && (g_exceptionPoisonField >= 0))
++	{
++		//An exception from the handler (SetExceptionPoison): the quota (positive, under 2^30 in a
++		//block) gets its top two bits set, quota - 2^30: no overflow when the block's cycles are
++		//taken off (0xC0000000: 3 rotated right by 2)
++		m_assembler.Ldr(CAArch32Assembler::r12, g_baseRegister, CAArch32Assembler::MakeImmediateLdrAddress(g_exceptionPoisonField));
++		m_assembler.Cmp(CAArch32Assembler::r12, CAArch32Assembler::MakeImmediateAluOperand(0, 0));
++		m_assembler.Or(CAArch32Assembler::CONDITION_NE, g_pinnedRwRegister, g_pinnedRwRegister, CAArch32Assembler::MakeImmediateAluOperand(3, 1));
++	}
+ }
+ 
+ void CCodeGen_AArch32::Emit_GuestLoad(const STATEMENT& statement)
+@@ -1530,66 +1565,142 @@
+ 	uint32 size = GUEST_MEMOP_INFO::GetSize(info);
+ 	bool signExtend = GUEST_MEMOP_INFO::IsSignExtend(info);
+ 
+-	auto slowLabel = m_assembler.CreateLabel();
+ 	auto doneLabel = m_assembler.CreateLabel();
+ 
+ 	auto addressReg = PrepareSymbolRegisterUse(src1, CAArch32Assembler::r1);
+ 	auto dstReg = PrepareSymbolRegisterDef(dst, CAArch32Assembler::r0);
+-	auto pageReg = CAArch32Assembler::r2;
+-	auto offsetReg = CAArch32Assembler::r3;
++	auto handler = src3->GetConstantPtr();
+ 
+-	Emit_GuestMemoryPageLookup(GUEST_MEMOP_INFO::GetPageTableOffset(info), addressReg, pageReg, offsetReg);
+-	m_assembler.BCc(CAArch32Assembler::CONDITION_EQ, slowLabel);
++	auto emitAccess = [this, size, signExtend, dstReg](CAArch32Assembler::REGISTER baseReg, CAArch32Assembler::REGISTER offsetReg) {
++		switch(size)
++		{
++		case 4:
++			m_assembler.Ldr(dstReg, baseReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
++			break;
++		case 2:
++			if(signExtend)
++				m_assembler.Ldrsh(dstReg, baseReg, offsetReg);
++			else
++				m_assembler.Ldrh(dstReg, baseReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
++			break;
++		case 1:
++			if(signExtend)
++				m_assembler.Ldrsb(dstReg, baseReg, offsetReg);
++			else
++				m_assembler.Ldrb(dstReg, baseReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
++			break;
++		default:
++			assert(false);
++			break;
++		}
++	};
+ 
+-	switch(size)
+-	{
+-	case 4:
+-		m_assembler.Ubfx(offsetReg, addressReg, 2, 10);
+-		m_assembler.Ldr(dstReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg, CAArch32Assembler::SHIFT_LSL, 2));
+-		break;
+-	case 2:
+-		m_assembler.Ubfx(offsetReg, addressReg, 0, 12);
+-		m_assembler.Bic(offsetReg, offsetReg, CAArch32Assembler::MakeImmediateAluOperand(1, 0));
+-		if(signExtend)
+-			m_assembler.Ldrsh(dstReg, pageReg, offsetReg);
+-		else
+-			m_assembler.Ldrh(dstReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
+-		break;
+-	case 1:
+-		m_assembler.Ubfx(offsetReg, addressReg, 0, 12);
+-		if(signExtend)
+-			m_assembler.Ldrsb(dstReg, pageReg, offsetReg);
++	//Page lookup, access and handler call; ends at doneLabel
++	auto emitPagePath = [this, info, size, signExtend, addressReg, dstReg, handler, doneLabel, emitAccess](bool branchToDone) {
++		auto slowLabel = m_assembler.CreateLabel();
++		auto pageReg = CAArch32Assembler::r2;
++		auto offsetReg = CAArch32Assembler::r3;
++
++		Emit_GuestMemoryPageLookup(GUEST_MEMOP_INFO::GetPageTableOffset(info), addressReg, pageReg, offsetReg);
++		m_assembler.BCc(CAArch32Assembler::CONDITION_EQ, slowLabel);
++
++		if(size == 4)
++		{
++			m_assembler.Ubfx(offsetReg, addressReg, 2, 10);
++			m_assembler.Ldr(dstReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg, CAArch32Assembler::SHIFT_LSL, 2));
++		}
+ 		else
+-			m_assembler.Ldrb(dstReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
+-		break;
+-	default:
+-		assert(false);
+-		break;
+-	}
+-	m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
++		{
++			m_assembler.Ubfx(offsetReg, addressReg, 0, 12);
++			if(size == 2) m_assembler.Bic(offsetReg, offsetReg, CAArch32Assembler::MakeImmediateAluOperand(1, 0));
++			emitAccess(pageReg, offsetReg);
++		}
++		m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
++
++		m_assembler.MarkLabel(slowLabel);
++		if(addressReg != CAArch32Assembler::r1)
++		{
++			m_assembler.Mov(CAArch32Assembler::r1, addressReg);
++		}
++		m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
++		Emit_GuestMemoryHandlerCall(handler);
++		if(signExtend && (size == 1))
++		{
++			m_assembler.Sxtb(dstReg, CAArch32Assembler::r0);
++		}
++		else if(signExtend && (size == 2))
++		{
++			m_assembler.Sxth(dstReg, CAArch32Assembler::r0);
++		}
++		else if(dstReg != CAArch32Assembler::r0)
++		{
++			m_assembler.Mov(dstReg, CAArch32Assembler::r0);
++		}
++		if(branchToDone) m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
++	};
+ 
+-	m_assembler.MarkLabel(slowLabel);
+-	if(addressReg != CAArch32Assembler::r1)
++	if(GUEST_MEMOP_INFO::GetFastRam(info) != GUEST_MEMOP_INFO::FAST_RAM_NONE)
+ 	{
+-		m_assembler.Mov(CAArch32Assembler::r1, addressReg);
++		auto coldLabel = m_assembler.CreateLabel();
++		auto offsetReg = addressReg;
++		auto baseReg = Emit_GuestFastRamCheck(info, addressReg, CAArch32Assembler::r2, CAArch32Assembler::r3, offsetReg, coldLabel);
++		emitAccess(baseReg, offsetReg);
++		auto stackLevel = m_stackLevel;
++		AddColdCode([this, coldLabel, stackLevel, emitPagePath]() {
++			m_stackLevel = stackLevel;
++			m_assembler.MarkLabel(coldLabel);
++			emitPagePath(true);
++		});
+ 	}
+-	m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
+-	Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
+-	if(signExtend && (size == 1))
++	else
+ 	{
+-		m_assembler.Sxtb(dstReg, CAArch32Assembler::r0);
++		emitPagePath(false);
+ 	}
+-	else if(signExtend && (size == 2))
++
++	m_assembler.MarkLabel(doneLabel);
++	CommitSymbolRegister(dst, dstReg);
++}
++
++void CCodeGen_AArch32::AddColdCode(std::function<void()> code)
++{
++	m_coldCode.push_back(std::move(code));
++}
++
++CAArch32Assembler::REGISTER CCodeGen_AArch32::Emit_GuestFastRamCheck(uint32 info, CAArch32Assembler::REGISTER addressReg, CAArch32Assembler::REGISTER baseTmpReg,
++                                                                     CAArch32Assembler::REGISTER offsetTmpReg, CAArch32Assembler::REGISTER& offsetReg, CAArch32Assembler::LABEL coldLabel)
++{
++	auto baseField = static_cast<int32>(GUEST_MEMOP_INFO::GetPageTableOffset(info) + sizeof(void*));
++	auto baseReg = baseTmpReg;
++	if(m_pinned && (baseField == g_pinnedPointerField))
+ 	{
+-		m_assembler.Sxth(dstReg, CAArch32Assembler::r0);
++		baseReg = g_pinnedPointerRegister;
+ 	}
+-	else if(dstReg != CAArch32Assembler::r0)
++	else
+ 	{
+-		m_assembler.Mov(dstReg, CAArch32Assembler::r0);
++		assert(baseField < 0x1000);
++		m_assembler.Ldr(baseReg, g_baseRegister, CAArch32Assembler::MakeImmediateLdrAddress(baseField));
+ 	}
+-
+-	m_assembler.MarkLabel(doneLabel);
+-	CommitSymbolRegister(dst, dstReg);
++	switch(GUEST_MEMOP_INFO::GetFastRam(info))
++	{
++	case GUEST_MEMOP_INFO::FAST_RAM_EE:
++		//0xFE000000: 0xFE rotated right by 8
++		m_assembler.Tst(addressReg, CAArch32Assembler::MakeImmediateAluOperand(0xFE, 4));
++		m_assembler.BCc(CAArch32Assembler::CONDITION_NE, coldLabel);
++		offsetReg = addressReg;
++		break;
++	case GUEST_MEMOP_INFO::FAST_RAM_IOP:
++		//(address & 0x7FFFFFFF) < 8 MB, then the 2 MB mirror offset
++		m_assembler.Mov(offsetTmpReg, CAArch32Assembler::MakeRegisterAluOperand(addressReg, CAArch32Assembler::MakeConstantShift(CAArch32Assembler::SHIFT_LSL, 1)));
++		m_assembler.Cmp(offsetTmpReg, CAArch32Assembler::MakeImmediateAluOperand(0x01, 4));
++		m_assembler.BCc(CAArch32Assembler::CONDITION_CS, coldLabel);
++		m_assembler.Ubfx(offsetTmpReg, addressReg, 0, 21);
++		offsetReg = offsetTmpReg;
++		break;
++	default:
++		assert(false);
++		break;
++	}
++	return baseReg;
+ }
+ 
+ void CCodeGen_AArch32::Emit_GuestStore(const STATEMENT& statement)
+@@ -1600,46 +1711,83 @@
+ 	uint32 info = statement.memInfo;
+ 	uint32 size = GUEST_MEMOP_INFO::GetSize(info);
+ 
+-	auto slowLabel = m_assembler.CreateLabel();
+ 	auto doneLabel = m_assembler.CreateLabel();
+ 
+ 	auto addressReg = PrepareSymbolRegisterUse(src1, CAArch32Assembler::r1);
+ 	auto valueReg = PrepareSymbolRegisterUse(src2, CAArch32Assembler::r2);
+-	auto pageReg = CAArch32Assembler::r0;
+-	auto offsetReg = CAArch32Assembler::r3;
++	auto handler = src3->GetConstantPtr();
++
++	auto emitPagePath = [this, info, size, addressReg, valueReg, handler, doneLabel](bool branchToDone) {
++		auto slowLabel = m_assembler.CreateLabel();
++		auto pageReg = CAArch32Assembler::r0;
++		auto offsetReg = CAArch32Assembler::r3;
++
++		Emit_GuestMemoryPageLookup(GUEST_MEMOP_INFO::GetPageTableOffset(info), addressReg, pageReg, offsetReg);
++		m_assembler.BCc(CAArch32Assembler::CONDITION_EQ, slowLabel);
++
++		switch(size)
++		{
++		case 4:
++			m_assembler.Ubfx(offsetReg, addressReg, 2, 10);
++			m_assembler.Str(valueReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg, CAArch32Assembler::SHIFT_LSL, 2));
++			break;
++		case 2:
++			m_assembler.Ubfx(offsetReg, addressReg, 0, 12);
++			m_assembler.Bic(offsetReg, offsetReg, CAArch32Assembler::MakeImmediateAluOperand(1, 0));
++			m_assembler.Strh(valueReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
++			break;
++		case 1:
++			m_assembler.Ubfx(offsetReg, addressReg, 0, 12);
++			m_assembler.Strb(valueReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
++			break;
++		default:
++			assert(false);
++			break;
++		}
++		m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
+ 
+-	Emit_GuestMemoryPageLookup(GUEST_MEMOP_INFO::GetPageTableOffset(info), addressReg, pageReg, offsetReg);
+-	m_assembler.BCc(CAArch32Assembler::CONDITION_EQ, slowLabel);
++		//Handler parameters: context, value, address
++		//(address is in r1 or an allocated register, value in r2 or an allocated register)
++		m_assembler.MarkLabel(slowLabel);
++		m_assembler.Mov(CAArch32Assembler::r3, addressReg);
++		m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
++		m_assembler.Mov(CAArch32Assembler::r1, valueReg);
++		m_assembler.Mov(CAArch32Assembler::r2, CAArch32Assembler::r3);
++		Emit_GuestMemoryHandlerCall(handler);
++		if(branchToDone) m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
++	};
+ 
+-	switch(size)
++	if(GUEST_MEMOP_INFO::GetFastRam(info) != GUEST_MEMOP_INFO::FAST_RAM_NONE)
+ 	{
+-	case 4:
+-		m_assembler.Ubfx(offsetReg, addressReg, 2, 10);
+-		m_assembler.Str(valueReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg, CAArch32Assembler::SHIFT_LSL, 2));
+-		break;
+-	case 2:
+-		m_assembler.Ubfx(offsetReg, addressReg, 0, 12);
+-		m_assembler.Bic(offsetReg, offsetReg, CAArch32Assembler::MakeImmediateAluOperand(1, 0));
+-		m_assembler.Strh(valueReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
+-		break;
+-	case 1:
+-		m_assembler.Ubfx(offsetReg, addressReg, 0, 12);
+-		m_assembler.Strb(valueReg, pageReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
+-		break;
+-	default:
+-		assert(false);
+-		break;
++		auto coldLabel = m_assembler.CreateLabel();
++		auto offsetReg = addressReg;
++		auto baseReg = Emit_GuestFastRamCheck(info, addressReg, CAArch32Assembler::r0, CAArch32Assembler::r3, offsetReg, coldLabel);
++		switch(size)
++		{
++		case 4:
++			m_assembler.Str(valueReg, baseReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
++			break;
++		case 2:
++			m_assembler.Strh(valueReg, baseReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
++			break;
++		case 1:
++			m_assembler.Strb(valueReg, baseReg, CAArch32Assembler::MakeRegisterLdrAddress(offsetReg));
++			break;
++		default:
++			assert(false);
++			break;
++		}
++		auto stackLevel = m_stackLevel;
++		AddColdCode([this, coldLabel, stackLevel, emitPagePath]() {
++			m_stackLevel = stackLevel;
++			m_assembler.MarkLabel(coldLabel);
++			emitPagePath(true);
++		});
++	}
++	else
++	{
++		emitPagePath(false);
+ 	}
+-	m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
+-
+-	//Handler parameters: context, value, address
+-	//(address is in r1 or an allocated register, value in r2 or an allocated register)
+-	m_assembler.MarkLabel(slowLabel);
+-	m_assembler.Mov(CAArch32Assembler::r3, addressReg);
+-	m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
+-	m_assembler.Mov(CAArch32Assembler::r1, valueReg);
+-	m_assembler.Mov(CAArch32Assembler::r2, CAArch32Assembler::r3);
+-	Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
+ 
+ 	m_assembler.MarkLabel(doneLabel);
+ }
+@@ -1683,10 +1831,31 @@
+ 	auto pageReg = CAArch32Assembler::r2;
+ 	auto hostAddressReg = CAArch32Assembler::r3;
+ 	uint8 sizeShift = (size == 16) ? 4 : 3;
+-	Emit_GuestMemoryPageLookup(GUEST_MEMOP_INFO::GetPageTableOffset(info), addressReg, pageReg, hostAddressReg);
+-	m_assembler.BCc(CAArch32Assembler::CONDITION_EQ, slowLabel);
+-	m_assembler.Ubfx(hostAddressReg, addressReg, sizeShift, 12 - sizeShift);
+-	m_assembler.Add(hostAddressReg, pageReg, CAArch32Assembler::MakeRegisterAluOperand(hostAddressReg, CAArch32Assembler::MakeConstantShift(CAArch32Assembler::SHIFT_LSL, sizeShift)));
++	auto emitPagePath = [this, info, addressReg, pageReg, hostAddressReg, sizeShift, slowLabel]() {
++		Emit_GuestMemoryPageLookup(GUEST_MEMOP_INFO::GetPageTableOffset(info), addressReg, pageReg, hostAddressReg);
++		m_assembler.BCc(CAArch32Assembler::CONDITION_EQ, slowLabel);
++		m_assembler.Ubfx(hostAddressReg, addressReg, sizeShift, 12 - sizeShift);
++		m_assembler.Add(hostAddressReg, pageReg, CAArch32Assembler::MakeRegisterAluOperand(hostAddressReg, CAArch32Assembler::MakeConstantShift(CAArch32Assembler::SHIFT_LSL, sizeShift)));
++	};
++	if(GUEST_MEMOP_INFO::GetFastRam(info) == GUEST_MEMOP_INFO::FAST_RAM_NONE)
++	{
++		emitPagePath();
++		return;
++	}
++	//RAM: host address = base + offset, aligned down. Else the page lookup, out of line,
++	//comes back to resumeLabel (or goes to slowLabel).
++	auto coldLabel = m_assembler.CreateLabel();
++	auto resumeLabel = m_assembler.CreateLabel();
++	auto offsetReg = addressReg;
++	auto baseReg = Emit_GuestFastRamCheck(info, addressReg, pageReg, hostAddressReg, offsetReg, coldLabel);
++	m_assembler.Bic(hostAddressReg, offsetReg, CAArch32Assembler::MakeImmediateAluOperand(static_cast<uint8>(size - 1), 0));
++	m_assembler.Add(hostAddressReg, baseReg, hostAddressReg);
++	m_assembler.MarkLabel(resumeLabel);
++	AddColdCode([this, coldLabel, resumeLabel, emitPagePath]() {
++		m_assembler.MarkLabel(coldLabel);
++		emitPagePath();
++		m_assembler.BCc(CAArch32Assembler::CONDITION_AL, resumeLabel);
++	});
+ }
+ 
+ void CCodeGen_AArch32::Emit_GuestLoad64(const STATEMENT& statement)
+@@ -1702,21 +1871,43 @@
+ 	Emit_GuestMemoryWideAddress(statement.memInfo, 8, addressReg, slowLabel);
+ 	m_assembler.Ldrd(CAArch32Assembler::r0, CAArch32Assembler::r3, CAArch32Assembler::MakeImmediateLdrAddress(0));
+ 	StoreRegistersInMemory64(dst, CAArch32Assembler::r0, CAArch32Assembler::r1);
+-	m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
+ 
+ 	//Handler parameters: context, address, value pointer
+-	m_assembler.MarkLabel(slowLabel);
+-	if(addressReg != CAArch32Assembler::r1)
+-	{
+-		m_assembler.Mov(CAArch32Assembler::r1, addressReg);
+-	}
+-	m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
+-	LoadMemorySymbolAddress(CAArch32Assembler::r2, dst);
+-	Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
++	Emit_GuestSlowPath(statement.memInfo, slowLabel, doneLabel, [this, addressReg, dst, src3]() {
++		if(addressReg != CAArch32Assembler::r1)
++		{
++			m_assembler.Mov(CAArch32Assembler::r1, addressReg);
++		}
++		m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
++		LoadMemorySymbolAddress(CAArch32Assembler::r2, dst);
++		Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
++	});
+ 
+ 	m_assembler.MarkLabel(doneLabel);
+ }
+ 
++//The handler call of a wide access: after the function's code with the fast RAM path
++//(only reached from its out of line page lookup), else inline after a branch over it
++void CCodeGen_AArch32::Emit_GuestSlowPath(uint32 info, CAArch32Assembler::LABEL slowLabel, CAArch32Assembler::LABEL doneLabel, std::function<void()> body)
++{
++	if(GUEST_MEMOP_INFO::GetFastRam(info) != GUEST_MEMOP_INFO::FAST_RAM_NONE)
++	{
++		auto stackLevel = m_stackLevel;
++		AddColdCode([this, stackLevel, slowLabel, doneLabel, body]() {
++			m_stackLevel = stackLevel;
++			m_assembler.MarkLabel(slowLabel);
++			body();
++			m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
++		});
++	}
++	else
++	{
++		m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
++		m_assembler.MarkLabel(slowLabel);
++		body();
++	}
++}
++
+ void CCodeGen_AArch32::Emit_GuestStore64(const STATEMENT& statement)
+ {
+ 	auto src1 = statement.src1->GetSymbol().get();
+@@ -1730,28 +1921,28 @@
+ 	Emit_GuestMemoryWideAddress(statement.memInfo, 8, addressReg, slowLabel);
+ 	LoadSymbol64InRegisters(CAArch32Assembler::r0, CAArch32Assembler::r1, src2);
+ 	m_assembler.Strd(CAArch32Assembler::r0, CAArch32Assembler::r3, CAArch32Assembler::MakeImmediateLdrAddress(0));
+-	m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
+ 
+ 	//Handler parameters: context, address, value pointer
+-	m_assembler.MarkLabel(slowLabel);
+-	if(src2->m_type == SYM_CONSTANT64)
+-	{
+-		LoadStackOrContextAddress(CAArch32Assembler::r2, CAArch32Assembler::rSP, m_param128SpillBase + m_stackLevel);
+-		LoadConstantInRegister(CAArch32Assembler::r0, src2->m_valueLow);
+-		m_assembler.Str(CAArch32Assembler::r0, CAArch32Assembler::r2, CAArch32Assembler::MakeImmediateLdrAddress(0));
+-		LoadConstantInRegister(CAArch32Assembler::r0, src2->m_valueHigh);
+-		m_assembler.Str(CAArch32Assembler::r0, CAArch32Assembler::r2, CAArch32Assembler::MakeImmediateLdrAddress(4));
+-	}
+-	else
+-	{
+-		LoadMemorySymbolAddress(CAArch32Assembler::r2, src2);
+-	}
+-	if(addressReg != CAArch32Assembler::r1)
+-	{
+-		m_assembler.Mov(CAArch32Assembler::r1, addressReg);
+-	}
+-	m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
+-	Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
++	Emit_GuestSlowPath(statement.memInfo, slowLabel, doneLabel, [this, addressReg, src2, src3]() {
++		if(src2->m_type == SYM_CONSTANT64)
++		{
++			LoadStackOrContextAddress(CAArch32Assembler::r2, CAArch32Assembler::rSP, m_param128SpillBase + m_stackLevel);
++			LoadConstantInRegister(CAArch32Assembler::r0, src2->m_valueLow);
++			m_assembler.Str(CAArch32Assembler::r0, CAArch32Assembler::r2, CAArch32Assembler::MakeImmediateLdrAddress(0));
++			LoadConstantInRegister(CAArch32Assembler::r0, src2->m_valueHigh);
++			m_assembler.Str(CAArch32Assembler::r0, CAArch32Assembler::r2, CAArch32Assembler::MakeImmediateLdrAddress(4));
++		}
++		else
++		{
++			LoadMemorySymbolAddress(CAArch32Assembler::r2, src2);
++		}
++		if(addressReg != CAArch32Assembler::r1)
++		{
++			m_assembler.Mov(CAArch32Assembler::r1, addressReg);
++		}
++		m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
++		Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
++	});
+ 
+ 	m_assembler.MarkLabel(doneLabel);
+ }
+@@ -1770,31 +1961,31 @@
+ 	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
+ 	m_assembler.Vld1_32x4(dstReg, CAArch32Assembler::r3);
+ 	CommitSymbolRegisterMd(dst, dstReg);
+-	m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
+ 
+ 	//Handler parameters: context, address, value pointer
+-	m_assembler.MarkLabel(slowLabel);
+-	if(addressReg != CAArch32Assembler::r1)
+-	{
+-		m_assembler.Mov(CAArch32Assembler::r1, addressReg);
+-	}
+-	m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
+-	bool inRegister = (dst->m_type == SYM_REGISTER128);
+-	if(inRegister)
+-	{
+-		//Result goes through the spill slot (MD registers are restored after the call)
+-		LoadStackOrContextAddress(CAArch32Assembler::r2, CAArch32Assembler::rSP, m_param128SpillBase + m_stackLevel);
+-	}
+-	else
+-	{
+-		LoadMemorySymbolAddress(CAArch32Assembler::r2, dst);
+-	}
+-	Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
+-	if(inRegister)
+-	{
+-		LoadStackOrContextAddress(CAArch32Assembler::r3, CAArch32Assembler::rSP, m_param128SpillBase + m_stackLevel);
+-		m_assembler.Vld1_32x4(g_registersMd[dst->m_valueLow], CAArch32Assembler::r3);
+-	}
++	Emit_GuestSlowPath(statement.memInfo, slowLabel, doneLabel, [this, addressReg, dst, src3]() {
++		if(addressReg != CAArch32Assembler::r1)
++		{
++			m_assembler.Mov(CAArch32Assembler::r1, addressReg);
++		}
++		m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
++		bool inRegister = (dst->m_type == SYM_REGISTER128);
++		if(inRegister)
++		{
++			//Result goes through the spill slot (MD registers are restored after the call)
++			LoadStackOrContextAddress(CAArch32Assembler::r2, CAArch32Assembler::rSP, m_param128SpillBase + m_stackLevel);
++		}
++		else
++		{
++			LoadMemorySymbolAddress(CAArch32Assembler::r2, dst);
++		}
++		Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
++		if(inRegister)
++		{
++			LoadStackOrContextAddress(CAArch32Assembler::r3, CAArch32Assembler::rSP, m_param128SpillBase + m_stackLevel);
++			m_assembler.Vld1_32x4(g_registersMd[dst->m_valueLow], CAArch32Assembler::r3);
++		}
++	});
+ 
+ 	m_assembler.MarkLabel(doneLabel);
+ }
+@@ -1812,25 +2003,25 @@
+ 	Emit_GuestMemoryWideAddress(statement.memInfo, 16, addressReg, slowLabel);
+ 	auto valueReg = PrepareSymbolRegisterUseMd(src2, CAArch32Assembler::q0);
+ 	m_assembler.Vst1_32x4(valueReg, CAArch32Assembler::r3);
+-	m_assembler.BCc(CAArch32Assembler::CONDITION_AL, doneLabel);
+ 
+ 	//Handler parameters: context, address, value pointer
+-	m_assembler.MarkLabel(slowLabel);
+-	if(src2->m_type == SYM_REGISTER128)
+-	{
+-		LoadStackOrContextAddress(CAArch32Assembler::r2, CAArch32Assembler::rSP, m_param128SpillBase + m_stackLevel);
+-		m_assembler.Vst1_32x4(g_registersMd[src2->m_valueLow], CAArch32Assembler::r2);
+-	}
+-	else
+-	{
+-		LoadMemorySymbolAddress(CAArch32Assembler::r2, src2);
+-	}
+-	if(addressReg != CAArch32Assembler::r1)
+-	{
+-		m_assembler.Mov(CAArch32Assembler::r1, addressReg);
+-	}
+-	m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
+-	Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
++	Emit_GuestSlowPath(statement.memInfo, slowLabel, doneLabel, [this, addressReg, src2, src3]() {
++		if(src2->m_type == SYM_REGISTER128)
++		{
++			LoadStackOrContextAddress(CAArch32Assembler::r2, CAArch32Assembler::rSP, m_param128SpillBase + m_stackLevel);
++			m_assembler.Vst1_32x4(g_registersMd[src2->m_valueLow], CAArch32Assembler::r2);
++		}
++		else
++		{
++			LoadMemorySymbolAddress(CAArch32Assembler::r2, src2);
++		}
++		if(addressReg != CAArch32Assembler::r1)
++		{
++			m_assembler.Mov(CAArch32Assembler::r1, addressReg);
++		}
++		m_assembler.Mov(CAArch32Assembler::r0, g_baseRegister);
++		Emit_GuestMemoryHandlerCall(src3->GetConstantPtr());
++	});
+ 
+ 	m_assembler.MarkLabel(doneLabel);
+ }
+@@ -2063,10 +2254,34 @@
+ 	assert(src2->m_type == SYM_CONSTANT);
+ 
+ 	auto src1Reg = PrepareSymbolRegisterUse(src1, CAArch32Assembler::r1);
+-	Cmp_GenericRegCst(src1Reg, src2->m_valueLow, CAArch32Assembler::r2);
++	//Compared to 0 right after Emit_PinnedSubs set the flags from it (no overflow there)
++	//(N and Z as a compare with 0 sets them; signed conditions and equality only: C differs)
++	auto cond = statement.jmpCondition;
++	bool signedOrEqual = (cond == CONDITION_EQ) || (cond == CONDITION_NE) || (cond == CONDITION_LT) || (cond == CONDITION_LE) ||
++	                     (cond == CONDITION_GT) || (cond == CONDITION_GE);
++	bool flagsSet = signedOrEqual && (src2->m_valueLow == 0) && (m_flagsValidReg == static_cast<int>(src1Reg));
++	if(!flagsSet) Cmp_GenericRegCst(src1Reg, src2->m_valueLow, CAArch32Assembler::r2);
+ 	Emit_CondJmp(statement);
+ }
+ 
++//The pinned read/write register (the cycle quota) minus a constant: subs, and the next
++//compare of it with 0 uses these flags
++bool CCodeGen_AArch32::Emit_PinnedSubs(const STATEMENT& statement)
++{
++	auto dst = statement.dst->GetSymbol().get();
++	auto src1 = statement.src1->GetSymbol().get();
++	auto src2 = statement.src2->GetSymbol().get();
++	CAArch32Assembler::REGISTER dstReg, src1Reg;
++	if(!GetPinnedRegister(dst, dstReg) || (dstReg != g_pinnedRwRegister)) return false;
++	if(!GetPinnedRegister(src1, src1Reg) || (src1Reg != dstReg)) return false;
++	if(src2->m_type != SYM_CONSTANT) return false;
++	uint8 immediate = 0, shiftAmount = 0;
++	if(!TryGetAluImmediateParams(src2->m_valueLow, immediate, shiftAmount)) return false;
++	m_assembler.Subs(dstReg, dstReg, CAArch32Assembler::MakeImmediateAluOperand(immediate, shiftAmount));
++	m_flagsNextReg = dstReg;
++	return true;
++}
++
+ void CCodeGen_AArch32::Emit_CondJmp_Ref_VarCst(const STATEMENT& statement)
+ {
+ 	auto src1 = statement.src1->GetSymbol().get();
+diff --git a/src/Jitter_CodeGen_AArch32_64.cpp b/src/Jitter_CodeGen_AArch32_64.cpp
+--- a/src/Jitter_CodeGen_AArch32_64.cpp
++++ b/src/Jitter_CodeGen_AArch32_64.cpp
+@@ -801,37 +801,48 @@
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 	auto src2 = statement.src2->GetSymbol().get();
+ 
+-	auto dstReg = PrepareSymbolRegisterDef(dst, CAArch32Assembler::r0);
+-	auto src1Reg = CAArch32Assembler::r1;
+-	auto src2Reg = CAArch32Assembler::r2;
+-	auto tempValReg = CAArch32Assembler::r3;
++	assert((statement.jmpCondition == Jitter::CONDITION_EQ) || (statement.jmpCondition == Jitter::CONDITION_NE));
+ 
+-	/////////////////////////////////////////
+-	//Check high order word
+-	LoadMemory64HighInRegister(src1Reg, src1);
+-	Cmp64_RegSymHi(src1Reg, src2, src2Reg);
+-	Cmp_GetFlag(tempValReg, statement.jmpCondition);
++	auto dstReg = PrepareSymbolRegisterDef(dst, CAArch32Assembler::r0);
++	auto hiReg = CAArch32Assembler::r1;
++	auto loReg = CAArch32Assembler::r2;
++	auto tmpReg = CAArch32Assembler::r3;
+ 
+-	/////////////////////////////////////////
+-	//Check low order word
+-	LoadMemory64LowInRegister(src1Reg, src1);
+-	Cmp64_RegSymLo(src1Reg, src2, src2Reg);
++	//(hi1 ^ hi2) | (lo1 ^ lo2), flags set: Z when equal
++	auto xorWord = [&](CAArch32Assembler::REGISTER reg, bool high) {
++		if(high)
++			LoadMemory64HighInRegister(reg, src1);
++		else
++			LoadMemory64LowInRegister(reg, src1);
++		if(src2->m_type == SYM_CONSTANT64)
++		{
++			uint32 value = high ? src2->m_valueHigh : src2->m_valueLow;
++			if(value == 0) return;
++			uint8 immediate = 0, shiftAmount = 0;
++			if(TryGetAluImmediateParams(value, immediate, shiftAmount))
++			{
++				m_assembler.Eor(reg, reg, CAArch32Assembler::MakeImmediateAluOperand(immediate, shiftAmount));
++			}
++			else
++			{
++				LoadConstantInRegister(tmpReg, value);
++				m_assembler.Eor(reg, reg, tmpReg);
++			}
++		}
++		else
++		{
++			if(high)
++				LoadMemory64HighInRegister(tmpReg, src2);
++			else
++				LoadMemory64LowInRegister(tmpReg, src2);
++			m_assembler.Eor(reg, reg, tmpReg);
++		}
++	};
++	xorWord(hiReg, true);
++	xorWord(loReg, false);
++	m_assembler.Orrs(hiReg, hiReg, loReg);
+ 	Cmp_GetFlag(dstReg, statement.jmpCondition);
+ 
+-	if(statement.jmpCondition == Jitter::CONDITION_EQ)
+-	{
+-		m_assembler.And(dstReg, dstReg, tempValReg);
+-	}
+-	else if(statement.jmpCondition == Jitter::CONDITION_NE)
+-	{
+-		m_assembler.Or(dstReg, dstReg, tempValReg);
+-	}
+-	else
+-	{
+-		//Shouldn't get here
+-		assert(false);
+-	}
+-
+ 	CommitSymbolRegister(dst, dstReg);
+ }
+ 

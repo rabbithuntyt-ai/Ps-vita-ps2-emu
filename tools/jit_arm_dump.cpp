@@ -83,9 +83,15 @@ int main(int argc, char** argv)
 	Jitter::CCodeGen_AArch32::SetChainedFrames(chained);
 	Jitter::CCodeGen_AArch32::SetGuestMemoryOps(true);
 	Jitter::CCodeGen_AArch32::SetConservativeAllocation(false);
+	// JIT_NO_FAST_RAM: page lookups for RAM too (fast_ram=0)
+	bool fastRam = (std::getenv("JIT_NO_FAST_RAM") == nullptr);
+	ee.m_fastRamBase = ram.data();
+	ee.m_fastRamKind = fastRam ? 1 : 0;
 	if(std::getenv("JIT_NO_PINNED") == nullptr)
-		Jitter::CCodeGen_AArch32::SetPinnedFields(offsetof(CMIPS, m_State.cycleQuota), offsetof(CMIPS, m_pageLookup));
+		Jitter::CCodeGen_AArch32::SetPinnedFields(offsetof(CMIPS, m_State.cycleQuota), fastRam ? offsetof(CMIPS, m_fastRamBase) : offsetof(CMIPS, m_pageLookup));
 	CMA_MIPSIV::SetSignExtTracking(true);
+	Jitter::CCodeGen_AArch32::SetExceptionPoison(offsetof(CMIPS, m_State.nHasException));
+	CBasicBlock::EnableMemoryExceptionPoison(chained && Jitter::CCodeGen_AArch32::GetExceptionPoison());
 
 	if(findEnd != 0)
 	{
@@ -116,6 +122,7 @@ int main(int argc, char** argv)
 					CMipsJitter jitter(new Jitter::CCodeGen_AArch32());
 					jitter.SetStream(&stream);
 					jitter.Begin();
+					jitter.SetGuestFastRam(ee.m_fastRamKind);
 					region.CompileRange(&jitter);
 					jitter.End();
 				}
@@ -153,6 +160,7 @@ int main(int argc, char** argv)
 			CMipsJitter jitter(new Jitter::CCodeGen_AArch32());
 			jitter.SetStream(&stream);
 			jitter.Begin();
+			jitter.SetGuestFastRam(ee.m_fastRamKind);
 			block.CompileRange(&jitter);
 			jitter.End();
 		}

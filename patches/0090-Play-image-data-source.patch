@@ -1,0 +1,37 @@
+diff --git a/Source/gs/GSHandler.h b/Source/gs/GSHandler.h
+--- a/Source/gs/GSHandler.h
++++ b/Source/gs/GSHandler.h
+@@ -851,6 +851,11 @@
+ 	void ResetVBlank();
+ 
+ 	void FeedImageData(const void*, uint32);
++	//A buffer already holding image data the GIF sends (a native movie picture also
++	//copied to EE RAM): FeedImageData passes it on instead of a copy. Returns null when
++	//it has none for [data, data + length); else it holds length + 0x10 readable bytes
++	//and stays alive as long as the returned pointer.
++	static inline std::function<std::shared_ptr<const uint8>(const void* data, uint32 length)> g_imageDataSource;
+ 	void ReadImageData(void*, uint32);
+ 
+ 	inline void WriteRegister(const RegisterWrite& write)
+diff --git a/Source/gs/GSHandler.cpp b/Source/gs/GSHandler.cpp
+--- a/Source/gs/GSHandler.cpp
++++ b/Source/gs/GSHandler.cpp
+@@ -641,6 +641,18 @@
+ 	m_transferCount++;
+ #endif
+ 
++	if(g_imageDataSource)
++	{
++		if(auto source = g_imageDataSource(data, length))
++		{
++			SendGSCall(
++			    [this, source, length]() {
++				    FeedImageDataImpl(source.get(), length);
++			    });
++			return;
++		}
++	}
++
+ 	//Allocate 0x10 more bytes to allow transfer handlers
+ 	//to read beyond the actual length of the buffer (ie.: PSMCT24)
+ 

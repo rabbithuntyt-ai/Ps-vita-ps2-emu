@@ -22,6 +22,7 @@
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -65,8 +66,12 @@ public:
 		double needDataMs = 0;    //work thrown away: pictures decoded in part, then short of data
 		uint32_t adxPolls = 0;    //ADXM_ExecMain calls that ended the EE's slice (polling for a file)
 		uint32_t dllLookups = 0;  //SN DLL symbol scans done natively
+		uint64_t zeroCopyBytes = 0; //image data the GS took from picture buffers, not copies
 	};
 	STATS GetStats();
+	//RGB32 pictures given to the GS from their buffer when the game sends them on
+	//(no copy of the EE RAM bytes for the GS thread; `movie_zero_copy`, on by default)
+	static inline bool g_zeroCopy = true;
 
 private:
 	struct PICTURE
@@ -145,6 +150,12 @@ private:
 	size_t m_working = 0;            //bytes the decoder holds
 	std::deque<PICTURE> m_pictures;
 	std::vector<std::vector<uint8_t>> m_freeBuffers; //macroblock buffers given back by the EE thread
+	//The last RGB32 picture given to the game, the GS's source for it (EE thread)
+	std::shared_ptr<std::vector<uint8_t>> m_shownPicture;
+	uint32_t m_shownAddress = 0, m_shownBytes = 0, m_shownVblank = 0;
+	std::thread::id m_shownThread;
+	uint32_t m_sourceLogs = 0;
+	std::shared_ptr<const uint8_t> ImageDataSource(const void*, uint32_t);
 	uint32_t m_generation = 0;       //bumped by resets
 	bool m_quit = false;
 	std::atomic<bool> m_outputRgb{false}; //set before the input sink is: read by the decoder thread

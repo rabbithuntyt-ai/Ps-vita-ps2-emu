@@ -15,9 +15,9 @@ OUT=$ROOT/runs/jit-fuzz-$(date +%Y%m%d-%H%M)
 mkdir -p "$OUT"
 DATA=ux0:data/VitaPS2
 pass=0; fail=0
-for mode in ${MODES:-"" "--loops"}; do
+for mode in ${MODES:-"--likely" "--loops --likely"}; do
 	for ((seed=1; seed<=COUNT; seed++)); do
-		name=fuzz_${seed}${mode:+_loops}
+		name=fuzz_${seed}${mode//[- ]/_}
 		WOUT=$(echo "$OUT" | sed -E 's|^/([a-zA-Z])/|/mnt/\L\1/|')
 		MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu-24.04 -u root -- bash -c "python3 $WROOT/tools/make_ee_fuzz_elf.py $WOUT/$name.elf $seed ${SIZE:-} $mode && cd /tmp && timeout 60 /root/build-host/vitaps2_host $WOUT/$name.elf --frames 60 --timeout 50 2>&1 | grep '^EE s6' > $WOUT/$name.expected" </dev/null >/dev/null 2>&1
 		expected=$(cat "$OUT/$name.expected" 2>/dev/null)

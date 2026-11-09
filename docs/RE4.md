@@ -338,6 +338,34 @@ so the offset extract goes away, about 1.5% overall). A large cut needs guest me
 mapped straight into the host address space (not available to Vita user code) or
 code that keeps guest values in registers across blocks (tier 2).
 
+### Tier 2, second round: fast RAM and cheaper exits (2026-11-08, patches 0086-0090)
+
+Measured warm on the Vita, intro, four runs each (AOT_TRANSLATION.md has the details):
+
+| Build | Pictures/s | Emulated fps |
+|---|---|---|
+| Before (kernel calls inside the slice) | 16.2 | 33.8 |
+| Fast RAM path, 64-bit compares, likely branch exits | 17.65 | 36.8 |
+| Memory exceptions in the quota, `subs`, cold 64/128-bit slow paths | **18.35** | **38.2** |
+
+Per emulated frame (ms, sampling profiler, `ps2_*` columns): EE code 14.3 -> 11.1, IOP code
+4.1 -> 3.0. Left: EE kernel calls 2.8 (half of it the picture copy into EE RAM), IOP
+kernel calls 1.9, VIF direct 1.7, SPU2 register reads 1.4, IOP ticks 1.4, other 0.9, EE
+ticks 0.6, EE I/O 0.5: about 26 ms per frame against 16.7 for 60.
+
+Found on the way:
+- **`steady_clock::now()` costs several microseconds on the Vita.** The per-call timers of
+  `syscalls.txt` (patch 0085) mostly measure themselves: the EE "reschedule" at 7 us per call
+  is the timer. Only 10700 of 269000 reschedule calls switch threads. A profiled run
+  (`ee_hot_after`) runs at 12 pictures/s; use the sampling sections for shares.
+- **The SPU2 IRQ re-assertion is wanted by RE4's driver**: `spu_irq_ticks` (IOP ticks
+  between re-assertions, 1000 by default) at 4000 or 8000 gives 17.3-17.4 pictures/s
+  against 18.35.
+- **Movie pictures don't reach the GIF from where `sceMpegGetPicture` put them**: a
+  zero-copy hand-off of the picture buffer to the GS thread (`movie_zero_copy`, patch
+  0090) caught only about 28 KB per 688 KB picture and changed nothing. Where the GIF's
+  image data comes from is logged next (`image data` lines in `mpeghle.txt`).
+
 ### Is a locked 30 reachable? The CPU budget (2026-11-08)
 
 The Vita gives an app three cores at 444 MHz (already set). At a real 30 pictures/s

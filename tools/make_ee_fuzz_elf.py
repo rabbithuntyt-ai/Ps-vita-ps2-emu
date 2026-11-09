@@ -4,6 +4,9 @@
 # Usage: make_ee_fuzz_elf.py out.elf SEED [COUNT] [--loops]
 #   --loops: also counted loops (t9) around random bodies, some with forward
 #            branches inside (exercises loop register promotion)
+#   --likely: also likely branches (beql...: the delay slot runs only when taken),
+#            some loops closed by bnel. Off by default: the recorded checksums of the
+#            host tests are for programs without them.
 import os, random, struct, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import make_test_elf as m
@@ -13,6 +16,7 @@ POOL = [R[n] for n in 't0 t1 t2 t3 t4 t5 t6 t7 s0 s1 s2 s3 s4 s5 v0 v1'.split()]
 rng = random.Random(int(sys.argv[2]))
 args = [a for a in sys.argv[1:] if not a.startswith('--')]
 loops = '--loops' in sys.argv
+likely = '--likely' in sys.argv
 count = int(args[2]) if len(args) > 2 else 3000
 code = []
 
@@ -50,14 +54,21 @@ def alu():
     else: Rr(rng.choice([0x04, 0x06, 0x07]), reg(), reg(), dst())      # sllv/srlv/srav
 
 def branch(skip):
-    k = rng.randrange(7)
+    k = rng.randrange(13 if likely else 7)
     if k == 0: I(0x04, reg(), reg(), skip)        # beq
     elif k == 1: I(0x05, reg(), reg(), skip)      # bne
     elif k == 2: I(0x06, reg(), 0, skip)          # blez
     elif k == 3: I(0x07, reg(), 0, skip)          # bgtz
     elif k == 4: I(0x01, reg(), 0, skip)          # bltz
     elif k == 5: I(0x01, reg(), 1, skip)          # bgez
-    else: I(0x05, reg(), 0, skip)                 # bne rs, zero
+    elif k == 6: I(0x05, reg(), 0, skip)          # bne rs, zero
+    # Likely forms: the delay slot runs only when taken
+    elif k == 7: I(0x14, reg(), reg(), skip)      # beql
+    elif k == 8: I(0x15, reg(), rng.choice([0, reg()]), skip)  # bnel
+    elif k == 9: I(0x16, reg(), 0, skip)          # blezl
+    elif k == 10: I(0x17, reg(), 0, skip)         # bgtzl
+    elif k == 11: I(0x01, reg(), 2, skip)         # bltzl
+    else: I(0x01, reg(), 3, skip)                 # bgezl
 
 def li(r, v):
     I(0x0F, 0, r, v >> 16); I(0x0D, r, r, v & 0xFFFF)
@@ -82,7 +93,8 @@ for i in range(count):
             else:
                 alu()
         I(0x09, T9, T9, 0xFFFF)                  # addiu t9, t9, -1
-        I(0x05, T9, 0, top - (len(code) + 1))    # bne t9, zero, top
+        back = 0x15 if (likely and rng.random() < 0.3) else 0x05
+        I(back, T9, 0, top - (len(code) + 1))    # bne(l) t9, zero, top
         alu()                                    # delay slot
     elif rng.random() < 0.12:
         skip = rng.randrange(1, 4)

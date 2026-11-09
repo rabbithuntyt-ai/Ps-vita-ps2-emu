@@ -167,6 +167,8 @@ public:
 	//Cycle quota and page table pointer in registers across linked blocks (AArch32,
 	//on by default). Before SetSafeJit.
 	static void SetPinnedFields(bool);
+	//EE and IOP loads and stores in RAM without the page lookup (AArch32, on by default). Before SetSafeJit.
+	static void SetFastRam(bool);
 	//Block exits without the tests their guest code makes needless (on by default)
 	static void SetCheapExits(bool);
 	// Tier 2 regions: blocks of a function compiled as one (off by default).

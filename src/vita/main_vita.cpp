@@ -251,6 +251,7 @@ namespace
 		bool jitRegions = false; //tier 2 regions: blocks of a function compiled as one
 		bool cheapExits = true; //block exits skip tests the block's code makes needless
 		bool pinnedFields = true; //cycle quota and page table pointer in registers across linked blocks
+		bool fastRam = true; //EE and IOP loads and stores in RAM without the page lookup
 		bool iopStayInSlice = true; //IOP kernel calls handled without leaving the time slice
 		bool eeStayInSlice = true; //EE kernel calls handled without leaving the time slice
 		bool threadedSpu = true; //SPU2 audio mixing on the second core
@@ -291,11 +292,14 @@ namespace
 		else if(key == "jit_regions") settings.jitRegions = value != 0;
 		else if(key == "cheap_exits") settings.cheapExits = value != 0;
 		else if(key == "pinned_fields") settings.pinnedFields = value != 0;
+		else if(key == "fast_ram") settings.fastRam = value != 0;
+		else if(key == "spu_irq_ticks") Iop::CSubSystem::g_spuIrqCheckDelay = std::max(100, static_cast<int>(value)); //1000 by default
 		else if(key == "iop_stay_in_slice") settings.iopStayInSlice = value != 0;
 		else if(key == "ee_stay_in_slice") settings.eeStayInSlice = value != 0;
 		else if(key == "threaded_spu") settings.threadedSpu = value != 0;
 		else if(key == "jit_cache") settings.jitCache = value != 0;
 		else if(key == "mpeg_hle") settings.movieHle = value != 0;
+		else if(key == "movie_zero_copy") CMpegHle::g_zeroCopy = value != 0;
 	}
 
 	// What the first-boot tuner found for a game (CAutoTuner).
@@ -694,6 +698,7 @@ namespace
 		// Before anything is compiled for this game.
 		CEmuSession::SetIndirectDispatch(settings.indirectJit);
 		CEmuSession::SetPinnedFields(settings.pinnedFields);
+		CEmuSession::SetFastRam(settings.fastRam);
 		Iop::CSubSystem::g_stayInSlice = settings.iopStayInSlice;
 		Ee::CSubSystem::g_stayInSlice = settings.eeStayInSlice;
 		CEmuSession::SetRegions(settings.jitRegions);
@@ -1207,6 +1212,9 @@ namespace
 							if(FILE* calls = std::fopen("ux0:data/VitaPS2/iopcalls.txt", "w"))
 							{
 								for(const auto& entry : CIopBios::g_callCounts) std::fprintf(calls, "%s %u\n", entry.first.c_str(), entry.second);
+								const auto& tick = Iop::CSubSystem::g_tickPartUs;
+								std::fprintf(calls, "ticks calls %u counters_us %llu speed_us %llu bios_us %llu dma_us %llu\n", Iop::CSubSystem::g_tickCalls,
+								             static_cast<unsigned long long>(tick[0]), static_cast<unsigned long long>(tick[1]), static_cast<unsigned long long>(tick[2]), static_cast<unsigned long long>(tick[3]));
 								const auto& irq = Iop::CSpuBase::g_irqStats;
 								std::fprintf(calls, "spu_irq set_input %u set_watcher %u watcher_hits %u cleared_read %u cleared_ctrl %u\n",
 								             irq[0].load(), irq[1].load(), irq[2].load(), irq[3].load(), irq[4].load());

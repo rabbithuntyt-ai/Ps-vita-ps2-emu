@@ -7,6 +7,7 @@
 #include "MIPS.h"
 #include "ee/IPU.h"
 #include "ee/PS2OS.h"
+#include "gs/GSHandler.h"
 
 namespace
 {
@@ -326,6 +327,7 @@ void CMpegHle::Enable(uint8_t* eeRam, const char* logPath, std::function<void()>
 	m_thread = std::thread([this]() { DecoderThread(); });
 	CIPU::SetResetObserver(&CMpegHle::OnIpuReset, this);
 	CPS2OS::SetHleHooks(&CMpegHle::OnSyscall, &CMpegHle::OnVBlank, this);
+	CGSHandler::g_imageDataSource = [this](const void* data, uint32_t length) { return ImageDataSource(data, length); };
 	unsigned int simdFailures = Mpeg2Simd::SelfTest();
 	Log("movie HLE enabled (decoder kernels: %s, %u self-test mismatches)\n", Mpeg2Simd::g_neon ? "NEON" : "scalar", simdFailures);
 }
@@ -334,6 +336,8 @@ void CMpegHle::Disable()
 {
 	if(!m_ram) return;
 	CPS2OS::SetHleHooks(nullptr, nullptr, nullptr);
+	CGSHandler::g_imageDataSource = nullptr;
+	m_shownPicture.reset();
 	CPS2OS::g_dispatchLockAddress = 0;
 	m_threadLockPatched = false;
 	CIPU::SetResetObserver(nullptr, nullptr);
@@ -374,6 +378,32 @@ void CMpegHle::Log(const char* format, ...)
 	std::vfprintf(m_log, format, args);
 	va_end(args);
 	std::fflush(m_log);
+}
+
+// EE thread (FeedImageData): image data read from the last RGB32 picture's place in EE
+// RAM, while the game sends it (a few vblanks), comes from the picture's buffer. Bytes
+// the game changed there in between would not be seen: RE4 only sends them.
+std::shared_ptr<const uint8_t> CMpegHle::ImageDataSource(const void* data, uint32_t length)
+{
+	if(!m_shownPicture || !m_ram) return nullptr;
+	//Only the thread that owns m_shownPicture (a threaded VU1 also sends image data)
+	if(std::this_thread::get_id() != m_shownThread) return nullptr;
+	if((m_vblanks - m_shownVblank) > 4) return nullptr;
+	auto address = static_cast<const uint8_t*>(data);
+	const uint8_t* begin = m_ram + m_shownAddress;
+	if(m_sourceLogs < 64)
+	{
+		//Where image data comes from while a picture is shown (EE RAM offset, or outside it)
+		m_sourceLogs++;
+		bool inRam = (address >= m_ram) && (address < (m_ram + 0x02000000));
+		Log("image data %u bytes from %s 0x%08X (picture at 0x%08X)\n", length, inRam ? "EE RAM" : "outside EE RAM",
+		    inRam ? static_cast<uint32_t>(address - m_ram) : 0, m_shownAddress);
+	}
+	if((address < begin) || ((address + length) > (begin + m_shownBytes))) return nullptr;
+	size_t offset = address - begin;
+	if((offset + length + 0x10) > m_shownPicture->size()) return nullptr;
+	m_stats.zeroCopyBytes += length;
+	return std::shared_ptr<const uint8_t>(m_shownPicture, m_shownPicture->data() + offset);
 }
 
 void CMpegHle::OnVBlank(void* context, CMIPS& ee)
@@ -1004,9 +1034,27 @@ void CMpegHle::HandleGetPicture(CMIPS& ee, bool first)
 			m_stats.copyMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - copyStart).count();
 			if(m_frameIndex < 3) Log("give picture %u after %u waits\n", m_frameIndex, m_waitsThisPicture);
 			// The buffer goes back to the decoder: no new 688 KB to clear per picture.
+			// RGB32 pictures stay as the GS's source of the same bytes for a few vblanks
+			// (ImageDataSource): the GIF sends them in columns right after this call.
 			{
 				std::lock_guard<std::mutex> lock(m_mutex);
-				if(m_freeBuffers.size() < 4) m_freeBuffers.push_back(std::move(picture.macroblocks));
+				auto recycle = [&](std::vector<uint8_t>&& buffer) {
+					if(m_freeBuffers.size() < 4) m_freeBuffers.push_back(std::move(buffer));
+				};
+				if(m_shownPicture && (m_shownPicture.use_count() == 1)) recycle(std::move(*m_shownPicture));
+				m_shownPicture.reset();
+				if(variant.rgb && g_zeroCopy)
+				{
+					m_shownPicture = std::make_shared<std::vector<uint8_t>>(std::move(picture.macroblocks));
+					m_shownAddress = m_buffer;
+					m_shownBytes = static_cast<uint32_t>(bytes);
+					m_shownVblank = m_vblanks;
+					m_shownThread = std::this_thread::get_id();
+				}
+				else
+				{
+					recycle(std::move(picture.macroblocks));
+				}
 			}
 			//libmpeg's per-picture fields (docs/HLE_MPEG.md): picture size (set
 			//by libmpeg from the sequence header), frame count from 0,
@@ -1217,7 +1265,8 @@ void CMpegHle::DecoderThread()
 			// A recycled buffer of the same size is not cleared again (every byte
 			// is written below).
 			picture.macroblocks = std::move(buffer);
-			picture.macroblocks.resize(mbWidth * mbHeight * (rgb ? 0x400 : 0x180));
+			// 0x10 more: the GS reads that far past image data (CGSHandler::g_imageDataSource).
+			picture.macroblocks.resize(mbWidth * mbHeight * (rgb ? 0x400 : 0x180) + 0x10);
 			picture.width = frame.width;
 			picture.height = frame.height;
 			// Macroblocks column by column (libmpeg's output order: Silent Hill
@@ -1294,9 +1343,10 @@ void CMpegHle::DecoderThread()
 				m_stats.decodeMs += ms;
 				if((m_stats.decoded % 60) == 1)
 				{
-					Log("picture %u: %.1f ms (avg %.1f), %u returned, %u waits, input %u bytes; all calls %.0f ms, %u short of data (%.0f ms); EE thread copying %.0f ms\n", m_stats.decoded, ms,
+					Log("picture %u: %.1f ms (avg %.1f), %u returned, %u waits, input %u bytes; all calls %.0f ms, %u short of data (%.0f ms); EE thread copying %.0f ms; GS took %u KB from picture buffers\n", m_stats.decoded, ms,
 					    m_stats.decodeMs / m_stats.decoded, m_stats.pictures, m_stats.waits,
-					    static_cast<unsigned int>(m_working + m_incoming.size()), m_stats.allCallsMs, m_stats.needDataCalls, m_stats.needDataMs, m_stats.copyMs);
+					    static_cast<unsigned int>(m_working + m_incoming.size()), m_stats.allCallsMs, m_stats.needDataCalls, m_stats.needDataMs, m_stats.copyMs,
+					    static_cast<unsigned int>(m_stats.zeroCopyBytes / 1024));
 					uint32_t samples[Mpeg2Profile::STAGE_COUNT], total = 0;
 					for(unsigned int i = 0; i < Mpeg2Profile::STAGE_COUNT; i++) total += (samples[i] = Mpeg2Profile::g_samples[i].load(std::memory_order_relaxed));
 					total = std::max<uint32_t>(total, 1);

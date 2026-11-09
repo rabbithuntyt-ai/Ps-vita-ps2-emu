@@ -1,0 +1,248 @@
+diff --git a/Source/BasicBlock.h b/Source/BasicBlock.h
+--- a/Source/BasicBlock.h
++++ b/Source/BasicBlock.h
+@@ -166,6 +166,9 @@
+ 	}
+ 	void CompileLikelyEpilog(CMipsJitter*, bool loopsOnItself);
+ 	void AnalyseExit();
++	//Slow exits: undo the top bits set in the quota by a memory handler's exception
++	//(EnableMemoryExceptionPoison)
++	static void CompileQuotaPoisonFix(CMipsJitter*);
+ 	//nPC = the taken branch's target (from nPC when the offset is known)
+ 	void PushTakenPc(CMipsJitter*);
+ 
+@@ -188,6 +191,18 @@
+ 		return g_fastRam;
+ 	}
+ 	static inline bool g_fastRam = true;
++	//The code generator flags exceptions raised by guest memory handlers in the
++	//cycle quota (CCodeGen_AArch32::SetExceptionPoison): loads and stores then
++	//can't leave an exception the exit has to test for.
++	static void EnableMemoryExceptionPoison(bool enabled)
++	{
++		g_memoryExceptionPoison = enabled;
++	}
++	static bool GetMemoryExceptionPoison()
++	{
++		return g_memoryExceptionPoison;
++	}
++	static inline bool g_memoryExceptionPoison = false;
+ 
+ 
+ protected:
+diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
+--- a/Source/BasicBlock.cpp
++++ b/Source/BasicBlock.cpp
+@@ -313,6 +313,10 @@
+ 	//Anything else (memory accesses call handlers on their slow path, COP0/1/2,
+ 	//MMI, syscall) keeps the test.
+ 	bool noException = true;
++	//Loads and stores done by guest memory ops flag a handler's exception in the quota
++	//(no TLB exception checks compiled in front of them)
++	bool memoryOpsSafe = g_memoryExceptionPoison && (m_context.m_pageLookup != nullptr) &&
++	                     ((m_context.m_pAddrTranslator == &CMIPS::TranslateAddress64) || (m_context.m_TLBExceptionChecker == nullptr));
+ 	for(uint32 address = m_begin; address <= m_end; address += 4)
+ 	{
+ 		uint32 op = getOp(address);
+@@ -336,6 +340,24 @@
+ 			//ADDIU R0, R0, x: the IOP's dynamic linking stubs, a syscall (CMA_MIPSIV::ADDIU)
+ 			safe = ((op >> 16) & 0x3FF) != 0;
+ 			break;
++		//lq, sq, lb, lh, lw, lbu, lhu, lwu, sb, sh, sw, lwc1, swc1, ld, sd
++		case 0x1E:
++		case 0x1F:
++		case 0x20:
++		case 0x21:
++		case 0x23:
++		case 0x24:
++		case 0x25:
++		case 0x27:
++		case 0x28:
++		case 0x29:
++		case 0x2B:
++		case 0x31:
++		case 0x39:
++		case 0x37:
++		case 0x3F:
++			safe = memoryOpsSafe;
++			break;
+ 		default:
+ 			safe = ((top >= 0x02) && (top <= 0x0F)) || ((top >= 0x14) && (top <= 0x17));
+ 			break;
+@@ -382,6 +404,21 @@
+ #endif
+ }
+ 
++void CBasicBlock::CompileQuotaPoisonFix(CMipsJitter* jitter)
++{
++	//A poisoned quota is about -2^30 (top two bits set on a positive quota): add 2^30 back
++	jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
++	jitter->PushCst(0xE0000000);
++	jitter->BeginIf(Jitter::CONDITION_LT);
++	{
++		jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
++		jitter->PushCst(0x40000000);
++		jitter->Add();
++		jitter->PullRel(offsetof(CMIPS, m_State.cycleQuota));
++	}
++	jitter->EndIf();
++}
++
+ //Block ending in a likely branch: the branch jumps to m_likelyExitLabel when not taken
+ //(the delay slot doesn't run), else falls through here after the delay slot.
+ //Each path has its own exit, nDelayedJumpAddr is never set.
+@@ -432,6 +469,7 @@
+ 		jitter->EndIf();
+ 
+ 		//Slow path: back to the executor
++		CompileQuotaPoisonFix(jitter);
+ 		jitter->PushRel(offsetof(CMIPS, m_State.nHasException));
+ 		jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
+ 		jitter->PushCst(0);
+@@ -564,6 +602,7 @@
+ #endif
+ 
+ 	//Slow path (the only path without block linking)
++	CompileQuotaPoisonFix(jitter);
+ 	static_assert(MIPS_EXCEPTION_STATUS_QUOTADONE == 0x80, "QUOTADONE must be 0x80");
+ 	jitter->PushRel(offsetof(CMIPS, m_State.nHasException));
+ 	jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
+diff --git a/Source/ee/EeBasicBlock.cpp b/Source/ee/EeBasicBlock.cpp
+--- a/Source/ee/EeBasicBlock.cpp
++++ b/Source/ee/EeBasicBlock.cpp
+@@ -419,6 +419,7 @@
+ 
+ 	jitter->MarkLastBlockLabel();
+ 	jitter->MarkLabel(exitLabel);
++	CompileQuotaPoisonFix(jitter);
+ 	//Back to the executor: flag the quota as done when it is
+ 	static_assert(MIPS_EXCEPTION_STATUS_QUOTADONE == 0x80, "QUOTADONE must be 0x80");
+ 	jitter->PushRel(offsetof(CMIPS, m_State.nHasException));
+diff --git a/Source/ee/PS2OS.h b/Source/ee/PS2OS.h
+--- a/Source/ee/PS2OS.h
++++ b/Source/ee/PS2OS.h
+@@ -75,10 +75,11 @@
+ 	static inline uint32 g_syscallCounts[128] = {};
+ 	//With g_syscallTiming: microseconds spent in HandleSyscall and calls, by number
+ 	//(0-127), then 128 reschedule, 129 exit interrupt, 130 libmc2, 131 dispatch
+-	//unlock, 132-147 HLE calls 0xA00-0xA0F, 148 other.
++	//unlock, 132-147 HLE calls 0xA00-0xA0F, 148 other; 149 thread switches
++	//(ThreadSwitchContext to another thread), 150 their context saves, 151 loads.
+ 	enum
+ 	{
+-		SYSCALL_TIMING_SLOTS = 149,
++		SYSCALL_TIMING_SLOTS = 152,
+ 	};
+ 	static inline bool g_syscallTiming = false;
+ 	static inline uint64 g_syscallTimeUs[SYSCALL_TIMING_SLOTS] = {};
+diff --git a/Source/ee/PS2OS.cpp b/Source/ee/PS2OS.cpp
+--- a/Source/ee/PS2OS.cpp
++++ b/Source/ee/PS2OS.cpp
+@@ -1054,9 +1054,32 @@
+ 	}
+ }
+ 
++namespace
++{
++	//g_syscallTiming: time of a part of a kernel call in a timing slot
++	struct PART_TIMER
++	{
++		uint32 slot;
++		bool active = CPS2OS::g_syscallTiming;
++		std::chrono::steady_clock::time_point start;
++		PART_TIMER(uint32 slot)
++		    : slot(slot)
++		{
++			if(active) start = std::chrono::steady_clock::now();
++		}
++		~PART_TIMER()
++		{
++			if(!active) return;
++			CPS2OS::g_syscallTimeUs[slot] += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
++			CPS2OS::g_syscallTimedCalls[slot]++;
++		}
++	};
++}
++
+ void CPS2OS::ThreadSwitchContext(uint32 id)
+ {
+ 	if(id == m_currentThreadId) return;
++	PART_TIMER switchTimer(149);
+ 
+ 	//Save the context of the current thread
+ 	{
+@@ -1092,6 +1115,7 @@
+ 
+ void CPS2OS::ThreadSaveContext(THREAD* thread, bool interrupt)
+ {
++	PART_TIMER timer(150);
+ 	if(interrupt)
+ 	{
+ 		thread->contextPtr = BIOS_ADDRESS_INTERRUPT_THREAD_CONTEXT;
+@@ -1133,6 +1157,7 @@
+ 
+ void CPS2OS::ThreadLoadContext(THREAD* thread, bool interrupt)
+ {
++	PART_TIMER timer(151);
+ 	assert(thread->contextPtr != 0);
+ 	assert(!interrupt || (thread->contextPtr == BIOS_ADDRESS_INTERRUPT_THREAD_CONTEXT));
+ 
+diff --git a/Source/iop/Iop_SubSystem.h b/Source/iop/Iop_SubSystem.h
+--- a/Source/iop/Iop_SubSystem.h
++++ b/Source/iop/Iop_SubSystem.h
+@@ -33,6 +33,13 @@
+ 		//instead of returning after each one (on by default)
+ 		static inline bool g_stayInSlice = true;
+ 		void CountTicks(int);
++		//Profiling (CIopBios::g_callCounting): calls of CountTicks and microseconds in
++		//its parts: 0 root counters, 1 speed, 2 BIOS (modules), 3 DMA resume, 4 SPU2 IRQ line
++		static inline uint32 g_tickCalls = 0;
++		//IOP ticks between SPU2 IRQ line updates: the line is asserted again while the
++		//IRQ flag stays set (a driver that never clears it gets an interrupt each time)
++		static inline int g_spuIrqCheckDelay = 1000;
++		static inline uint64 g_tickPartUs[5] = {};
+ 
+ 		void NotifyVBlankStart();
+ 		void NotifyVBlankEnd();
+diff --git a/Source/iop/Iop_SubSystem.cpp b/Source/iop/Iop_SubSystem.cpp
+--- a/Source/iop/Iop_SubSystem.cpp
++++ b/Source/iop/Iop_SubSystem.cpp
+@@ -1,4 +1,5 @@
+ #include "Iop_SubSystem.h"
++#include <chrono>
+ #include "IopBios.h"
+ #include "GenericMipsExecutor.h"
+ #include "../psx/PsxBios.h"
+@@ -434,10 +435,15 @@
+ {
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_IOP_TICKS);
+ 	static const int g_dmaUpdateDelay = 10000;
+-	static const int g_spuIrqCheckDelay = 1000;
++	bool timing = CIopBios::g_callCounting;
++	auto now = [timing]() -> uint64 { return timing ? static_cast<uint64>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()) : 0; };
++	uint64 t0 = now();
+ 	m_counters.Update(ticks);
++	uint64 t1 = now();
+ 	m_speed.CountTicks(ticks);
++	uint64 t2 = now();
+ 	m_bios->CountTicks(ticks);
++	uint64 t3 = now();
+ 	m_dmaUpdateTicks += ticks;
+ 	if(m_dmaUpdateTicks >= g_dmaUpdateDelay)
+ 	{
+@@ -445,6 +451,15 @@
+ 		m_dmac.ResumeDma(Iop::CDmac::CHANNEL_SPU1);
+ 		m_dmaUpdateTicks -= g_dmaUpdateDelay;
+ 	}
++	uint64 t4 = now();
++	if(timing)
++	{
++		g_tickCalls++;
++		g_tickPartUs[0] += t1 - t0;
++		g_tickPartUs[1] += t2 - t1;
++		g_tickPartUs[2] += t3 - t2;
++		g_tickPartUs[3] += t4 - t3;
++	}
+ 	m_spuIrqUpdateTicks += ticks;
+ 	if(m_spuIrqUpdateTicks >= g_spuIrqCheckDelay)
+ 	{

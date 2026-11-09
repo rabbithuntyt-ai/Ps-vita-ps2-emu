@@ -86,9 +86,10 @@ namespace
 		}
 #if defined(__arm__) && !defined(__aarch64__)
 		// Modes that change the generated code without changing the executable.
-		uint8 modes[5] = {Jitter::CCodeGen_AArch32::GetConservativeAllocation(), Jitter::CCodeGen_AArch32::GetChainedFrames(),
+		uint8 modes[7] = {Jitter::CCodeGen_AArch32::GetConservativeAllocation(), Jitter::CCodeGen_AArch32::GetChainedFrames(),
 		                  Jitter::CCodeGen_AArch32::GetGuestMemoryOps(), CBasicBlock::GetCheapExits(),
-		                  Jitter::CCodeGen_AArch32::GetPinnedFields()};
+		                  Jitter::CCodeGen_AArch32::GetPinnedFields(), CBasicBlock::GetFastRam(),
+		                  CBasicBlock::GetMemoryExceptionPoison()};
 		XXH3_64bits_update(state, modes, sizeof(modes));
 #endif
 		uint64 hash = XXH3_64bits_digest(state);

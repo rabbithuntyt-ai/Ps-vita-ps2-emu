@@ -35,6 +35,7 @@ namespace
 	fs::path g_resourcesPath;
 	bool g_indirectDispatchWanted = true;
 	bool g_pinnedFieldsWanted = true;
+	bool g_fastRamWanted = true;
 
 	std::string LowerExtension(const std::string& path)
 	{
@@ -311,10 +312,19 @@ void CEmuSession::SetSafeJit(bool safe)
 	// EE/IOP loads and stores as single ops: registers stay allocated across them.
 	Jitter::CCodeGen_AArch32::SetGuestMemoryOps(!safe);
 	// Cycle quota and page table pointer kept in registers across linked blocks.
+	// Loads and stores in RAM without the page lookup (guest memory ops only); the RAM's
+	// base pointer then takes the page table pointer's pinned register.
+	CBasicBlock::EnableFastRam(!safe && g_fastRamWanted);
 	if(!safe && g_pinnedFieldsWanted)
-		Jitter::CCodeGen_AArch32::SetPinnedFields(offsetof(CMIPS, m_State.cycleQuota), offsetof(CMIPS, m_pageLookup));
+		Jitter::CCodeGen_AArch32::SetPinnedFields(offsetof(CMIPS, m_State.cycleQuota),
+		                                          CBasicBlock::GetFastRam() ? offsetof(CMIPS, m_fastRamBase) : offsetof(CMIPS, m_pageLookup));
 	else
 		Jitter::CCodeGen_AArch32::SetPinnedFields(-1, -1);
+	// Exceptions from memory handlers flagged in the pinned quota: block exits after
+	// loads and stores skip the exception test.
+	Jitter::CCodeGen_AArch32::SetExceptionPoison(offsetof(CMIPS, m_State.nHasException));
+	CBasicBlock::EnableMemoryExceptionPoison(Jitter::CCodeGen_AArch32::GetExceptionPoison() && Jitter::CCodeGen_AArch32::GetChainedFrames() &&
+	                                         Jitter::CCodeGen_AArch32::GetGuestMemoryOps());
 #else
 	(void)safe;
 #endif
@@ -325,6 +335,11 @@ void CEmuSession::SetSafeJit(bool safe)
 void CEmuSession::SetPinnedFields(bool enabled)
 {
 	g_pinnedFieldsWanted = enabled;
+}
+
+void CEmuSession::SetFastRam(bool enabled)
+{
+	g_fastRamWanted = enabled;
 }
 
 void CEmuSession::SetIndirectDispatch(bool enabled)

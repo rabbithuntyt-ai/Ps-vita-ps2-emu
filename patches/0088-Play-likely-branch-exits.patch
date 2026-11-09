@@ -1,0 +1,223 @@
+diff --git a/Source/MipsJitter.h b/Source/MipsJitter.h
+--- a/Source/MipsJitter.h
++++ b/Source/MipsJitter.h
+@@ -21,6 +21,12 @@
+ 	void MarkFirstBlockLabel();
+ 	void MarkLastBlockLabel();
+ 
++	//Set by the block while it compiles its last branch, a likely one: not taken,
++	//the branch jumps there (the block's not-taken exit) and taken, it falls
++	//through to the delay slot without setting nDelayedJumpAddr. -1: unset.
++	LABEL m_likelyNotTakenLabel = -1;
++	bool m_likelyNotTakenUsed = false; //set when a likely branch jumped to it
++
+ private:
+ 	struct VARIABLESTATUS
+ 	{
+diff --git a/Source/MipsJitter.cpp b/Source/MipsJitter.cpp
+--- a/Source/MipsJitter.cpp
++++ b/Source/MipsJitter.cpp
+@@ -26,6 +26,8 @@
+ 	CJitter::Begin();
+ 	m_firstBlockLabel = -1;
+ 	m_lastBlockLabel = -1;
++	m_likelyNotTakenLabel = -1;
++	m_likelyNotTakenUsed = false;
+ }
+ 
+ void CMipsJitter::PushRel(size_t offset)
+diff --git a/Source/MIPSInstructionFactory.cpp b/Source/MIPSInstructionFactory.cpp
+--- a/Source/MIPSInstructionFactory.cpp
++++ b/Source/MIPSInstructionFactory.cpp
+@@ -184,6 +184,18 @@
+ {
+ 	uint16 nImmediate = (uint16)(m_nOpcode & 0xFFFF);
+ 
++	if(m_codeGen->m_likelyNotTakenLabel != -1)
++	{
++		//The block's own exits (CBasicBlock::CompileEpilog, likely exit)
++		m_codeGen->BeginIf(Jitter::NegateCondition(condition));
++		{
++			m_codeGen->Goto(m_codeGen->m_likelyNotTakenLabel);
++			m_codeGen->m_likelyNotTakenUsed = true;
++		}
++		m_codeGen->EndIf();
++		return;
++	}
++
+ 	m_codeGen->PushCst(MIPS_INVALID_PC);
+ 	m_codeGen->PullRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
+ 
+diff --git a/Source/ee/EeBasicBlock.h b/Source/ee/EeBasicBlock.h
+--- a/Source/ee/EeBasicBlock.h
++++ b/Source/ee/EeBasicBlock.h
+@@ -16,6 +16,11 @@
+ protected:
+ 	void CompileProlog(CMipsJitter*) override;
+ 	void CompileEpilog(CMipsJitter*, bool) override;
++	//The epilog's FPU rounding reset and idle loop flag must run on both exits
++	bool CanUseLikelyExit() const override
++	{
++		return (m_fpRoundingMode == DEFAULT_FP_ROUNDING_MODE) && !m_isIdleLoopBlock && !IsCodeIdleLoopBlock();
++	}
+ 
+ private:
+ 	bool IsCodeIdleLoopBlock() const;
+diff --git a/Source/BasicBlock.h b/Source/BasicBlock.h
+--- a/Source/BasicBlock.h
++++ b/Source/BasicBlock.h
+@@ -153,6 +153,18 @@
+ 	bool m_exitNoException = false;
+ 	//the block ends in a conditional branch: its target relative to nPC (0: no)
+ 	int32 m_exitBranchOffset = 0;
++	//the block ends in a likely branch (beql, bnel, blezl, bgtzl, bltzl, bgezl, bltzall, bgezall):
++	//its own taken and not-taken exits, nDelayedJumpAddr untouched; m_exitLikelyOffset is the
++	//taken target relative to nPC
++	bool m_exitLikely = false;
++	int32 m_exitLikelyOffset = 0;
++	unsigned int m_likelyExitLabel = 0; //the not-taken exit (Jitter label), while compiling
++	//false when the epilog has code that both exits must run (EE: FPU rounding, idle loop)
++	virtual bool CanUseLikelyExit() const
++	{
++		return true;
++	}
++	void CompileLikelyEpilog(CMipsJitter*, bool loopsOnItself);
+ 	void AnalyseExit();
+ 	//nPC = the taken branch's target (from nPC when the offset is known)
+ 	void PushTakenPc(CMipsJitter*);
+diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
+--- a/Source/BasicBlock.cpp
++++ b/Source/BasicBlock.cpp
+@@ -253,16 +253,23 @@
+ 	CompileProlog(jitter);
+ 	jitter->MarkFirstBlockLabel();
+ 
++	if(m_exitLikely) m_likelyExitLabel = jitter->CreateLabel();
++	jitter->m_likelyNotTakenUsed = false;
+ 	for(uint32 address = m_begin; address <= m_end; address += 4)
+ 	{
++		if(m_exitLikely && (address == (m_end - 4))) jitter->m_likelyNotTakenLabel = m_likelyExitLabel;
+ 		m_context.m_pArch->CompileInstruction(
+ 		    address,
+ 		    jitter,
+ 		    &m_context, address - m_begin);
++		jitter->m_likelyNotTakenLabel = -1;
+ 		//Sanity check
+ 		assert(jitter->IsStackEmpty());
+ 	}
+ 
++	//The branch didn't take the likely exit (compiled another way): the usual exit
++	if(m_exitLikely && !jitter->m_likelyNotTakenUsed) m_exitLikely = false;
++
+ 	jitter->MarkLastBlockLabel();
+ 	CompileEpilog(jitter, loopsOnItself);
+ }
+@@ -272,6 +279,8 @@
+ 	m_exitAlwaysJumps = false;
+ 	m_exitNoException = false;
+ 	m_exitBranchOffset = 0;
++	m_exitLikely = false;
++	m_exitLikelyOffset = 0;
+ 	if(!g_cheapExits || (m_begin == m_end))
+ 	{
+ 		return;
+@@ -288,6 +297,16 @@
+ 		uint32 rt = (op >> 16) & 0x1F;
+ 		bool conditional = ((top >= 0x04) && (top <= 0x07)) || ((top == 0x01) && ((rt == 0x00) || (rt == 0x01) || (rt == 0x10) || (rt == 0x11)));
+ 		m_exitBranchOffset = conditional ? static_cast<int32>(m_end - m_begin) + (static_cast<int16>(op & 0xFFFF) * 4) : 0;
++		//beql, bnel, blezl, bgtzl, bltzl, bgezl, bltzall, bgezall
++		bool likely = ((top >= 0x14) && (top <= 0x17)) || ((top == 0x01) && ((rt == 0x02) || (rt == 0x03) || (rt == 0x12) || (rt == 0x13)));
++#if defined(AOT_BUILD_CACHE) || defined(__EMSCRIPTEN__)
++		likely = false; //no block linking there
++#endif
++		if(likely && CanUseLikelyExit())
++		{
++			m_exitLikely = true;
++			m_exitLikelyOffset = static_cast<int32>(m_end - m_begin) + (static_cast<int16>(op & 0xFFFF) * 4);
++		}
+ 	}
+ 	//Instructions that can't set nHasException: integer arithmetic, logic,
+ 	//shifts, HI/LO moves (SPECIAL without syscall and traps), branches and jumps.
+@@ -363,8 +382,82 @@
+ #endif
+ }
+ 
++//Block ending in a likely branch: the branch jumps to m_likelyExitLabel when not taken
++//(the delay slot doesn't run), else falls through here after the delay slot.
++//Each path has its own exit, nDelayedJumpAddr is never set.
++void CBasicBlock::CompileLikelyEpilog(CMipsJitter* jitter, bool loopsOnItself)
++{
++	auto endLabel = jitter->CreateLabel();
++	auto exitPath = [&](bool taken) {
++		int32 pcOffset = taken ? m_exitLikelyOffset : static_cast<int32>(m_end - m_begin + 4);
++		auto pushNextPc = [&]() {
++			jitter->PushRel(offsetof(CMIPS, m_State.nPC));
++			jitter->PushCst(pcOffset);
++			jitter->Add();
++		};
++
++		jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
++		jitter->PushCst(((m_end - m_begin) / 4) + 1);
++		jitter->Sub();
++		jitter->PullRel(offsetof(CMIPS, m_State.cycleQuota));
++
++		jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
++		jitter->PushCst(0);
++		jitter->BeginIf(Jitter::CONDITION_GT);
++		{
++			auto leave = [&]() {
++				if(taken && loopsOnItself)
++				{
++					//nPC is the block's start already
++					jitter->Goto(jitter->GetFirstBlockLabel());
++					return;
++				}
++				pushNextPc();
++				jitter->PullRel(offsetof(CMIPS, m_State.nPC));
++				jitter->JumpToDynamic(reinterpret_cast<void*>(taken ? &BranchBlockTrampoline : &NextBlockTrampoline));
++			};
++			if(m_exitNoException)
++			{
++				leave();
++			}
++			else
++			{
++				jitter->PushRel(offsetof(CMIPS, m_State.nHasException));
++				jitter->PushCst(0);
++				jitter->BeginIf(Jitter::CONDITION_EQ);
++				leave();
++				jitter->EndIf();
++			}
++		}
++		jitter->EndIf();
++
++		//Slow path: back to the executor
++		jitter->PushRel(offsetof(CMIPS, m_State.nHasException));
++		jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
++		jitter->PushCst(0);
++		jitter->Cmp(Jitter::CONDITION_LE);
++		jitter->Shl(7);
++		jitter->Or();
++		jitter->PullRel(offsetof(CMIPS, m_State.nHasException));
++
++		pushNextPc();
++		jitter->PullRel(offsetof(CMIPS, m_State.nPC));
++		if(taken) jitter->Goto(endLabel);
++	};
++	exitPath(true);
++	jitter->MarkLabel(m_likelyExitLabel);
++	exitPath(false);
++	jitter->MarkLabel(endLabel);
++}
++
+ void CBasicBlock::CompileEpilog(CMipsJitter* jitter, bool loopsOnItself)
+ {
++	if(m_exitLikely)
++	{
++		CompileLikelyEpilog(jitter, loopsOnItself);
++		return;
++	}
++
+ 	//Fast path (quota left, no exception): dispatch to the next block directly.
+ 	//Slow path: flag the quota and leave with nPC updated.
+ 	jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
