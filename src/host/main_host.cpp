@@ -86,6 +86,7 @@ namespace
 			uint64_t frame = 0;
 			uint32_t hold = 8;
 			std::vector<PS2::CControllerInfo::BUTTON> buttons;
+			std::vector<std::pair<PS2::CControllerInfo::BUTTON, uint8>> axes; //lup, ldown, lleft, lright: left stick pushed fully
 		};
 
 		explicit CPH_Script(std::vector<PRESS> presses)
@@ -97,17 +98,20 @@ namespace
 		{
 			uint64_t frame = m_vblanks++;
 			bool held[PS2::CControllerInfo::MAX_BUTTONS] = {};
+			uint8 axes[PS2::CControllerInfo::MAX_BUTTONS];
+			std::fill(std::begin(axes), std::end(axes), 0x7F);
 			for(const auto& press : m_presses)
 			{
 				if((frame < press.frame) || (frame >= press.frame + press.hold)) continue;
 				for(auto button : press.buttons) held[button] = true;
+				for(const auto& [axis, value] : press.axes) axes[axis] = value;
 			}
 			for(auto* listener : m_interfaces)
 			{
 				for(unsigned int i = 0; i < PS2::CControllerInfo::MAX_BUTTONS; i++)
 				{
 					auto button = static_cast<PS2::CControllerInfo::BUTTON>(i);
-					if(PS2::CControllerInfo::IsAxis(button)) listener->SetAxisState(0, button, 0x7F, ram);
+					if(PS2::CControllerInfo::IsAxis(button)) listener->SetAxisState(0, button, axes[i], ram);
 					else listener->SetButtonState(0, button, held[i], ram);
 				}
 			}
@@ -154,6 +158,10 @@ namespace
 				std::string name = rest.substr(nameStart, plus - nameStart);
 				nameStart = plus + 1;
 				bool found = false;
+				if(name == "lup") press.axes.emplace_back(CControllerInfo::ANALOG_LEFT_Y, 0x00), found = true;
+				if(name == "ldown") press.axes.emplace_back(CControllerInfo::ANALOG_LEFT_Y, 0xFF), found = true;
+				if(name == "lleft") press.axes.emplace_back(CControllerInfo::ANALOG_LEFT_X, 0x00), found = true;
+				if(name == "lright") press.axes.emplace_back(CControllerInfo::ANALOG_LEFT_X, 0xFF), found = true;
 				for(const auto& [buttonName, button] : names)
 				{
 					if(name != buttonName) continue;
