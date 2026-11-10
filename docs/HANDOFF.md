@@ -147,6 +147,18 @@ lock's owner is "gameplay".
    often slowed the driver (`spu_irq_edge`, off), so the BIOS dispatch path (stub at 0x200,
    10% of IOP time) has to get cheaper instead.
 
+**On the gameplay branch (claude/re4-gameplay, worktree C:\Users\troy2\vps2-gp), not merged
+here yet** (merge it before touching `Vpu.cpp` or `GSH_Hardware.cpp`; its Play diff is
+`patches/0095-Play-gameplay.patch`, so number this branch's next Play patch 0096 or later):
+- Threaded VU1 hang fixed (HLE_MPEG.md open bug 1, Silent Hill 2's movie with threaded VU1,
+  RE4's first real-time scene): queued XGKICK packets went into the GIF while PATH2/PATH3 was
+  mid-packet; they now wait until the GIF is free (commit 7348ea1). Also: VU1 worker wakeups
+  no longer use a condition variable, and no `steady_clock::now()` per VU program. RE4
+  gameplay on the Vita with `threaded_vu1=1`: 24-40 emulated fps (was 1-3). **Retest Silent
+  Hill 2's movie with threaded VU1** once merged.
+- Depth lost at GPU scene breaks on the Vita (Leon see-through): vitaGL's GXM depth surface
+  now gets force load/store (commit 146f5d0, `depth_force_load=1`).
+
 Smaller items:
 - `Vpu.cpp`: `ExecuteMicroProgram` calls `steady_clock::now()` at every VU program start
   (several us each on the Vita); the gameplay branch only does it with diagnostics on.
