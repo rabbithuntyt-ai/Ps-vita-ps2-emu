@@ -484,6 +484,18 @@ The driver seems to rely on the extra interrupts to move on (its thread wakes fr
 them). Kept as a setting; a cheaper path for that interrupt (the BIOS stub at 0x200 is
 10.6% of IOP samples) is the way to save that time instead.
 
+### Benchmarking from a save state (2026-11-09)
+
+Runs from boot press buttons at fixed real-time seconds (`pad_script`), so anything that
+changes the emulator's speed moves the game's timeline: the same 115 s or 200 s window then
+lands on boot screens, loading or the movie (tier 2 runs showed "0 pictures" for that reason).
+Now: a state saved at the title menu (`save_state_at=44` with presses only up to 31 s; the
+menu waits for input), every run loads it (`load_state=1`, loaded after 120 VM frames) and
+presses start/cross from 8 s to 44 s: title at 23 s, "Loading...", the intro movie from about
+40 s to the end. Measured over 55-140 s (`runs/re4/bench.sh`, `brk4.py`): two runs of the
+same setting agree within 0.3% (21.00/21.06 pictures/s). A state saved during the movie
+doesn't work: the native decoder's state isn't in save states, and the movie freezes on load.
+
 ### Is a locked 30 reachable? The CPU budget (2026-11-08)
 
 The Vita gives an app three cores at 444 MHz (already set). At a real 30 pictures/s

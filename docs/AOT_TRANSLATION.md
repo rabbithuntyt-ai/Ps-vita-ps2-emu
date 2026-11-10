@@ -239,6 +239,28 @@ block edges and the upper halves of registers are tracked across the whole regio
   indirect dispatch (a table lookup), where JIT blocks link to each other directly; every entry
   loads all 7 cached registers; the exit stubs and memory slow paths make the code large.
   Direct links for static exits and loading registers only where first used are the next steps.
+- **Measured properly (same day)**: RE4 runs from a save state taken at the title menu (see
+  docs/RE4.md, "Benchmarking from a save state"): the same frames every run, two runs of a
+  setting within 0.3%. Tier 2 on against off, movie section: **21.4-21.7 against 20.8-21.1
+  pictures/s (+3%), 44.5-44.9 against 43.0-43.8 emulated fps, EE code 10.1-10.4 against
+  11.0-11.2 ms per frame (-7 to -9%)**.
+- **Direct links**: exits to static addresses jump through a word holding the dispatch thunk
+  until the executor links it to the block there (`CTier2Block::LinkExit`, `m_tier2Links`
+  by target; linked when a block is created there, undone after any clear before the code it
+  points to can run again). **Lazy entry loads**: the link entry loads only the cached
+  registers the region may read before writing (backward liveness; exits count as reading
+  what they store). 12 of 12 Vita fuzz programs with both; no measurable change in RE4 yet
+  (within run-to-run spread).
+- **Executed code only**: a hot region takes in only blocks the JIT has already compiled (code
+  that ran): code not run yet may not be loaded yet (RE4 loads modules while it runs, and the
+  Vita build has no write protection: `SetMemoryProtected` does nothing on `__vita__`).
+- **Open bug: an intermittent hang while RE4 loads** (New Game, "Loading..."), about 1 run in
+  3 with tier 2: every EE thread ends up blocked (EE PC in the BIOS idle loop 0x1FC03108) and
+  the movie never starts. Not stale code (the rule above didn't fix it), not a crash. Which
+  regions exist depends on when the profiler samples, so it moves between runs; finding it
+  needs deterministic region choice (replay a failing run's requests by emulated frame) or a
+  checking mode (run each region and the interpreter from the same state, compare). **Tier 2
+  stays off by default until then.**
 - **A trap found on the way**: RE4 test runs press buttons at fixed real-time seconds.
   A faster or slower EE moves the game's timeline, so a 115 s run can end before the movie
   starts. "No pictures" then looked like a hang (an address bisection chased it for an

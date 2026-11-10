@@ -11,19 +11,21 @@ diff --git a/Source/BasicBlock.h b/Source/BasicBlock.h
  	void Compile();
  	virtual void CompileRange(CMipsJitter*);
  
-@@ -165,6 +166,8 @@
+@@ -165,6 +166,10 @@
  		return true;
  	}
  	void CompileLikelyEpilog(CMipsJitter*, bool loopsOnItself);
 +	//Code made by another compiler (tier 2), with the JIT's chained frame conventions
 +	void SetNativeCode(const void* code, size_t size, uint32 linkEntryOffset);
++	//Writes a pointer-sized word of the code (link slots of other compilers' code)
++	void PatchCodeWord(uint32 offset, uintptr_t value);
  	void AnalyseExit();
  	//Slow exits: undo the top bits set in the quota by a memory handler's exception
  	//(EnableMemoryExceptionPoison)
 diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
 --- a/Source/BasicBlock.cpp
 +++ b/Source/BasicBlock.cpp
-@@ -626,6 +626,18 @@
+@@ -626,6 +626,31 @@
  	jitter->PullRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
  }
  
@@ -36,6 +38,19 @@ diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
 +	(void)code;
 +	(void)size;
 +	(void)linkEntryOffset;
++#endif
++}
++
++void CBasicBlock::PatchCodeWord(uint32 offset, uintptr_t value)
++{
++#if !defined(AOT_ENABLED) && !defined(__EMSCRIPTEN__)
++	auto code = reinterpret_cast<uint8*>(m_function.GetCode());
++	m_function.BeginModify();
++	*reinterpret_cast<uintptr_t*>(code + offset) = value;
++	m_function.EndModify();
++#else
++	(void)offset;
++	(void)value;
 +#endif
 +}
 +
@@ -54,10 +69,11 @@ diff --git a/Source/ee/EeExecutor.h b/Source/ee/EeExecutor.h
  
  class CEeExecutor : public CGenericMipsExecutor<BlockLookupTwoWay>
  {
-@@ -45,6 +47,11 @@
+@@ -45,6 +47,12 @@
  
  	BasicBlockPtr BlockFactory(CMIPS&, uint32, uint32) override;
  	void PartitionFunction(uint32) override;
++	void PartitionFunctionJit(uint32);
 +	int Execute(int) override;
 +
 +	//Tier 2 (Tier2.h): a region at this block start, built before the next Execute
@@ -66,7 +82,7 @@ diff --git a/Source/ee/EeExecutor.h b/Source/ee/EeExecutor.h
  
  	//Tier 2 regions (CEeRegionBlock): several blocks of a function compiled as
  	//one, when execution enters code that loops or branches within itself.
-@@ -58,6 +65,17 @@
+@@ -58,6 +66,29 @@
  	}
  
  private:
@@ -77,6 +93,18 @@ diff --git a/Source/ee/EeExecutor.h b/Source/ee/EeExecutor.h
 +	std::shared_ptr<CTier2Block> m_pendingTier2;
 +	std::map<uint32, std::vector<Tier2::RANGE>> m_tier2Ranges; //region start -> guest code it holds
 +	std::set<uint32> m_tier2Failed; //requested starts that gave no region (not tried again)
++	//Tier 2 exits to static addresses, by target: linked straight to the block there
++	struct TIER2_LINK
++	{
++		CTier2Block* region;
++		uint32 regionStart;
++		size_t index;
++		CBasicBlock* linked; //null: through the indirect dispatch
++	};
++	std::multimap<uint32, TIER2_LINK> m_tier2Links;
++	void AddTier2Links(CTier2Block*);
++	void LinkTier2Exits(uint32 target);
++	void RefreshTier2Links(); //after blocks were cleared
 +	std::mutex m_tier2RequestMutex;
 +	std::vector<uint32> m_tier2Requests;
 +	std::atomic<bool> m_hasTier2Requests = false;
@@ -87,24 +115,26 @@ diff --git a/Source/ee/EeExecutor.h b/Source/ee/EeExecutor.h
 diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
 --- a/Source/ee/EeExecutor.cpp
 +++ b/Source/ee/EeExecutor.cpp
-@@ -132,6 +132,7 @@
+@@ -132,6 +132,8 @@
  void CEeExecutor::DiscardCompiledCode()
  {
  	m_cachedBlocks.clear();
 +	m_tier2Ranges.clear();
++	m_tier2Links.clear();
  	CGenericMipsExecutor::Reset();
  }
  
-@@ -139,6 +140,8 @@
+@@ -139,6 +141,9 @@
  {
  	SetMemoryProtected(m_ram, PS2::EE_RAM_SIZE, false);
  	m_cachedBlocks.clear();
 +	m_tier2Ranges.clear();
 +	m_tier2Failed.clear();
++	m_tier2Links.clear();
  	m_blockFpRoundingModes.clear();
  	m_idleLoopBlocks.clear();
  	CGenericMipsExecutor::Reset();
-@@ -148,11 +151,104 @@
+@@ -148,11 +153,163 @@
  {
  	uint32 rangeSize = end - start;
  	SetMemoryProtected(m_ram + start, rangeSize, false);
@@ -134,6 +164,54 @@ diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
 +		if(executing && (FindBlockStartingAt(m_context.m_State.nPC) == FindBlockStartingAt(region))) continue;
 +		CGenericMipsExecutor::ClearActiveBlocksInRange(region, region + 4, false);
 +	}
++	RefreshTier2Links();
++}
++
++void CEeExecutor::AddTier2Links(CTier2Block* region)
++{
++	const auto& slots = region->GetExitSlots();
++	for(size_t i = 0; i < slots.size(); i++)
++	{
++		uint32 target = slots[i].pc & m_addressMask;
++		m_tier2Links.insert(std::make_pair(target, TIER2_LINK{region, region->GetBeginAddress(), i, nullptr}));
++	}
++	for(const auto& slot : slots) LinkTier2Exits(slot.pc & m_addressMask);
++}
++
++//Exits waiting for 'target' jump straight to the block there (when there is one)
++void CEeExecutor::LinkTier2Exits(uint32 target)
++{
++	auto range = m_tier2Links.equal_range(target);
++	if(range.first == range.second) return;
++	auto block = FindBlockStartingAt(target);
++	if(block->IsEmpty()) return;
++	for(auto it = range.first; it != range.second; ++it)
++	{
++		auto& link = it->second;
++		if(link.linked == block) continue;
++		link.region->LinkExit(link.index, block->GetLinkEntryAddress());
++		link.linked = block;
++	}
++}
++
++//Blocks went away: links from dead regions dropped, links to dead blocks undone
++void CEeExecutor::RefreshTier2Links()
++{
++	for(auto it = m_tier2Links.begin(); it != m_tier2Links.end();)
++	{
++		auto& link = it->second;
++		if(FindBlockStartingAt(link.regionStart) != link.region)
++		{
++			it = m_tier2Links.erase(it);
++			continue;
++		}
++		if(link.linked && (FindBlockStartingAt(it->first) != link.linked))
++		{
++			link.region->UnlinkExit(link.index);
++			link.linked = nullptr;
++		}
++		++it;
++	}
 +}
 +
 +bool CEeExecutor::IsExcludedFromTier2(uint32 address) const
@@ -148,6 +226,8 @@ diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
 +	if((address < 0x100000) || (address >= PS2::EE_RAM_SIZE) || IsExcludedFromTier2(address)) return false;
 +	auto region = std::make_shared<CTier2Block>(m_context, address, m_blockCategory);
 +	region->SetExcluded([this](uint32 pc) { return IsExcludedFromTier2(pc); });
++	//Hot regions (replace): only code the JIT has run (eager ones, for tests, take any)
++	if(replace) region->SetKnown([this](uint32 pc) { return HasBlockAt(pc & m_addressMask); });
 +	{
 +		EmuProfile::CScope profileScope(EmuProfile::SECTION_JIT);
 +		if(!region->Build()) return false;
@@ -155,6 +235,7 @@ diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
 +	if(replace && HasBlockAt(address))
 +	{
 +		CGenericMipsExecutor::ClearActiveBlocksInRange(address, address + 4, false);
++		RefreshTier2Links();
 +		if(HasBlockAt(address)) return false;
 +	}
 +	m_pendingTier2 = region;
@@ -164,6 +245,8 @@ diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
 +	//waiting for this address link to it
 +	ResolveIncomingLinks(address, FindBlockStartingAt(address));
 +	m_tier2Ranges[address] = region->GetRanges();
++	AddTier2Links(region.get());
++	LinkTier2Exits(address);
 +	return true;
 +}
 +
@@ -206,10 +289,16 @@ diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
 +	{
 +		if(TryTier2(startAddress, false)) return;
 +	}
++	PartitionFunctionJit(startAddress);
++	LinkTier2Exits(startAddress);
++}
++
++void CEeExecutor::PartitionFunctionJit(uint32 startAddress)
++{
  	//Inside a region already compiled (entered there after a quota exit, or by a
  	//branch from elsewhere): a block, not another overlapping region (each would
  	//compile the same code again: loop programs spent seconds compiling)
-@@ -202,6 +298,11 @@
+@@ -202,6 +359,11 @@
  	EmuProfile::CScope profileScope(EmuProfile::SECTION_JIT);
  	uint32 blockSize = (end - start) + 4;
  
@@ -237,7 +326,7 @@ diff --git a/Source/ee/Tier2.h b/Source/ee/Tier2.h
 new file mode 100644
 --- /dev/null
 +++ b/Source/ee/Tier2.h
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,136 @@
 +#pragma once
 +
 +// Tier 2 recompiler for EE code (docs/AOT_TRANSLATION.md), next to the JIT.
@@ -330,6 +419,10 @@ new file mode 100644
 +
 +	//Block starts the region must leave to the JIT (idle loops, per-block settings)
 +	void SetExcluded(std::function<bool(uint32)>);
++	//Block starts the region may hold besides its entry (unset: any). Hot regions take
++	//only code that has run (the JIT compiled a block there): code not run yet may not be
++	//loaded yet (RE4 loads modules while it runs), and nothing tells a region when it is.
++	void SetKnown(std::function<bool(uint32)>);
 +	//Builds and compiles the region; false: nothing worth it at this address
 +	bool Build();
 +
@@ -342,6 +435,20 @@ new file mode 100644
 +		return m_ranges;
 +	}
 +
++	//Exits to static addresses (native code): a jump through a word that holds the
++	//indirect dispatch's thunk until linked to the target block's link entry
++	struct EXIT_SLOT
++	{
++		uint32 offset; //of the word in the code
++		uint32 pc;     //guest address it leaves to
++	};
++	const std::vector<EXIT_SLOT>& GetExitSlots() const
++	{
++		return m_exitSlots;
++	}
++	void LinkExit(size_t index, uintptr_t target);
++	void UnlinkExit(size_t index);
++
 +	struct REGION;
 +
 +protected:
@@ -351,13 +458,16 @@ new file mode 100644
 +	std::unique_ptr<REGION> m_region;
 +	std::vector<Tier2::RANGE> m_ranges;
 +	std::function<bool(uint32)> m_excluded;
++	std::function<bool(uint32)> m_known;
++	std::vector<EXIT_SLOT> m_exitSlots;
++	uintptr_t m_unlinkedExit = 0;
 +	bool m_interpret = false;
 +};
 diff --git a/Source/ee/Tier2.cpp b/Source/ee/Tier2.cpp
 new file mode 100644
 --- /dev/null
 +++ b/Source/ee/Tier2.cpp
-@@ -0,0 +1,3264 @@
+@@ -0,0 +1,3387 @@
 +#include "Tier2.h"
 +#include <algorithm>
 +#include <chrono>
@@ -714,6 +824,7 @@ new file mode 100644
 +			if(found != m_index.end()) return found->second;
 +			if((m_region.blocks.size() >= g_settings.maxBlocks) || (m_region.instructions >= g_settings.maxInstructions)) return EDGE_EXIT;
 +			if((pc & 3) != 0) return EDGE_EXIT;
++			if(!m_region.blocks.empty() && m_known && !m_known(pc)) return EDGE_EXIT;
 +			int index = static_cast<int>(m_region.blocks.size());
 +			BLOCK block;
 +			block.pc = pc;
@@ -1335,6 +1446,7 @@ new file mode 100644
 +
 +	public:
 +		std::function<bool(uint32)> m_excluded;
++		std::function<bool(uint32)> m_known;
 +	};
 +
 +	//------------------------------------------------------------------------
@@ -1906,6 +2018,8 @@ new file mode 100644
 +
 +		//Code and link entry offset (bytes); false: something not handled
 +		bool Compile(std::vector<uint8>& out, uint32& linkEntryOffset);
++		//Static exits' jump words (byte offsets) and their guest addresses
++		std::vector<CTier2Block::EXIT_SLOT> m_exitSlots;
 +
 +	private:
 +		static constexpr int ALLOCATABLE[] = {4, 5, 6, 7, 8, 2, 3};
@@ -1937,6 +2051,8 @@ new file mode 100644
 +
 +		void Allocate();
 +		void Analyse();
++		//Allocated registers the region may read before writing them (loaded at the entry)
++		uint32 LiveAtEntry() const;
 +		HISTATE ResultState(const INST&, const STATE&) const;
 +		void Transfer(const INST&, STATE&) const;
 +
@@ -2157,6 +2273,97 @@ new file mode 100644
 +				}
 +			}
 +		}
++	}
++
++	//GPRs an instruction reads (bit mask)
++	static uint32 ReadMask(const INST& inst)
++	{
++		auto bit = [](uint8 reg) { return (reg < 32) ? (1u << reg) : 0u; };
++		switch(inst.op)
++		{
++		case OP_LI:
++		case OP_MFHI:
++		case OP_MFLO:
++		case OP_MFC1:
++		case OP_CFC1:
++		case OP_FPU:
++			return 0;
++		case OP_SLL:
++		case OP_SRL:
++		case OP_SRA:
++		case OP_DSLL:
++		case OP_DSRL:
++		case OP_DSRA:
++			return bit(inst.rt);
++		case OP_MOVZ:
++		case OP_MOVN:
++			return bit(inst.rs) | bit(inst.rt) | bit(inst.rd); //rd kept when not moved
++		case OP_LWC1:
++		case OP_SWC1:
++		case OP_MTC1:
++		case OP_CTC1:
++		case OP_MTHI:
++		case OP_MTLO:
++			return bit(inst.rs);
++		default:
++			break;
++		}
++		if(IsLoad(inst.op)) return bit(inst.rs);
++		if((inst.op >= OP_ADDIU) && (inst.op <= OP_XORI)) return bit(inst.rs);
++		return bit(inst.rs) | bit(inst.rt);
++	}
++
++	uint32 CArmCompiler::LiveAtEntry() const
++	{
++		const auto& blocks = m_region.blocks;
++		size_t count = blocks.size();
++		uint32 allocated = 0;
++		for(int reg = 1; reg < 32; reg++)
++		{
++			if(IsAllocated(reg)) allocated |= (1u << reg);
++		}
++		//Per block: read before written, written
++		std::vector<uint32> use(count, 0), def(count, 0), exitUse(count, 0);
++		for(size_t i = 0; i < count; i++)
++		{
++			const auto& block = blocks[i];
++			for(const auto& inst : block.insts)
++			{
++				use[i] |= ReadMask(inst) & ~def[i];
++				uint8 written = Written(inst);
++				if((written != 0) && (written < 32)) def[i] |= (1u << written);
++			}
++			uint32 termRead = 0;
++			if(block.rs < 32) termRead |= (1u << block.rs);
++			if((block.term == TERM_BRANCH) && (block.rt < 32)) termRead |= (1u << block.rt);
++			use[i] |= termRead & ~def[i];
++			//Exits store the registers possibly written before them: read there
++			bool exits = (block.next.target < 0) || ((block.term != TERM_GOTO) && (block.taken.target < 0)) || block.next.check || block.taken.check;
++			if(exits) exitUse[i] = m_writtenIn[i] | def[i];
++		}
++		std::vector<uint32> liveIn(count, 0);
++		bool changed = true;
++		while(changed)
++		{
++			changed = false;
++			for(size_t n = count; n-- > 0;)
++			{
++				const auto& block = blocks[n];
++				uint32 liveOut = exitUse[n];
++				for(const EDGE* edge : {&block.taken, &block.next})
++				{
++					if((block.term == TERM_GOTO) && (edge == &block.taken)) continue;
++					if(edge->target >= 0) liveOut |= liveIn[edge->target];
++				}
++				uint32 in = use[n] | (liveOut & ~def[n]);
++				if(in != liveIn[n])
++				{
++					liveIn[n] = in;
++					changed = true;
++				}
++			}
++		}
++		return liveIn[0] & allocated;
 +	}
 +
 +	int CArmCompiler::Lo(uint8 reg, int scratch)
@@ -3240,6 +3447,11 @@ new file mode 100644
 +		}
 +		if(checked) m_emit.B(m_slowExitLabel, LE);
 +#ifdef TIER2_ARM
++		if(edge.target != EDGE_EXIT_REG)
++		{
++			//Linkable: the word after "ldr pc, [pc, #-4]"
++			m_exitSlots.push_back({static_cast<uint32>((m_emit.Position() + 1) * 4), pc});
++		}
 +		m_emit.JumpAbsolute(static_cast<uint32>(Jitter::CCodeGen_AArch32::GetChainedThunk(reinterpret_cast<uintptr_t>(&RegionExitTrampoline))));
 +#else
 +		m_emit.B(m_slowExitLabel);
@@ -3340,10 +3552,11 @@ new file mode 100644
 +		m_emit.Stmdb(SP, 1 << R0);
 +		m_emit.DpImm(SUB, false, SP, SP, 0x200);
 +		linkEntryOffset = static_cast<uint32>(m_emit.Position() * 4);
-+		//Allocated guest registers
++		//Allocated guest registers the region may read before writing them
++		uint32 live = LiveAtEntry();
 +		for(int reg = 1; reg < 32; reg++)
 +		{
-+			if(IsAllocated(reg)) m_emit.Ldr(m_alloc[reg], FP, LoOffset(reg));
++			if(IsAllocated(reg) && (live & (1u << reg))) m_emit.Ldr(m_alloc[reg], FP, LoOffset(reg));
 +		}
 +
 +		for(size_t i = 0; i < blocks.size(); i++)
@@ -3438,6 +3651,11 @@ new file mode 100644
 +	m_excluded = std::move(excluded);
 +}
 +
++void CTier2Block::SetKnown(std::function<bool(uint32)> known)
++{
++	m_known = std::move(known);
++}
++
 +bool CTier2Block::Build()
 +{
 +	using namespace Tier2;
@@ -3445,6 +3663,7 @@ new file mode 100644
 +	m_region = std::make_unique<REGION>();
 +	CBuilder builder(m_context, *m_region);
 +	builder.m_excluded = m_excluded;
++	builder.m_known = m_known;
 +	if(!builder.Build(m_begin))
 +	{
 +		g_stats.failed++;
@@ -3486,6 +3705,10 @@ new file mode 100644
 +		if(compiler.Compile(code, linkEntryOffset))
 +		{
 +			SetNativeCode(code.data(), code.size(), linkEntryOffset);
++			m_exitSlots = compiler.m_exitSlots;
++#ifdef TIER2_ARM
++			m_unlinkedExit = Jitter::CCodeGen_AArch32::GetChainedThunk(reinterpret_cast<uintptr_t>(&RegionExitTrampoline));
++#endif
 +			g_stats.codeBytes += code.size();
 +			compiled = true;
 +		}
@@ -3561,6 +3784,16 @@ new file mode 100644
 +		case TERM_GUARD: fprintf(file, "  if r%u == %08X %s else %s\n", block.rs, block.expected, taken, next); break;
 +		}
 +	}
++}
++
++void CTier2Block::LinkExit(size_t index, uintptr_t target)
++{
++	PatchCodeWord(m_exitSlots[index].offset, target);
++}
++
++void CTier2Block::UnlinkExit(size_t index)
++{
++	PatchCodeWord(m_exitSlots[index].offset, m_unlinkedExit);
 +}
 +
 +void CTier2Block::CompileRange(CMipsJitter*)
