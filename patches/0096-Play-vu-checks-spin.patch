@@ -1,0 +1,319 @@
+diff --git a/Source/MIPS.h b/Source/MIPS.h
+--- a/Source/MIPS.h
++++ b/Source/MIPS.h
+@@ -194,6 +194,8 @@
+ 	//Scratch for the VU compiler: sticky flags accumulated within a block
+ 	//(only live while a block runs, not part of the saved state)
+ 	uint32 m_vuStickyAccumulator = 0;
++	//VU block entry: nonzero when a pending FMAC write (previous block) is read by one of the first 3 pairs
++	uint32 m_vuStallPending = 0;
+ 	alignas(16) uint128 m_vuStickyAccumulator128 = {};
+ 
+ 	std::function<void(CMIPS*)> m_emptyBlockHandler;
+diff --git a/Source/ee/VUShared.h b/Source/ee/VUShared.h
+--- a/Source/ee/VUShared.h
++++ b/Source/ee/VUShared.h
+@@ -245,6 +245,15 @@
+ 	void QueueInFlagPipeline(const FLAG_PIPEINFO&, CMipsJitter*, uint32, uint32);
+ 	void ResetFlagPipeline(const FLAG_PIPEINFO&, CMipsJitter*);
+ 
++	//Flag pipeline entries queued by the block being compiled (VU micro blocks): a flag read
++	//after one of them is ready takes that slot (one load) instead of checking all slots.
++	//BeginFlagTracking at the start of a block, EndFlagTracking at its end;
++	//NotePipeTimeChange where generated code may move pipeTime.
++	void BeginFlagTracking();
++	void EndFlagTracking();
++	void NotePipeTimeChange();
++	extern bool g_flagTracking;
++
+ 	void CheckFlagPipelineImmediate(const FLAG_PIPEINFO&, CMIPS*, uint32);
+ 	void ResetFlagPipelineImmediate(const FLAG_PIPEINFO&, CMIPS*, uint32);
+ 
+diff --git a/Source/ee/VUShared.cpp b/Source/ee/VUShared.cpp
+--- a/Source/ee/VUShared.cpp
++++ b/Source/ee/VUShared.cpp
+@@ -1863,6 +1863,7 @@
+ 		codeGen->PullRel(offsetof(CMIPS, m_State.pipeTime));
+ 	}
+ 	codeGen->EndIf();
++	NotePipeTimeChange();
+ 
+ 	FlushPipeline(pipeInfo, codeGen);
+ }
+@@ -1899,8 +1900,94 @@
+ 	codeGen->PullRel(pipeInfo.counter);
+ }
+ 
++bool VUShared::g_flagTracking = true;
++
++namespace
++{
++	struct FLAG_QUEUE_ENTRY
++	{
++		uint32 readyTime; //relativePipeTime + latency
++		uint32 epoch;     //pipeTime changes emitted before the entry was queued
++	};
++
++	struct FLAG_TRACK
++	{
++		bool active = false;
++		uint32 epoch = 0;
++		std::vector<FLAG_QUEUE_ENTRY> queues[3];
++	};
++
++	thread_local FLAG_TRACK t_flagTrack;
++
++	int GetFlagPipeIndex(const VUShared::FLAG_PIPEINFO& pipeInfo)
++	{
++		if(pipeInfo.valueArray == VUShared::g_pipeInfoMac.valueArray) return 0;
++		if(pipeInfo.valueArray == VUShared::g_pipeInfoSticky.valueArray) return 1;
++		if(pipeInfo.valueArray == VUShared::g_pipeInfoClip.valueArray) return 2;
++		return -1;
++	}
++}
++
++void VUShared::BeginFlagTracking()
++{
++	t_flagTrack.active = g_flagTracking;
++	t_flagTrack.epoch = 0;
++	for(auto& queue : t_flagTrack.queues) queue.clear();
++}
++
++void VUShared::EndFlagTracking()
++{
++	t_flagTrack.active = false;
++}
++
++void VUShared::NotePipeTimeChange()
++{
++	t_flagTrack.epoch++;
++}
++
+ void VUShared::CheckFlagPipeline(const FLAG_PIPEINFO& pipeInfo, CMipsJitter* codeGen, uint32 relativePipeTime)
+ {
++	//An entry queued by this block that is ready (at the same pipeTime as the check or an
++	//earlier one: pipeTime only grows) is the value, when every newer entry of this block is
++	//not ready: queued at the check's pipeTime (no change emitted since) and not ready at
++	//compile time. Slot times grow in queue order, so no older slot can be the newest ready.
++	int pipeIndex = GetFlagPipeIndex(pipeInfo);
++	if(t_flagTrack.active && (pipeIndex != -1))
++	{
++		const auto& queue = t_flagTrack.queues[pipeIndex];
++		int ready = -1;
++		bool newerSafe = true;
++		for(int j = static_cast<int>(queue.size()) - 1; j >= 0; j--)
++		{
++			if(queue[j].readyTime <= relativePipeTime)
++			{
++				ready = j;
++				break;
++			}
++			if(queue[j].epoch != t_flagTrack.epoch)
++			{
++				newerSafe = false;
++				break;
++			}
++		}
++		uint32 distance = static_cast<uint32>(queue.size()) - ready;
++		if(newerSafe && (ready != -1) && (distance <= FLAG_PIPELINE_SLOTS))
++		{
++			codeGen->PushRelAddrRef(pipeInfo.valueArray);
++
++			codeGen->PushRel(pipeInfo.index);
++			codeGen->PushCst(distance);
++			codeGen->Sub();
++			codeGen->PushCst(FLAG_PIPELINE_SLOTS - 1);
++			codeGen->And();
++
++			codeGen->LoadFromRefIdx();
++			codeGen->PullRel(pipeInfo.value);
++			return;
++		}
++	}
++
++
+ 	//This will check every slot in the pipeline and update
+ 	//the flag register every time (pipeTimes[i] <= (pipeTime + relativePipeTime))
+ 	for(unsigned int i = 0; i < FLAG_PIPELINE_SLOTS; i++)
+@@ -1943,6 +2030,15 @@
+ 
+ void VUShared::QueueInFlagPipeline(const FLAG_PIPEINFO& pipeInfo, CMipsJitter* codeGen, uint32 latency, uint32 relativePipeTime)
+ {
++	if(t_flagTrack.active)
++	{
++		int pipeIndex = GetFlagPipeIndex(pipeInfo);
++		if(pipeIndex != -1)
++		{
++			t_flagTrack.queues[pipeIndex].push_back({relativePipeTime + latency, t_flagTrack.epoch});
++		}
++	}
++
+ 	uint32 valueCursor = codeGen->GetTopCursor();
+ 
+ 	//Get offset
+@@ -1991,6 +2087,12 @@
+ 
+ void VUShared::ResetFlagPipeline(const FLAG_PIPEINFO& pipeInfo, CMipsJitter* codeGen)
+ {
++	if(t_flagTrack.active)
++	{
++		int pipeIndex = GetFlagPipeIndex(pipeInfo);
++		if(pipeIndex != -1) t_flagTrack.queues[pipeIndex].clear();
++	}
++
+ 	uint32 valueCursor = codeGen->GetTopCursor();
+ 
+ 	for(uint32 i = 0; i < FLAG_PIPELINE_SLOTS; i++)
+diff --git a/Source/ee/VuBasicBlock.h b/Source/ee/VuBasicBlock.h
+--- a/Source/ee/VuBasicBlock.h
++++ b/Source/ee/VuBasicBlock.h
+@@ -13,6 +13,8 @@
+ 	//Compile hints added to every VU block (VUShared::COMPILEHINT_*): vu_no_clamp sets
+ 	//COMPILEHINT_NO_CLAMPING (no float clamping of operands, faster, less exact)
+ 	static inline uint32 g_extraCompileHints = 0;
++	//Block entry FMAC stall checks: one combined test before the per slot checks
++	static inline bool g_combinedStallCheck = true;
+ 
+ protected:
+ 	void CompileRange(CMipsJitter*) override;
+diff --git a/Source/ee/VuBasicBlock.cpp b/Source/ee/VuBasicBlock.cpp
+--- a/Source/ee/VuBasicBlock.cpp
++++ b/Source/ee/VuBasicBlock.cpp
+@@ -33,6 +33,8 @@
+ 
+ 	auto fmacPipelineInfo = ComputeFmacStallDelays(m_begin, m_end);
+ 
++	VUShared::BeginFlagTracking();
++
+ 	auto integerBranchDelayInfo = ComputeIntegerBranchDelayInfo(fmacPipelineInfo.stallDelays);
+ 
+ 	auto integerTrailingDelayInfo = ComputeTrailingIntegerBranchDelayInfo(fmacPipelineInfo.stallDelays);
+@@ -97,6 +99,64 @@
+ 			setStallBits(hiOps.readF1, hiOps.readElemF1);
+ 			setStallBits(loOps.readF0, loOps.readElemF0);
+ 			setStallBits(loOps.readF1, loOps.readElemF1);
++			//Pending writes (slots) are only cleared in the first 3 pairs, never set: one test
++			//at the first pair of all slots against the registers read by the pairs checking
++			//them tells if any of these checks can hit. Each pair's checks (one branch per
++			//slot and word) are skipped when none can.
++			if(g_combinedStallCheck && (extraPipeTimeIndex == 0))
++			{
++				uint128 slotMasks[3] = {};
++				for(uint32 k = 0; k < 3; k++)
++				{
++					uint32 pairAddress = m_begin + (k * 8);
++					if(pairAddress > m_end) break;
++					auto pairLo = arch->GetAffectedOperands(&m_context, pairAddress, m_context.m_pMemoryMap->GetInstruction(pairAddress));
++					auto pairHi = arch->GetAffectedOperands(&m_context, pairAddress + 4, m_context.m_pMemoryMap->GetInstruction(pairAddress + 4));
++					uint128 pairMask = {};
++					auto setPairBits = [&pairMask](unsigned int regId, unsigned int dest) {
++						if(regId != 0)
++						{
++							pairMask.nV[(regId * 4) / 32] |= dest << ((regId * 4) & 0x1F);
++						}
++					};
++					setPairBits(pairHi.readF0, pairHi.readElemF0);
++					setPairBits(pairHi.readF1, pairHi.readElemF1);
++					setPairBits(pairLo.readF0, pairLo.readElemF0);
++					setPairBits(pairLo.readF1, pairLo.readElemF1);
++					//Pair k checks slots k to 2
++					for(uint32 i = k; i < 3; i++)
++					{
++						for(uint32 w = 0; w < 4; w++) slotMasks[i].nV[w] |= pairMask.nV[w];
++					}
++				}
++				bool first = true;
++				for(uint32 i = 0; i < 3; i++)
++				{
++					for(uint32 w = 0; w < 4; w++)
++					{
++						if(slotMasks[i].nV[w] == 0) continue;
++						jitter->PushRel(offsetof(CMIPS, m_State.pipeFmacWrite[i].nV[w]));
++						jitter->PushCst(slotMasks[i].nV[w]);
++						jitter->And();
++						if(!first) jitter->Or();
++						first = false;
++					}
++				}
++				if(first) jitter->PushCst(0);
++				jitter->PullRel(offsetof(CMIPS, m_vuStallPending));
++			}
++			unsigned int checkCount = 0;
++			for(int32 stallIdx = 0; stallIdx < 4; stallIdx++)
++			{
++				if(stallMask.nV[stallIdx] != 0) checkCount += 3 - extraPipeTimeIndex;
++			}
++			bool combinedCheck = g_combinedStallCheck && (checkCount > 1);
++			if(combinedCheck)
++			{
++				jitter->PushRel(offsetof(CMIPS, m_vuStallPending));
++				jitter->PushCst(0);
++				jitter->BeginIf(Jitter::CONDITION_NE);
++			}
+ 			for(int32 i = extraPipeTimeIndex; i < 3; i++)
+ 			{
+ 				for(int32 stallIdx = 0; stallIdx < 4; stallIdx++)
+@@ -120,9 +180,14 @@
+ 							jitter->PullRel(offsetof(CMIPS, m_State.pipeTime));
+ 						}
+ 						jitter->EndIf();
++						VUShared::NotePipeTimeChange();
+ 					}
+ 				}
+ 			}
++			if(combinedCheck)
++			{
++				jitter->EndIf();
++			}
+ 
+ 			//Clear writes
+ 			jitter->MD_PushCstExpandW(0U);
+@@ -391,6 +456,8 @@
+ 
+ 	assert(!hasPendingXgKick);
+ 
++	VUShared::EndFlagTracking();
++
+ 	//Increment pipeTime
+ 	{
+ 		jitter->PushRel(offsetof(CMIPS, m_State.pipeTime));
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -104,6 +104,9 @@
+ 	void SetThreaded(bool, const std::function<void()>& workerInit = std::function<void()>());
+ 	//Threaded VU1: the EE waits for the program when VIF1 does (vu1_wait_on_stall, on)
+ 	static inline bool g_waitOnVifStall = true;
++	//Threaded VU1: the idle worker polls for new work this long before sleeping
++	//(a wake from the semaphore takes ~0.5 ms on the Vita, longer than most programs)
++	static inline uint32 g_workerSpinUs = 0;
+ 	bool IsThreaded() const
+ 	{
+ 		return m_threaded;
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -168,6 +168,23 @@
+ 	{
+ 		if(!m_workPending.exchange(false, std::memory_order_acq_rel))
+ 		{
++#ifdef __vita__
++			if(g_workerSpinUs != 0)
++			{
++				bool found = false;
++				SceUInt64 deadline = sceKernelGetSystemTimeWide() + g_workerSpinUs;
++				for(uint32 spins = 1;; spins++)
++				{
++					if(m_workPending.load(std::memory_order_acquire) || m_stopWorker)
++					{
++						found = true;
++						break;
++					}
++					if(((spins & 255) == 0) && (sceKernelGetSystemTimeWide() >= deadline)) break;
++				}
++				if(found) continue;
++			}
++#endif
+ 			//Timed waits: a lost or early wakeup costs at most a millisecond.
+ #ifdef __vita__
+ 			SceUInt timeout = 1000;

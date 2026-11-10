@@ -348,6 +348,9 @@ namespace
 		else if(key == "feedback_draw") CGSH_Hardware::g_feedbackDraw = value != 0;
 		else if(key == "gpu_alpha_clut") CGSH_Hardware::g_gpuAlphaClut = value != 0;
 		else if(key == "depth_force_load") CGSH_Hardware::g_depthForceLoad = value != 0;
+		else if(key == "vu1_spin_us") CVpu::g_workerSpinUs = value; //threaded VU1: poll this long before sleeping
+		else if(key == "vu_stall_check") CVuBasicBlock::g_combinedStallCheck = (value != 0); //one test of pending FMAC writes per block
+		else if(key == "vu_flag_tracking") VUShared::g_flagTracking = (value != 0); //flag reads after flags of the same block: one load
 		else if(key == "vu_no_clamp") { if(value) CVuBasicBlock::g_extraCompileHints |= VUShared::COMPILEHINT_NO_CLAMPING; else CVuBasicBlock::g_extraCompileHints &= ~VUShared::COMPILEHINT_NO_CLAMPING; }
 		else if(key == "vu1_wait_on_stall") CVpu::g_waitOnVifStall = value != 0;
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s

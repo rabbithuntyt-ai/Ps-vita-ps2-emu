@@ -28,6 +28,8 @@
 // Exit code is 0 when at least one frame was presented.
 
 #include "ee/Tier2.h"
+#include "ee/VuBasicBlock.h"
+#include "ee/VUShared.h"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -257,6 +259,12 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--dump-ram") && (i + 1 < argc)) ramDumpPath = argv[++i];
 		else if(!std::strcmp(argv[i], "--load-state") && (i + 1 < argc)) loadStatePath = argv[++i];
 		else if(!std::strcmp(argv[i], "--vu1-stats")) EmuProfile::g_vu1Programs.enabled = true; //vu1prog.txt
+		else if(!std::strcmp(argv[i], "--vu-old-checks"))
+		{
+			//VU blocks: per slot stall checks and full flag pipeline walks (A/B of the faster ones)
+			CVuBasicBlock::g_combinedStallCheck = false;
+			VUShared::g_flagTracking = false;
+		}
 	}
 
 	const char* home = std::getenv("HOME");
