@@ -6,6 +6,7 @@
 #            branches inside (exercises loop register promotion)
 #   --calls: also calls (jal, jalr) to leaf and non-leaf functions (ra saved on the
 #            stack), some returning past their call site (they change ra)
+#   --more: also lq/sq, mult/multu and the HI/LO moves
 #   --spr: loads and stores in the scratchpad (0x70000000: memory handlers, not RAM)
 #   --likely: also likely branches (beql...: the delay slot runs only when taken),
 #            some loops closed by bnel. Off by default: the recorded checksums of the
@@ -21,7 +22,8 @@ args = [a for a in sys.argv[1:] if not a.startswith('--')]
 loops = '--loops' in sys.argv
 likely = '--likely' in sys.argv
 calls = '--calls' in sys.argv
-spr = '--spr' in sys.argv  # loads and stores in the scratchpad (not RAM: the JIT's slow path)
+spr = '--spr' in sys.argv
+more = '--more' in sys.argv  # lq/sq, mult/multu, mfhi/mflo/mthi/mtlo  # loads and stores in the scratchpad (not RAM: the JIT's slow path)
 count = int(args[2]) if len(args) > 2 else 3000
 code = []
 
@@ -31,7 +33,21 @@ def reg(): return rng.choice(POOL)
 def dst(): return rng.choice(POOL[:-1])
 A0 = R['a0']
 
+def more_op():
+    k = rng.randrange(8)
+    if k == 0: I(0x1E, A0, dst(), rng.randrange(64) * 16)             # lq
+    elif k == 1: I(0x1F, A0, reg(), rng.randrange(64) * 16)           # sq
+    elif k == 2: Rr(0x18, reg(), reg(), rng.choice([0, dst()]))       # mult (rd: lo)
+    elif k == 3: Rr(0x19, reg(), reg(), rng.choice([0, dst()]))       # multu
+    elif k == 4: Rr(0x10, 0, 0, dst())                                # mfhi
+    elif k == 5: Rr(0x12, 0, 0, dst())                                # mflo
+    elif k == 6: Rr(0x11, reg(), 0, 0)                                # mthi
+    else: Rr(0x13, reg(), 0, 0)                                       # mtlo
+
 def alu():
+    if more and rng.random() < 0.2:
+        more_op()
+        return
     k = rng.randrange(24)
     if k == 0: I(0x09, reg(), dst(), rng.randrange(65536))           # addiu
     elif k == 1: Rr(0x21, reg(), reg(), dst())                        # addu

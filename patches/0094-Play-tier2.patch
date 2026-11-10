@@ -349,7 +349,7 @@ diff --git a/Source/ee/Tier2.cpp b/Source/ee/Tier2.cpp
 new file mode 100644
 --- /dev/null
 +++ b/Source/ee/Tier2.cpp
-@@ -0,0 +1,2456 @@
+@@ -0,0 +1,2622 @@
 +#include "Tier2.h"
 +#include <algorithm>
 +#include <chrono>
@@ -463,6 +463,17 @@ new file mode 100644
 +		OP_SD,
 +		//rd = (rs cond rt) ? 1 : 0, cond in sa (COND)
 +		OP_COND,
++		//rd (128 bits) = mem[(rs + imm) & ~15]; mem[(rs + imm) & ~15] = rt (128 bits)
++		OP_LQ,
++		OP_SQ,
++		//HI:LO = rs * rt (32-bit, both halves sign extended), rd = LO
++		OP_MULT,
++		OP_MULTU,
++		//rd = HI / LO; HI / LO = rs (64 bits)
++		OP_MFHI,
++		OP_MFLO,
++		OP_MTHI,
++		OP_MTLO,
 +	};
 +
 +	enum COND : uint8
@@ -491,12 +502,12 @@ new file mode 100644
 +
 +	bool IsLoad(OP op)
 +	{
-+		return (op >= OP_LB) && (op <= OP_LD);
++		return ((op >= OP_LB) && (op <= OP_LD)) || (op == OP_LQ);
 +	}
 +
 +	bool IsStore(OP op)
 +	{
-+		return (op >= OP_SB) && (op <= OP_SD);
++		return ((op >= OP_SB) && (op <= OP_SD)) || (op == OP_SQ);
 +	}
 +
 +	//The register an instruction writes (0: none)
@@ -682,6 +693,37 @@ new file mode 100644
 +				case 0x0A: return r3(OP_MOVZ);
 +				case 0x0B: return r3(OP_MOVN);
 +				case 0x0F: return true; //sync
++				case 0x10:
++				case 0x12:
++					if(rd == 0) return true;
++					{
++						INST inst;
++						inst.op = ((opcode & 0x3F) == 0x10) ? OP_MFHI : OP_MFLO;
++						inst.rd = rd;
++						out.push_back(inst);
++					}
++					return true;
++				case 0x11:
++				case 0x13:
++				{
++					INST inst;
++					inst.op = ((opcode & 0x3F) == 0x11) ? OP_MTHI : OP_MTLO;
++					inst.rs = rs;
++					out.push_back(inst);
++					return true;
++				}
++				case 0x18:
++				case 0x19:
++				{
++					//HI and LO change even when rd is zero
++					INST inst;
++					inst.op = ((opcode & 0x3F) == 0x18) ? OP_MULT : OP_MULTU;
++					inst.rd = rd;
++					inst.rs = rs;
++					inst.rt = rt;
++					out.push_back(inst);
++					return true;
++				}
 +				case 0x14: return r3(OP_DSLLV);
 +				case 0x16: return r3(OP_DSRLV);
 +				case 0x17: return r3(OP_DSRAV);
@@ -720,6 +762,10 @@ new file mode 100644
 +				}
 +				return true;
 +			case 0x19: return imm(OP_DADDIU, simm);
++			case 0x1E:
++				if(rt == 0) return true; //the JIT doesn't access memory either
++				return mem(OP_LQ);
++			case 0x1F: return mem(OP_SQ);
 +			case 0x20: return mem(OP_LB);
 +			case 0x21: return mem(OP_LH);
 +			case 0x23: return mem(OP_LW);
@@ -1144,6 +1190,29 @@ new file mode 100644
 +			case OP_SW: MemoryUtils_SetWordProxy(ctx, t32, address()); break;
 +			case OP_SD: MemoryUtils_SetDoubleProxy(ctx, t, address()); break;
 +			case OP_COND: Set(inst.rd, Test(static_cast<COND>(inst.sa), s, t) ? 1 : 0); break;
++			case OP_LQ: MemoryUtils_GetQuadProxyPtr(ctx, address(), &m_context.m_State.nGPR[inst.rd]); break;
++			case OP_SQ: MemoryUtils_SetQuadProxyPtr(ctx, address(), &m_context.m_State.nGPR[inst.rt]); break;
++			case OP_MULT:
++			case OP_MULTU:
++			{
++				uint64 product = (inst.op == OP_MULT) ? static_cast<uint64>(static_cast<int64>(static_cast<int32>(s32)) * static_cast<int32>(t32))
++				                                      : static_cast<uint64>(s32) * t32;
++				uint64 lo = Sx(static_cast<uint32>(product)), hi = Sx(static_cast<uint32>(product >> 32));
++				memcpy(m_context.m_State.nLO, &lo, 8);
++				memcpy(m_context.m_State.nHI, &hi, 8);
++				Set(inst.rd, lo);
++				break;
++			}
++			case OP_MFHI:
++			case OP_MFLO:
++			{
++				uint64 value = 0;
++				memcpy(&value, (inst.op == OP_MFHI) ? m_context.m_State.nHI : m_context.m_State.nLO, 8);
++				Set(inst.rd, value);
++				break;
++			}
++			case OP_MTHI: memcpy(m_context.m_State.nHI, &s, 8); break;
++			case OP_MTLO: memcpy(m_context.m_State.nLO, &s, 8); break;
 +			}
 +		}
 +
@@ -1527,6 +1596,7 @@ new file mode 100644
 +		void EmitInst(const INST&, STATE&);
 +		void EmitLoad(const INST&, STATE&);
 +		void EmitStore(const INST&, STATE&);
++		void EmitQuad(const INST&, STATE&);
 +		void EmitShift64Const(const INST&, STATE&);
 +		void EmitShift64Var(const INST&, STATE&);
 +		Arm::CC EmitCompare(COND, uint8 a, uint8 b, const STATE&);
@@ -1619,6 +1689,8 @@ new file mode 100644
 +		case OP_LHU:
 +		case OP_LW:
 +		case OP_COND:
++		case OP_MULT:
++		case OP_MULTU:
 +			return HI_SX;
 +		case OP_AND:
 +		case OP_OR:
@@ -1955,6 +2027,55 @@ new file mode 100644
 +		});
 +	}
 +
++	//lq/sq: 16 bytes between the context's register and memory (through q8)
++	void CArmCompiler::EmitQuad(const INST& inst, STATE& state)
++	{
++		using namespace Arm;
++		bool load = (inst.op == OP_LQ);
++		uint8 reg = load ? inst.rd : inst.rt;
++		//sq: the whole register in the context first
++		if(!load && IsAllocated(reg))
++		{
++			m_emit.Str(m_alloc[reg], FP, LoOffset(reg));
++			Materialize(reg, state);
++		}
++		int base = Lo(inst.rs, IP);
++		m_emit.DpConst(ADD, false, IP, base, static_cast<uint32>(inst.imm), LR);
++		m_emit.DpImm(BIC, false, IP, IP, 15);
++		int slow = m_emit.NewLabel();
++		int done = m_emit.NewLabel();
++		m_emit.DpImm(TST, true, 0, IP, 0xFE000000);
++		m_emit.B(slow, NE);
++		m_emit.DpReg(ADD, false, IP, R10, IP);
++		m_emit.DpConst(ADD, false, LR, FP, static_cast<uint32>(LoOffset(reg)), R0);
++		if(load)
++		{
++			m_emit.Word(0xF4600A8F | (IP << 16)); //vld1.32 {d16-d17}, [ip]
++			m_emit.Word(0xF4400A8F | (LR << 16)); //vst1.32 {d16-d17}, [lr]
++		}
++		else
++		{
++			m_emit.Word(0xF4600A8F | (LR << 16));
++			m_emit.Word(0xF4400A8F | (IP << 16));
++		}
++		m_emit.Mark(done);
++		if(load)
++		{
++			if(IsAllocated(reg)) m_emit.Ldr(m_alloc[reg], FP, LoOffset(reg));
++			state.hi[reg] = HI_MEM;
++		}
++		m_cold.push_back([this, load, reg, slow, done]() {
++			m_emit.Mark(slow);
++			m_emit.Str(R2, SP, FRAME_SAVE_R2);
++			m_emit.Str(R3, SP, FRAME_SAVE_R3);
++			//(context, address, pointer to the register in the context)
++			m_emit.DpReg(MOV, false, R1, 0, IP);
++			m_emit.DpConst(ADD, false, R2, FP, static_cast<uint32>(LoOffset(reg)), R0);
++			EmitCall(load ? reinterpret_cast<uintptr_t>(&MemoryUtils_GetQuadProxyPtr) : reinterpret_cast<uintptr_t>(&MemoryUtils_SetQuadProxyPtr));
++			m_emit.B(done);
++		});
++	}
++
 +	void CArmCompiler::EmitShift64Const(const INST& inst, STATE& state)
 +	{
 +		using namespace Arm;
@@ -2134,6 +2255,51 @@ new file mode 100644
 +	void CArmCompiler::EmitInst(const INST& inst, STATE& state)
 +	{
 +		using namespace Arm;
++		switch(inst.op)
++		{
++		case OP_LQ:
++		case OP_SQ:
++			EmitQuad(inst, state);
++			return;
++		case OP_MULT:
++		case OP_MULTU:
++		{
++			int a = Lo(inst.rs, IP);
++			int b = Lo(inst.rt, LR);
++			//umull/smull r0 (lo), r1 (hi), a, b
++			m_emit.Word(((inst.op == OP_MULT) ? 0xE0C00090 : 0xE0800090) | (R1 << 16) | (R0 << 12) | (b << 8) | a);
++			int32 lo = static_cast<int32>(offsetof(CMIPS, m_State.nLO)), hi = static_cast<int32>(offsetof(CMIPS, m_State.nHI));
++			m_emit.Str(R0, FP, lo);
++			m_emit.DpReg(MOV, false, IP, 0, R0, ASR, 31);
++			m_emit.Str(IP, FP, lo + 4);
++			m_emit.Str(R1, FP, hi);
++			m_emit.DpReg(MOV, false, IP, 0, R1, ASR, 31);
++			m_emit.Str(IP, FP, hi + 4);
++			if(inst.rd != 0) CommitSx(inst.rd, R0, state);
++			return;
++		}
++		case OP_MFHI:
++		case OP_MFLO:
++		{
++			int32 offset = static_cast<int32>((inst.op == OP_MFHI) ? offsetof(CMIPS, m_State.nHI) : offsetof(CMIPS, m_State.nLO));
++			m_emit.Ldr(IP, FP, offset);
++			m_emit.Ldr(R0, FP, offset + 4);
++			Commit64(inst.rd, IP, R0, state);
++			return;
++		}
++		case OP_MTHI:
++		case OP_MTLO:
++		{
++			int32 offset = static_cast<int32>((inst.op == OP_MTHI) ? offsetof(CMIPS, m_State.nHI) : offsetof(CMIPS, m_State.nLO));
++			int hi = Hi(inst.rs, R0, state);
++			int lo = Lo(inst.rs, IP);
++			m_emit.Str(lo, FP, offset);
++			m_emit.Str(hi, FP, offset + 4);
++			return;
++		}
++		default:
++			break;
++		}
 +		if(IsLoad(inst.op))
 +		{
 +			EmitLoad(inst, state);
@@ -2719,7 +2885,7 @@ new file mode 100644
 +	static const char* opNames[] = {"addu", "subu", "sllv", "srlv", "srav", "and", "or", "xor", "nor", "slt", "sltu", "daddu", "dsubu",
 +	                                "dsllv", "dsrlv", "dsrav", "movz", "movn", "sll", "srl", "sra", "dsll", "dsrl", "dsra", "addiu", "daddiu",
 +	                                "slti", "sltiu", "andi", "ori", "xori", "li", "lb", "lbu", "lh", "lhu", "lw", "lwu", "ld", "sb", "sh",
-+	                                "sw", "sd", "cond"};
++	                                "sw", "sd", "cond", "lq", "sq", "mult", "multu", "mfhi", "mflo", "mthi", "mtlo"};
 +	static const char* condNames[] = {"eq", "ne", "lez", "gtz", "ltz", "gez"};
 +	if(!m_region)
 +	{

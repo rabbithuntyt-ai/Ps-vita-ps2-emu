@@ -210,6 +210,13 @@ block edges and the upper halves of registers are tracked across the whole regio
   [`tier2_lo`, `tier2_hi`) with its guest code on the Vita, `tier2_lo`/`tier2_hi` keep
   native code to an address window (the rest interpreted), `tier2.txt` lists the regions
   and the instructions that ended blocks.
+- **Added (same day)**: `lq`/`sq` (through q8, the memory handlers with a pointer into the
+  context), `mult`/`multu` (HI/LO sign extended, rd = LO), `mfhi`/`mflo`/`mthi`/`mtlo`;
+  fuzz option `--more`. 40 programs on the PC, 18 on the Vita with native code. RE4 movie
+  section (200 s runs): 690 regions, 66000 EE instructions; EE code 10.75 ms per frame
+  against 11.15 without (-4%); compile time 0.73 against 0.38 ms per frame. Still ending
+  blocks: MMI 188, `syscall` 108, `swc1` 84, `mtc1`/`ctc1` 76, `lwc1` 61, `ldl` 41,
+  `mfc0` 38, `divu` 36.
 - **A trap found on the way**: RE4 test runs press buttons at fixed real-time seconds.
   A faster or slower EE moves the game's timeline, so a 115 s run can end before the movie
   starts. "No pictures" then looked like a hang (an address bisection chased it for an
