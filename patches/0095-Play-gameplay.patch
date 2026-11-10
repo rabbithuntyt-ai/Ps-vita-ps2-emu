@@ -165,7 +165,64 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
  	}
  	FlushPendingXgKicks();
  	RaisePendingInterrupt();
-@@ -404,7 +438,11 @@
+@@ -219,25 +253,43 @@
+ void CVpu::FlushPendingXgKicks()
+ {
+ 	if(!m_hasPendingKicks) return;
+-	std::vector<std::vector<uint8>> kicks;
+-	{
+-		std::lock_guard<std::mutex> lock(m_kickMutex);
+-		kicks.swap(m_pendingKicks);
+-		m_hasPendingKicks = false;
+-	}
+ 	CGsPacketMetadata metadata;
+ 	metadata.pathIndex = 1;
+-	for(const auto& packet : kicks)
++	while(true)
+ 	{
+-		uint32 size = static_cast<uint32>(packet.size());
+-		uint32 processed = 0;
+-		while(processed < size)
++		//Another path in the middle of a packet (VIF1 DIRECT or GIF DMA data split over
++		//transfers): the GIF would take PATH1 data as the rest of that packet and stay on
++		//PATH1 for good (Resident Evil 4 then hung: VIF1 DIRECT waiting, GIF on PATH1).
++		//The packets wait; Execute tries again every slice.
++		uint32 activePath = m_gif.GetActivePath();
++		if((activePath != 0) && (activePath != 1)) return;
++		std::vector<uint8>* packet = nullptr;
++		{
++			std::lock_guard<std::mutex> lock(m_kickMutex);
++			if(m_pendingKicks.empty())
++			{
++				m_hasPendingKicks = false;
++				return;
++			}
++			packet = &m_pendingKicks.front(); //a deque: the worker's pushes leave it in place
++		}
++		uint32 size = static_cast<uint32>(packet->size());
++		bool refused = false;
++		while(m_kickOffset < size)
+ 		{
+-			uint32 consumed = m_gif.ProcessSinglePacket(packet.data(), size, processed, size, metadata);
+-			if(consumed == 0) break;
+-			processed += consumed;
++			uint32 consumed = m_gif.ProcessSinglePacket(packet->data(), size, m_kickOffset, size, metadata);
++			if(consumed == 0)
++			{
++				refused = true;
++				break;
++			}
++			m_kickOffset += consumed;
+ 			if(m_gif.GetActivePath() == 0) break;
+ 		}
++		if(refused && (m_kickOffset < size)) return; //the GS holds a signal: the rest goes later
++		m_kickOffset = 0;
++		std::lock_guard<std::mutex> lock(m_kickMutex);
++		m_pendingKicks.pop_front();
+ 	}
+ }
+ 
+@@ -404,7 +456,11 @@
  {
  	CLog::GetInstance().Print(LOG_NAME, "Starting microprogram execution at 0x%08X.\r\n", nAddress);
  	m_programStart = nAddress;
@@ -178,7 +235,7 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
  
  	m_ctx->m_State.nPC = nAddress;
  	m_ctx->m_State.pipeTime = 0;
-@@ -422,19 +460,25 @@
+@@ -422,19 +478,25 @@
  	m_vuState = VU_STATE_RUNNING;
  	if(m_threaded)
  	{
@@ -212,7 +269,15 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
 diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
 --- a/Source/ee/Vpu.h
 +++ b/Source/ee/Vpu.h
-@@ -179,7 +179,17 @@
+@@ -2,6 +2,7 @@
+ 
+ #include <atomic>
+ #include <condition_variable>
++#include <deque>
+ #include <functional>
+ #include <mutex>
+ #include <thread>
+@@ -179,10 +180,21 @@
  	std::mutex m_workerMutex;
  	std::condition_variable m_workerCondition;
  	std::condition_variable m_idleCondition;
@@ -230,4 +295,9 @@ diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
 +	}
  	std::atomic<bool> m_stopWorker = false;
  	std::mutex m_kickMutex;
- 	std::vector<std::vector<uint8>> m_pendingKicks;
+-	std::vector<std::vector<uint8>> m_pendingKicks;
++	std::deque<std::vector<uint8>> m_pendingKicks;
++	uint32 m_kickOffset = 0; //EE thread: bytes of the first pending packet already sent
+ 	std::atomic<bool> m_hasPendingKicks = false;
+ 	std::atomic<bool> m_pendingInterrupt = false;
+ 	uint32 m_fbrst = 0;
