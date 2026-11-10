@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdio>
 #include <thread>
+#include <unordered_map>
 #include <functional>
 #include <memory>
 #include <string>
@@ -197,6 +198,15 @@ private:
 	std::atomic<uint32_t> m_iopProfileCounts[EmuProfile::SECTION_COUNT]; //the IOP thread (iop_thread)
 	static constexpr unsigned int EE_HOTSPOT_SLOTS = 4096;
 	std::atomic<uint32_t> m_eeHotPc[EE_HOTSPOT_SLOTS] = {};
+	//Tier 2 requests (profiler thread): samples per EE block start
+	std::unordered_map<uint32_t, uint32_t> m_tier2Samples;
+	uint32_t m_tier2Requested = 0;
+
+public:
+	static inline uint32_t g_tier2HotSamples = 8;
+	static inline uint32_t g_tier2MaxRequests = 4000;
+
+private:
 	std::atomic<uint32_t> m_eeHotCount[EE_HOTSPOT_SLOTS] = {};
 	std::atomic<uint32_t> m_eeHotSamples{0};
 	std::atomic<uint32_t> m_iopHotPc[EE_HOTSPOT_SLOTS] = {};

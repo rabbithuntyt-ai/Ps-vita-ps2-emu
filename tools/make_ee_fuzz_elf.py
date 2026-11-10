@@ -4,6 +4,9 @@
 # Usage: make_ee_fuzz_elf.py out.elf SEED [COUNT] [--loops]
 #   --loops: also counted loops (t9) around random bodies, some with forward
 #            branches inside (exercises loop register promotion)
+#   --calls: also calls (jal, jalr) to leaf and non-leaf functions (ra saved on the
+#            stack), some returning past their call site (they change ra)
+#   --spr: loads and stores in the scratchpad (0x70000000: memory handlers, not RAM)
 #   --likely: also likely branches (beql...: the delay slot runs only when taken),
 #            some loops closed by bnel. Off by default: the recorded checksums of the
 #            host tests are for programs without them.
@@ -17,6 +20,8 @@ rng = random.Random(int(sys.argv[2]))
 args = [a for a in sys.argv[1:] if not a.startswith('--')]
 loops = '--loops' in sys.argv
 likely = '--likely' in sys.argv
+calls = '--calls' in sys.argv
+spr = '--spr' in sys.argv  # loads and stores in the scratchpad (not RAM: the JIT's slow path)
 count = int(args[2]) if len(args) > 2 else 3000
 code = []
 
@@ -74,15 +79,32 @@ def li(r, v):
     I(0x0F, 0, r, v >> 16); I(0x0D, r, r, v & 0xFFFF)
 
 li(R['sp'], 0x01F00000)
-li(A0, 0x00300000)
+li(A0, 0x70000000 if spr else 0x00300000)
 for r in POOL[:-1]:
     li(r, rng.randrange(1 << 32))
     if rng.random() < 0.3:
         Rr(0x3C, 0, r, r, 0)                     # dsll32: upper half not a sign extension
         I(0x0D, r, r, rng.randrange(65536))
 T9 = R['t9']
+RA, SP, K1 = R['ra'], R['sp'], R['k1']
+# Functions (--calls): kind 0 leaf, 1 leaf with a forward branch, 2 non-leaf (calls a
+# leaf, ra on the stack), 3 leaf returning 2 instructions past its call site
+FUNCS = [0, 1, 2, 3, 0, 2] if calls else []
+patches = []  # (code index, function, 'jal' | 'li')
+def call_site():
+    f = rng.randrange(len(FUNCS))
+    if rng.random() < 0.7:
+        patches.append((len(code), f, 'jal')); code.append(0)
+    else:
+        patches.append((len(code), f, 'li')); code.append(0); code.append(0)
+        Rr(0x09, K1, 0, RA)                      # jalr ra, k1
+    alu()                                        # delay slot
+    if FUNCS[f] == 3:
+        alu(); alu()                             # skipped by the callee
 for i in range(count):
-    if loops and rng.random() < 0.03:
+    if calls and rng.random() < 0.05:
+        call_site()
+    elif loops and rng.random() < 0.03:
         I(0x0D, 0, T9, rng.randrange(2, 20))     # ori t9, zero, N
         top = len(code)
         for j in range(rng.randrange(3, 30)):
@@ -114,6 +136,38 @@ for r in POOL[:-1]:
     Rr(0x25, R['t9'], R['t8'], R['s7'])
 li(R['s6'], 0xD0E)
 I(0x04, 0, 0, 0xFFFF); code.append(0)            # b . ; nop
+addresses = []
+for f, kind in enumerate(FUNCS):
+    addresses.append(m.BASE + len(code) * 4)
+    if kind == 2:
+        I(0x09, SP, SP, 0xFFF0)                  # addiu sp, sp, -16
+        I(0x3F, SP, RA, 0)                       # sd ra, 0(sp)
+        for j in range(rng.randrange(1, 6)): alu()
+        leaf = rng.choice([g for g, k in enumerate(FUNCS) if k in (0, 1)])
+        patches.append((len(code), leaf, 'jal')); code.append(0)
+        alu()
+        for j in range(rng.randrange(1, 6)): alu()
+        I(0x37, SP, RA, 0)                       # ld ra, 0(sp)
+        Rr(0x08, RA, 0, 0)                       # jr ra
+        I(0x09, SP, SP, 16)                      # addiu sp, sp, 16 (delay slot)
+        continue
+    for j in range(rng.randrange(2, 12)): alu()
+    if kind == 1:
+        skip = rng.randrange(1, 3)
+        branch(skip); alu()
+        for k in range(skip): alu()
+        alu()
+    if kind == 3:
+        I(0x09, RA, RA, 8)                       # addiu ra, ra, 8
+    Rr(0x08, RA, 0, 0)                           # jr ra
+    alu()                                        # delay slot
+for index, f, how in patches:
+    target = addresses[f]
+    if how == 'jal':
+        code[index] = (0x03 << 26) | ((target >> 2) & 0x03FFFFFF)
+    else:
+        code[index] = (0x0F << 26) | (K1 << 16) | (target >> 16)
+        code[index + 1] = (0x0D << 26) | (K1 << 21) | (K1 << 16) | (target & 0xFFFF)
 image = bytearray(0x40000)
 for i, w in enumerate(code):
     struct.pack_into('<I', image, i * 4, w)

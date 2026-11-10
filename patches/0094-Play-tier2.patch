@@ -1,0 +1,2808 @@
+diff --git a/Source/BasicBlock.h b/Source/BasicBlock.h
+--- a/Source/BasicBlock.h
++++ b/Source/BasicBlock.h
+@@ -77,7 +77,8 @@
+ public:
+ 	CBasicBlock(CMIPS&, uint32 = MIPS_INVALID_PC, uint32 = MIPS_INVALID_PC, BLOCK_CATEGORY = BLOCK_CATEGORY_UNKNOWN);
+ 	virtual ~CBasicBlock() = default;
+-	void Execute();
++	//Virtual: tier 2 regions may be interpreted (CTier2Block)
++	virtual void Execute();
+ 	void Compile();
+ 	virtual void CompileRange(CMipsJitter*);
+ 
+@@ -165,6 +166,8 @@
+ 		return true;
+ 	}
+ 	void CompileLikelyEpilog(CMipsJitter*, bool loopsOnItself);
++	//Code made by another compiler (tier 2), with the JIT's chained frame conventions
++	void SetNativeCode(const void* code, size_t size, uint32 linkEntryOffset);
+ 	void AnalyseExit();
+ 	//Slow exits: undo the top bits set in the quota by a memory handler's exception
+ 	//(EnableMemoryExceptionPoison)
+diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
+--- a/Source/BasicBlock.cpp
++++ b/Source/BasicBlock.cpp
+@@ -626,6 +626,18 @@
+ 	jitter->PullRel(offsetof(CMIPS, m_State.nDelayedJumpAddr));
+ }
+ 
++void CBasicBlock::SetNativeCode(const void* code, size_t size, uint32 linkEntryOffset)
++{
++#ifndef AOT_USE_CACHE
++	m_function = CMemoryFunction(code, size);
++	m_linkEntryOffset = linkEntryOffset;
++#else
++	(void)code;
++	(void)size;
++	(void)linkEntryOffset;
++#endif
++}
++
+ void CBasicBlock::Execute()
+ {
+ 	m_function(&m_context);
+diff --git a/Source/ee/EeExecutor.h b/Source/ee/EeExecutor.h
+--- a/Source/ee/EeExecutor.h
++++ b/Source/ee/EeExecutor.h
+@@ -15,6 +15,8 @@
+ 
+ #include "../GenericMipsExecutor.h"
+ #include "EeBasicBlock.h"
++#include "Tier2.h"
++#include <mutex>
+ 
+ class CEeExecutor : public CGenericMipsExecutor<BlockLookupTwoWay>
+ {
+@@ -45,6 +47,11 @@
+ 
+ 	BasicBlockPtr BlockFactory(CMIPS&, uint32, uint32) override;
+ 	void PartitionFunction(uint32) override;
++	int Execute(int) override;
++
++	//Tier 2 (Tier2.h): a region at this block start, built before the next Execute
++	//(any thread; hot block starts found by the profiler)
++	void RequestTier2(uint32 address);
+ 
+ 	//Tier 2 regions (CEeRegionBlock): several blocks of a function compiled as
+ 	//one, when execution enters code that loops or branches within itself.
+@@ -58,6 +65,16 @@
+ 	}
+ 
+ private:
++	bool TryTier2(uint32 address, bool replace);
++	void ProcessTier2Requests();
++	bool IsExcludedFromTier2(uint32 address) const;
++
++	std::shared_ptr<CTier2Block> m_pendingTier2;
++	std::map<uint32, std::vector<Tier2::RANGE>> m_tier2Ranges; //region start -> guest code it holds
++	std::mutex m_tier2RequestMutex;
++	std::vector<uint32> m_tier2Requests;
++	std::atomic<bool> m_hasTier2Requests = false;
++
+ 	static inline bool g_regions = false;
+ 	std::vector<CEeRegionBlock::PART> m_pendingRegion;
+ 	std::map<uint32, uint32> m_regionRanges; //region start -> end (checked against the blocks before use)
+diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
+--- a/Source/ee/EeExecutor.cpp
++++ b/Source/ee/EeExecutor.cpp
+@@ -132,6 +132,7 @@
+ void CEeExecutor::DiscardCompiledCode()
+ {
+ 	m_cachedBlocks.clear();
++	m_tier2Ranges.clear();
+ 	CGenericMipsExecutor::Reset();
+ }
+ 
+@@ -139,6 +140,7 @@
+ {
+ 	SetMemoryProtected(m_ram, PS2::EE_RAM_SIZE, false);
+ 	m_cachedBlocks.clear();
++	m_tier2Ranges.clear();
+ 	m_blockFpRoundingModes.clear();
+ 	m_idleLoopBlocks.clear();
+ 	CGenericMipsExecutor::Reset();
+@@ -148,11 +150,102 @@
+ {
+ 	uint32 rangeSize = end - start;
+ 	SetMemoryProtected(m_ram + start, rangeSize, false);
++	//Tier 2 regions holding code in the range (inlined callees may be far from the start)
++	std::vector<uint32> regions;
++	for(auto it = m_tier2Ranges.begin(); it != m_tier2Ranges.end();)
++	{
++		bool overlaps = false;
++		for(const auto& range : it->second)
++		{
++			if(RangesOverlap(range.begin, range.end, start, end - 1)) overlaps = true;
++		}
++		if(overlaps)
++		{
++			regions.push_back(it->first);
++			it = m_tier2Ranges.erase(it);
++		}
++		else
++		{
++			++it;
++		}
++	}
+ 	CGenericMipsExecutor::ClearActiveBlocksInRange(start, end, executing);
++	for(uint32 region : regions)
++	{
++		if(!HasBlockAt(region)) continue;
++		if(executing && (FindBlockStartingAt(m_context.m_State.nPC) == FindBlockStartingAt(region))) continue;
++		CGenericMipsExecutor::ClearActiveBlocksInRange(region, region + 4, false);
++	}
++}
++
++bool CEeExecutor::IsExcludedFromTier2(uint32 address) const
++{
++	return m_blockFpRoundingModes.count(address) || m_idleLoopBlocks.count(address) || m_blockFpUseAccurateAddSub.count(address) ||
++	       m_context.HasBreakpointInRange(address, address);
++}
++
++//A region at 'address'; replace: a block may be there already (it is dropped)
++bool CEeExecutor::TryTier2(uint32 address, bool replace)
++{
++	if((address < 0x100000) || (address >= PS2::EE_RAM_SIZE) || IsExcludedFromTier2(address)) return false;
++	auto region = std::make_shared<CTier2Block>(m_context, address, m_blockCategory);
++	region->SetExcluded([this](uint32 pc) { return IsExcludedFromTier2(pc); });
++	{
++		EmuProfile::CScope profileScope(EmuProfile::SECTION_JIT);
++		if(!region->Build()) return false;
++	}
++	if(replace && HasBlockAt(address))
++	{
++		CGenericMipsExecutor::ClearActiveBlocksInRange(address, address + 4, false);
++		if(HasBlockAt(address)) return false;
++	}
++	m_pendingTier2 = region;
++	CreateBlock(address, region->GetEndAddress());
++	m_pendingTier2.reset();
++	//No link slots of its own (it leaves through the indirect dispatch); blocks
++	//waiting for this address link to it
++	ResolveIncomingLinks(address, FindBlockStartingAt(address));
++	m_tier2Ranges[address] = region->GetRanges();
++	return true;
++}
++
++void CEeExecutor::RequestTier2(uint32 address)
++{
++	std::lock_guard<std::mutex> lock(m_tier2RequestMutex);
++	if(m_tier2Requests.size() < 64) m_tier2Requests.push_back(address);
++	m_hasTier2Requests = true;
++}
++
++void CEeExecutor::ProcessTier2Requests()
++{
++	std::vector<uint32> requests;
++	{
++		std::lock_guard<std::mutex> lock(m_tier2RequestMutex);
++		requests.swap(m_tier2Requests);
++		m_hasTier2Requests = false;
++	}
++	if(Tier2::GetEffectiveMode() == Tier2::MODE_OFF) return;
++	for(uint32 address : requests)
++	{
++		address &= m_addressMask;
++		if((address & 3) != 0) continue;
++		if(m_tier2Ranges.count(address) && HasBlockAt(address)) continue; //already
++		TryTier2(address, true);
++	}
++}
++
++int CEeExecutor::Execute(int cycles)
++{
++	if(m_hasTier2Requests.load(std::memory_order_relaxed)) ProcessTier2Requests();
++	return CGenericMipsExecutor::Execute(cycles);
+ }
+ 
+ void CEeExecutor::PartitionFunction(uint32 startAddress)
+ {
++	if(Tier2::g_settings.eager && (Tier2::GetEffectiveMode() != Tier2::MODE_OFF))
++	{
++		if(TryTier2(startAddress, false)) return;
++	}
+ 	//Inside a region already compiled (entered there after a quota exit, or by a
+ 	//branch from elsewhere): a block, not another overlapping region (each would
+ 	//compile the same code again: loop programs spent seconds compiling)
+@@ -202,6 +295,11 @@
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_JIT);
+ 	uint32 blockSize = (end - start) + 4;
+ 
++	if(m_pendingTier2 && (m_pendingTier2->GetBeginAddress() == start))
++	{
++		return m_pendingTier2;
++	}
++
+ 	if(!m_pendingRegion.empty() && (m_pendingRegion.front().begin == start))
+ 	{
+ 		if(start >= 0x100000 && start < PS2::EE_RAM_SIZE)
+diff --git a/Source/CMakeLists.txt b/Source/CMakeLists.txt
+--- a/Source/CMakeLists.txt
++++ b/Source/CMakeLists.txt
+@@ -194,6 +194,8 @@
+ 	ee/EeExecutor.cpp
+ 	ee/EeExecutor.h
+ 	ee/FpAddTruncate.cpp
++	ee/Tier2.cpp
++	ee/Tier2.h
+ 	ee/FpAddTruncate.h
+ 	ee/FpMulTruncate.cpp
+ 	ee/FpMulTruncate.h
+diff --git a/Source/ee/Tier2.h b/Source/ee/Tier2.h
+new file mode 100644
+--- /dev/null
++++ b/Source/ee/Tier2.h
+@@ -0,0 +1,111 @@
++#pragma once
++
++// Tier 2 recompiler for EE code (docs/AOT_TRANSLATION.md), next to the JIT.
++//
++// A region starts at a hot block and follows the code from there: conditional
++// branches, jumps, and calls (jal: the callee is inlined; its `jr ra` checks that
++// it returns to the inlined call site, else leaves). It stops at instructions it
++// doesn't handle: they are left to the JIT (the region exits to that address).
++//
++// The region is lifted to a small IR on guest registers (full 64-bit meaning),
++// then either
++//  - compiled to ARM (AArch32, chained frames, pinned quota and RAM base): up to 7
++//    guest registers live in host registers for the whole region; the upper 32 bits
++//    of a register are tracked as "sign extension of the lower 32 bits" or "in the
++//    context" instead of being rebuilt at each block;
++//  - or interpreted (any host: checks the front end against the JIT with the
++//    fuzz programs).
++// Region code follows the JIT's conventions (chained frame, link entry, cycle
++// quota checked at each guest block's end like the JIT's blocks, exits through
++// the indirect dispatch), so JIT blocks and regions link to each other.
++
++#include <cstdio>
++#include <functional>
++#include <memory>
++#include <vector>
++#include "../BasicBlock.h"
++
++namespace Tier2
++{
++	enum MODE
++	{
++		MODE_OFF,
++		MODE_NATIVE,    //ARM code (falls back to MODE_OFF where the JIT's modes don't allow it)
++		MODE_INTERPRET, //the IR interpreted (tests the front end anywhere)
++	};
++
++	struct SETTINGS
++	{
++		MODE mode = MODE_OFF;
++		bool eager = false;        //a region at every block start (tests); else hot block starts only
++		uint32 maxBlocks = 48;     //guest blocks per region
++		uint32 maxInstructions = 768;
++		uint32 maxCallDepth = 3;   //nested inlined calls
++		uint32 minInstructions = 6; //smaller regions are left to the JIT
++		//Native code only for regions starting in [nativeLow, nativeHigh) (others interpreted: bisection)
++		uint32 nativeLow = 0, nativeHigh = 0xFFFFFFFF;
++		const char* dumpPath = nullptr; //regions in [nativeLow, nativeHigh) appended there when built (IR, guest code)
++		uint32 maxRegisters = 7;    //guest registers in host registers (0-7; the first 5 are callee saved)
++	};
++	extern SETTINGS g_settings;
++
++	//Effective mode: MODE_NATIVE needs chained frames, pinned fields with the fast RAM
++	//base, exception poison and indirect dispatch (AArch32)
++	MODE GetEffectiveMode();
++
++	struct STATS
++	{
++		uint32 regions = 0;
++		uint32 failed = 0;           //no region (unsupported first instruction, too small)
++		uint64 guestInstructions = 0;
++		uint64 codeBytes = 0;
++		uint64 compileUs = 0;
++		uint32 inlinedCalls = 0;
++		uint64 interpretedRuns = 0; //Execute calls of interpreted regions
++		//Instructions that ended a block (left to the JIT): primary opcode, 0x40 + SPECIAL
++		//function, 0x80 + REGIMM rt, 0xC0 + COPn rs (0xC0 COP0, 0xE0 COP1... by n * 8 + rs / 4)
++		uint32 stops[256] = {};
++		uint32 entries[1024] = {}; //the first regions built (start addresses)
++	};
++	extern STATS g_stats;
++	//The stops, most frequent first, as text
++	void WriteStops(FILE*);
++
++	struct RANGE
++	{
++		uint32 begin; //first instruction
++		uint32 end;   //last instruction
++	};
++}
++
++class CTier2Block : public CBasicBlock
++{
++public:
++	CTier2Block(CMIPS&, uint32 begin, BLOCK_CATEGORY);
++	~CTier2Block() override;
++
++	//Block starts the region must leave to the JIT (idle loops, per-block settings)
++	void SetExcluded(std::function<bool(uint32)>);
++	//Builds and compiles the region; false: nothing worth it at this address
++	bool Build();
++
++	void Execute() override;
++	//The region's IR, as text (debugging)
++	void Dump(FILE*) const;
++
++	const std::vector<Tier2::RANGE>& GetRanges() const
++	{
++		return m_ranges;
++	}
++
++	struct REGION;
++
++protected:
++	void CompileRange(CMipsJitter*) override;
++
++private:
++	std::unique_ptr<REGION> m_region;
++	std::vector<Tier2::RANGE> m_ranges;
++	std::function<bool(uint32)> m_excluded;
++	bool m_interpret = false;
++};
+diff --git a/Source/ee/Tier2.cpp b/Source/ee/Tier2.cpp
+new file mode 100644
+--- /dev/null
++++ b/Source/ee/Tier2.cpp
+@@ -0,0 +1,2456 @@
++#include "Tier2.h"
++#include <algorithm>
++#include <chrono>
++#include <cstring>
++#include <functional>
++#include <map>
++#include <string>
++#include "../MIPS.h"
++#include "../MemoryUtils.h"
++#include "../MipsJitter.h"
++#include "../EmuProfile.h"
++#include "EeBasicBlock.h"
++#if defined(__arm__) && !defined(__aarch64__)
++#include "Jitter_CodeGen_AArch32.h"
++#define TIER2_ARM 1
++#endif
++
++namespace Tier2
++{
++	SETTINGS g_settings;
++	STATS g_stats;
++
++	void WriteStops(FILE* file)
++	{
++		std::vector<std::pair<uint32, uint32>> stops;
++		for(uint32 i = 0; i < 256; i++)
++		{
++			if(g_stats.stops[i] != 0) stops.push_back({g_stats.stops[i], i});
++		}
++		std::sort(stops.rbegin(), stops.rend());
++		std::vector<uint32> entries(g_stats.entries, g_stats.entries + std::min<uint32>(g_stats.regions, 1024));
++		std::sort(entries.begin(), entries.end());
++		fprintf(file, "regions:");
++		for(uint32 entry : entries) fprintf(file, " %08X", entry);
++		fputc(10, file);
++		for(const auto& stop : stops)
++		{
++			uint32 key = stop.second;
++			const char* format = (key < 0x40) ? "op %02X: %u\n" : (key < 0x80) ? "special %02X: %u\n" : "regimm %02X: %u\n";
++			if(key < 0xC0)
++				fprintf(file, format, key & ((key < 0x40) ? 0x3F : (key < 0x80) ? 0x3F : 0x1F), stop.first);
++			else
++				fprintf(file, "cop%u rs %02X-%02X: %u\n", (key >> 3) & 3, (key & 7) * 4, (key & 7) * 4 + 3, stop.first);
++		}
++	}
++
++	MODE GetEffectiveMode()
++	{
++		if(g_settings.mode != MODE_NATIVE) return g_settings.mode;
++#ifdef TIER2_ARM
++		if(Jitter::CCodeGen_AArch32::GetChainedFrames() && Jitter::CCodeGen_AArch32::GetPinnedFields() &&
++		   CBasicBlock::GetFastRam() && CBasicBlock::GetMemoryExceptionPoison() && CBasicBlock::IsIndirectDispatchEnabled())
++		{
++			return MODE_NATIVE;
++		}
++#endif
++		return MODE_OFF;
++	}
++
++	//IR: operations on guest registers with their full 64-bit meaning
++	enum OP : uint8
++	{
++		//rd = f(rs, rt), 32-bit results sign extended
++		OP_ADDU,
++		OP_SUBU,
++		OP_SLLV,
++		OP_SRLV,
++		OP_SRAV,
++		//rd = f(rs, rt), 64-bit
++		OP_AND,
++		OP_OR,
++		OP_XOR,
++		OP_NOR,
++		OP_SLT,
++		OP_SLTU,
++		OP_DADDU,
++		OP_DSUBU,
++		OP_DSLLV,
++		OP_DSRLV,
++		OP_DSRAV,
++		OP_MOVZ,
++		OP_MOVN,
++		//rd = f(rt, sa)
++		OP_SLL,
++		OP_SRL,
++		OP_SRA,
++		OP_DSLL, //sa 0-63 (dsll32: sa + 32)
++		OP_DSRL,
++		OP_DSRA,
++		//rd = f(rs, imm)
++		OP_ADDIU,
++		OP_DADDIU,
++		OP_SLTI,
++		OP_SLTIU,
++		OP_ANDI,
++		OP_ORI,
++		OP_XORI,
++		OP_LI, //rd = sign extended imm
++		//rd = mem[rs + imm]
++		OP_LB,
++		OP_LBU,
++		OP_LH,
++		OP_LHU,
++		OP_LW,
++		OP_LWU,
++		OP_LD,
++		//mem[rs + imm] = rt
++		OP_SB,
++		OP_SH,
++		OP_SW,
++		OP_SD,
++		//rd = (rs cond rt) ? 1 : 0, cond in sa (COND)
++		OP_COND,
++	};
++
++	enum COND : uint8
++	{
++		COND_EQ,
++		COND_NE,
++		COND_LEZ,
++		COND_GTZ,
++		COND_LTZ,
++		COND_GEZ,
++	};
++
++	enum
++	{
++		REG_TEMP = 32, //one 32-bit temporary per block (branch conditions, jump targets)
++		REG_COUNT = 33,
++	};
++
++	struct INST
++	{
++		OP op;
++		uint8 rd = 0, rs = 0, rt = 0;
++		uint8 sa = 0;
++		int32 imm = 0;
++	};
++
++	bool IsLoad(OP op)
++	{
++		return (op >= OP_LB) && (op <= OP_LD);
++	}
++
++	bool IsStore(OP op)
++	{
++		return (op >= OP_SB) && (op <= OP_SD);
++	}
++
++	//The register an instruction writes (0: none)
++	uint8 Written(const INST& inst)
++	{
++		return IsStore(inst.op) ? 0 : inst.rd;
++	}
++
++	enum
++	{
++		EDGE_EXIT = -1,     //leave to a static guest address (pc)
++		EDGE_EXIT_REG = -2, //leave to the address in the terminator's register
++	};
++
++	struct EDGE
++	{
++		int target = EDGE_EXIT;
++		uint32 pc = 0;     //EDGE_EXIT: where to
++		uint32 cycles = 0; //subtracted from the quota on this edge
++		bool check = true; //quota (and exceptions) checked: leave when spent
++	};
++
++	enum TERM : uint8
++	{
++		TERM_GOTO,   //next
++		TERM_BRANCH, //cond(rs, rt) ? taken : next
++		TERM_GUARD,  //rs == expected ? taken : next (an exit to rs)
++	};
++
++	struct BLOCK
++	{
++		uint32 pc = 0;
++		std::vector<uint32> stack; //return addresses of the inlined calls around it
++		std::vector<INST> insts;
++		TERM term = TERM_GOTO;
++		COND cond = COND_EQ;
++		uint8 rs = 0, rt = 0; //terminator operands (TERM_GOTO with an EDGE_EXIT_REG: rs)
++		uint32 expected = 0;
++		EDGE taken, next;
++		uint32 begin = 0, end = 0; //guest range (end: last instruction; begin > end: none)
++		bool keyed = true;         //found by pc and stack (false: delay slot of a likely branch)
++	};
++}
++
++struct CTier2Block::REGION
++{
++	std::vector<Tier2::BLOCK> blocks; //blocks[0]: the entry
++	uint32 instructions = 0;
++};
++
++namespace Tier2
++{
++	//Builds the region's blocks from guest code
++	class CBuilder
++	{
++	public:
++		CBuilder(CMIPS& context, CTier2Block::REGION& region)
++		    : m_context(context)
++		    , m_region(region)
++		{
++		}
++
++		bool Build(uint32 entry)
++		{
++			if(GetBlock(entry, {}) != 0) return false;
++			while(!m_work.empty())
++			{
++				int index = m_work.back();
++				m_work.pop_back();
++				Fill(index);
++			}
++			const auto& first = m_region.blocks[0];
++			//Nothing compiled at the entry: the JIT's block is better
++			if((first.begin > first.end) && (first.term == TERM_GOTO) && (first.next.target < 0)) return false;
++			return m_region.instructions >= g_settings.minInstructions;
++		}
++
++	private:
++		uint32 Fetch(uint32 address)
++		{
++			return m_context.m_pMemoryMap->GetInstruction(address);
++		}
++
++		int GetBlock(uint32 pc, const std::vector<uint32>& stack)
++		{
++			auto key = std::make_pair(pc, stack);
++			auto found = m_index.find(key);
++			if(found != m_index.end()) return found->second;
++			if((m_region.blocks.size() >= g_settings.maxBlocks) || (m_region.instructions >= g_settings.maxInstructions)) return EDGE_EXIT;
++			if((pc & 3) != 0) return EDGE_EXIT;
++			int index = static_cast<int>(m_region.blocks.size());
++			BLOCK block;
++			block.pc = pc;
++			block.stack = stack;
++			m_region.blocks.push_back(std::move(block));
++			m_index[key] = index;
++			m_work.push_back(index);
++			return index;
++		}
++
++		EDGE MakeEdge(uint32 pc, const std::vector<uint32>& stack, uint32 cycles)
++		{
++			EDGE edge;
++			edge.target = GetBlock(pc, stack);
++			edge.pc = pc;
++			edge.cycles = cycles;
++			return edge;
++		}
++
++		static EDGE MakeExit(uint32 pc, uint32 cycles)
++		{
++			EDGE edge;
++			edge.target = EDGE_EXIT;
++			edge.pc = pc;
++			edge.cycles = cycles;
++			return edge;
++		}
++
++		//Lifts one non-branch instruction; false if not handled
++		static bool Lift(uint32 opcode, std::vector<INST>& out)
++		{
++			uint32 op = opcode >> 26;
++			uint8 rs = (opcode >> 21) & 0x1F;
++			uint8 rt = (opcode >> 16) & 0x1F;
++			uint8 rd = (opcode >> 11) & 0x1F;
++			uint8 sa = (opcode >> 6) & 0x1F;
++			int32 simm = static_cast<int16>(opcode & 0xFFFF);
++			int32 uimm = opcode & 0xFFFF;
++			auto r3 = [&](OP o) {
++				if(rd == 0) return true; //no effect
++				INST inst;
++				inst.op = o;
++				inst.rd = rd;
++				inst.rs = rs;
++				inst.rt = rt;
++				out.push_back(inst);
++				return true;
++			};
++			auto sh = [&](OP o, uint8 amount) {
++				if(rd == 0) return true;
++				INST inst;
++				inst.op = o;
++				inst.rd = rd;
++				inst.rt = rt;
++				inst.sa = amount;
++				out.push_back(inst);
++				return true;
++			};
++			auto imm = [&](OP o, int32 value) {
++				if(rt == 0) return true;
++				INST inst;
++				inst.op = o;
++				inst.rd = rt;
++				inst.rs = rs;
++				inst.imm = value;
++				out.push_back(inst);
++				return true;
++			};
++			auto mem = [&](OP o) {
++				INST inst;
++				inst.op = o;
++				inst.rs = rs;
++				inst.imm = simm;
++				if(IsStore(o))
++					inst.rt = rt;
++				else
++					inst.rd = rt; //loads into zero still access memory
++				out.push_back(inst);
++				return true;
++			};
++			if(opcode == 0) return true; //nop
++			switch(op)
++			{
++			case 0x00:
++				switch(opcode & 0x3F)
++				{
++				case 0x00: return sh(OP_SLL, sa);
++				case 0x02: return sh(OP_SRL, sa);
++				case 0x03: return sh(OP_SRA, sa);
++				case 0x04: return r3(OP_SLLV);
++				case 0x06: return r3(OP_SRLV);
++				case 0x07: return r3(OP_SRAV);
++				case 0x0A: return r3(OP_MOVZ);
++				case 0x0B: return r3(OP_MOVN);
++				case 0x0F: return true; //sync
++				case 0x14: return r3(OP_DSLLV);
++				case 0x16: return r3(OP_DSRLV);
++				case 0x17: return r3(OP_DSRAV);
++				case 0x21: return r3(OP_ADDU);
++				case 0x23: return r3(OP_SUBU);
++				case 0x24: return r3(OP_AND);
++				case 0x25: return r3(OP_OR);
++				case 0x26: return r3(OP_XOR);
++				case 0x27: return r3(OP_NOR);
++				case 0x2A: return r3(OP_SLT);
++				case 0x2B: return r3(OP_SLTU);
++				case 0x2D: return r3(OP_DADDU);
++				case 0x2F: return r3(OP_DSUBU);
++				case 0x38: return sh(OP_DSLL, sa);
++				case 0x3A: return sh(OP_DSRL, sa);
++				case 0x3B: return sh(OP_DSRA, sa);
++				case 0x3C: return sh(OP_DSLL, sa + 32);
++				case 0x3E: return sh(OP_DSRL, sa + 32);
++				case 0x3F: return sh(OP_DSRA, sa + 32);
++				default: return false;
++				}
++			case 0x09: return imm(OP_ADDIU, simm);
++			case 0x0A: return imm(OP_SLTI, simm);
++			case 0x0B: return imm(OP_SLTIU, simm);
++			case 0x0C: return imm(OP_ANDI, uimm);
++			case 0x0D: return imm(OP_ORI, uimm);
++			case 0x0E: return imm(OP_XORI, uimm);
++			case 0x0F: //lui
++				if(rt == 0) return true;
++				{
++					INST inst;
++					inst.op = OP_LI;
++					inst.rd = rt;
++					inst.imm = static_cast<int32>(uimm << 16);
++					out.push_back(inst);
++				}
++				return true;
++			case 0x19: return imm(OP_DADDIU, simm);
++			case 0x20: return mem(OP_LB);
++			case 0x21: return mem(OP_LH);
++			case 0x23: return mem(OP_LW);
++			case 0x24: return mem(OP_LBU);
++			case 0x25: return mem(OP_LHU);
++			case 0x27: return mem(OP_LWU);
++			case 0x28: return mem(OP_SB);
++			case 0x29: return mem(OP_SH);
++			case 0x2B: return mem(OP_SW);
++			case 0x2F: return true; //cache
++			case 0x33: return true; //pref
++			case 0x37: return mem(OP_LD);
++			case 0x3F: return mem(OP_SD);
++			default: return false;
++			}
++		}
++
++		//Kind of branch: 0 none, 1 handled, 2 not handled
++		static int BranchKind(uint32 opcode)
++		{
++			uint32 op = opcode >> 26;
++			uint32 rt = (opcode >> 16) & 0x1F;
++			switch(op)
++			{
++			case 0x00:
++				if(((opcode & 0x3F) == 0x08) || ((opcode & 0x3F) == 0x09)) return 1; //jr, jalr
++				if(((opcode & 0x3F) == 0x0C) || ((opcode & 0x3F) == 0x0D)) return 2; //syscall, break
++				return 0;
++			case 0x01:
++				if(rt <= 0x03) return 1; //bltz, bgez, bltzl, bgezl
++				return 2;                //and-link forms, traps
++			case 0x02:
++			case 0x03:
++			case 0x04:
++			case 0x05:
++			case 0x06:
++			case 0x07:
++			case 0x14:
++			case 0x15:
++			case 0x16:
++			case 0x17:
++				return 1;
++			case 0x10: //COP0 (eret...)
++			case 0x11: //COP1 (bc1f...)
++			case 0x12: //COP2
++				return 2;
++			default:
++				return 0;
++			}
++		}
++
++		static void RecordStop(uint32 opcode)
++		{
++			uint32 op = opcode >> 26;
++			uint32 key = op;
++			if(op == 0x00) key = 0x40 | (opcode & 0x3F);
++			else if(op == 0x01) key = 0x80 | ((opcode >> 16) & 0x1F);
++			else if((op >= 0x10) && (op <= 0x13)) key = 0xC0 | ((op - 0x10) << 3) | (((opcode >> 21) & 0x1F) >> 2);
++			g_stats.stops[key & 0xFF]++;
++		}
++
++		void Fill(int index)
++		{
++			uint32 pc = m_region.blocks[index].pc;
++			std::vector<uint32> stack = m_region.blocks[index].stack;
++			std::vector<INST> insts;
++			uint32 address = pc;
++			auto finish = [&](uint32 lastAddress) {
++				auto& block = m_region.blocks[index];
++				block.insts = std::move(insts);
++				block.begin = pc;
++				block.end = lastAddress;
++				if(lastAddress >= pc) m_region.instructions += ((lastAddress - pc) / 4) + 1;
++			};
++			//Leave to 'at' (the JIT runs it)
++			auto exitAt = [&](uint32 at) {
++				RecordStop(Fetch(at));
++				auto& block = m_region.blocks[index];
++				block.term = TERM_GOTO;
++				block.next = MakeExit(at, (at - pc) / 4);
++				finish(at - 4);
++			};
++			if(m_excluded && m_excluded(pc))
++			{
++				exitAt(pc);
++				return;
++			}
++			for(;; address += 4)
++			{
++				if((address - pc) / 4 >= 256)
++				{
++					exitAt(address);
++					return;
++				}
++				uint32 opcode = Fetch(address);
++				int kind = BranchKind(opcode);
++				if(kind == 2)
++				{
++					exitAt(address);
++					return;
++				}
++				if(kind == 0)
++				{
++					if(!Lift(opcode, insts))
++					{
++						exitAt(address);
++						return;
++					}
++					continue;
++				}
++				//A branch and its delay slot
++				uint32 delay = Fetch(address + 4);
++				std::vector<INST> delayInsts;
++				if((BranchKind(delay) != 0) || !Lift(delay, delayInsts))
++				{
++					exitAt(address);
++					return;
++				}
++				//Idle loops: the JIT's blocks detect them (they leave the quota early)
++				if(CEeBasicBlock::IsIdleLoopRange(m_context, pc, address + 4))
++				{
++					exitAt(pc);
++					return;
++				}
++				uint32 cycles = ((address + 4 - pc) / 4) + 1;
++				uint32 delayWrites = 0;
++				for(const auto& inst : delayInsts) delayWrites |= (1u << Written(inst));
++				Branch(index, address, opcode, insts, delayInsts, delayWrites, stack, cycles);
++				finish(address + 4);
++				return;
++			}
++		}
++
++		void Branch(int index, uint32 address, uint32 opcode, std::vector<INST>& insts, const std::vector<INST>& delayInsts,
++		            uint32 delayWrites, const std::vector<uint32>& stack, uint32 cycles)
++		{
++			uint32 op = opcode >> 26;
++			uint8 rs = (opcode >> 21) & 0x1F;
++			uint8 rt = (opcode >> 16) & 0x1F;
++			uint8 rd = (opcode >> 11) & 0x1F;
++			uint32 branchTarget = address + 4 + (static_cast<int32>(static_cast<int16>(opcode & 0xFFFF)) << 2);
++			uint32 jumpTarget = ((address + 4) & 0xF0000000) | ((opcode & 0x03FFFFFF) << 2);
++			auto appendDelay = [&]() { insts.insert(insts.end(), delayInsts.begin(), delayInsts.end()); };
++			auto setGoto = [&](EDGE edge) {
++				auto& block = m_region.blocks[index];
++				block.term = TERM_GOTO;
++				block.next = edge;
++			};
++			//Copies a register's low 32 bits to the temporary (read before the delay slot)
++			auto toTemp = [&](uint8 reg) {
++				INST inst;
++				inst.op = OP_ADDU;
++				inst.rd = REG_TEMP;
++				inst.rs = reg;
++				inst.rt = 0;
++				insts.push_back(inst);
++			};
++			if((op == 0x02) || (op == 0x03)) //j, jal
++			{
++				if(op == 0x03)
++				{
++					INST link;
++					link.op = OP_LI;
++					link.rd = 31;
++					link.imm = static_cast<int32>(address + 8);
++					insts.push_back(link);
++				}
++				appendDelay();
++				if((op == 0x03) && (stack.size() < g_settings.maxCallDepth))
++				{
++					auto inner = stack;
++					inner.push_back(address + 8);
++					g_stats.inlinedCalls++;
++					setGoto(MakeEdge(jumpTarget, inner, cycles));
++				}
++				else
++				{
++					setGoto((op == 0x03) ? MakeExit(jumpTarget, cycles) : MakeEdge(jumpTarget, stack, cycles));
++				}
++				return;
++			}
++			if(op == 0x00) //jr, jalr
++			{
++				bool link = ((opcode & 0x3F) == 0x09) && (rd != 0);
++				uint8 reg = rs;
++				if((delayWrites & (1u << rs)) || (link && (rd == rs)))
++				{
++					toTemp(rs);
++					reg = REG_TEMP;
++				}
++				if(link)
++				{
++					INST inst;
++					inst.op = OP_LI;
++					inst.rd = rd;
++					inst.imm = static_cast<int32>(address + 8);
++					insts.push_back(inst);
++				}
++				appendDelay();
++				auto& block = m_region.blocks[index];
++				EDGE out;
++				out.target = EDGE_EXIT_REG;
++				out.cycles = cycles;
++				if(!link && (rs == 31) && !stack.empty())
++				{
++					//Return from an inlined call: checked, as the callee may have changed ra
++					auto outer = stack;
++					uint32 returnAddress = outer.back();
++					outer.pop_back();
++					EDGE back = MakeEdge(returnAddress, outer, cycles);
++					auto& guarded = m_region.blocks[index];
++					guarded.term = TERM_GUARD;
++					guarded.rs = reg;
++					guarded.expected = returnAddress;
++					guarded.taken = back;
++					guarded.next = out;
++					return;
++				}
++				block.term = TERM_GOTO;
++				block.rs = reg;
++				block.next = out;
++				return;
++			}
++			//Conditional branches
++			COND cond = COND_EQ;
++			bool likely = false;
++			uint8 a = rs, b = rt;
++			switch(op)
++			{
++			case 0x04: cond = COND_EQ; break;
++			case 0x05: cond = COND_NE; break;
++			case 0x06: cond = COND_LEZ; b = 0; break;
++			case 0x07: cond = COND_GTZ; b = 0; break;
++			case 0x14: cond = COND_EQ; likely = true; break;
++			case 0x15: cond = COND_NE; likely = true; break;
++			case 0x16: cond = COND_LEZ; b = 0; likely = true; break;
++			case 0x17: cond = COND_GTZ; b = 0; likely = true; break;
++			case 0x01:
++				cond = (rt & 1) ? COND_GEZ : COND_LTZ;
++				b = 0;
++				likely = (rt & 2) != 0;
++				break;
++			default:
++				assert(false);
++				break;
++			}
++			//beq zero, zero (b): a jump
++			if(!likely && (cond == COND_EQ) && (a == b))
++			{
++				appendDelay();
++				setGoto(MakeEdge(branchTarget, stack, cycles));
++				return;
++			}
++			if(likely)
++			{
++				//The delay slot runs on the taken path only: its own block
++				int delayIndex = static_cast<int>(m_region.blocks.size());
++				{
++					BLOCK delayBlock;
++					delayBlock.pc = address + 4;
++					delayBlock.stack = stack;
++					delayBlock.keyed = false;
++					delayBlock.insts = delayInsts;
++					delayBlock.begin = address + 4;
++					delayBlock.end = address + 4;
++					m_region.blocks.push_back(std::move(delayBlock));
++				}
++				EDGE afterDelay = MakeEdge(branchTarget, stack, cycles);
++				auto& delayBlock = m_region.blocks[delayIndex];
++				delayBlock.term = TERM_GOTO;
++				delayBlock.next = afterDelay;
++				EDGE toDelay;
++				toDelay.target = delayIndex;
++				toDelay.cycles = 0;
++				toDelay.check = false;
++				EDGE notTaken = MakeEdge(address + 8, stack, cycles);
++				auto& block = m_region.blocks[index];
++				block.term = TERM_BRANCH;
++				block.cond = cond;
++				block.rs = a;
++				block.rt = b;
++				block.taken = toDelay;
++				block.next = notTaken;
++				return;
++			}
++			if(delayWrites & ((1u << a) | (1u << b)))
++			{
++				//The delay slot changes an operand: the condition first
++				INST inst;
++				inst.op = OP_COND;
++				inst.rd = REG_TEMP;
++				inst.rs = a;
++				inst.rt = b;
++				inst.sa = cond;
++				insts.push_back(inst);
++				cond = COND_NE;
++				a = REG_TEMP;
++				b = 0;
++			}
++			appendDelay();
++			EDGE taken = MakeEdge(branchTarget, stack, cycles);
++			EDGE notTaken = MakeEdge(address + 8, stack, cycles);
++			auto& block = m_region.blocks[index];
++			block.term = TERM_BRANCH;
++			block.cond = cond;
++			block.rs = a;
++			block.rt = b;
++			block.taken = taken;
++			block.next = notTaken;
++		}
++
++		CMIPS& m_context;
++		CTier2Block::REGION& m_region;
++		std::map<std::pair<uint32, std::vector<uint32>>, int> m_index;
++		std::vector<int> m_work;
++
++	public:
++		std::function<bool(uint32)> m_excluded;
++	};
++
++	//------------------------------------------------------------------------
++	//Interpreter (any host)
++
++	class CInterpreter
++	{
++	public:
++		CInterpreter(CMIPS& context, uint64& temp)
++		    : m_context(context)
++		    , m_temp(temp)
++		{
++		}
++
++		uint64 Get(uint8 reg) const
++		{
++			if(reg == REG_TEMP) return m_temp;
++			return m_context.m_State.nGPR[reg].nD0;
++		}
++
++		void Set(uint8 reg, uint64 value)
++		{
++			if(reg == 0) return;
++			if(reg == REG_TEMP)
++			{
++				m_temp = value;
++				return;
++			}
++			m_context.m_State.nGPR[reg].nD0 = value;
++		}
++
++		static uint64 Sx(uint32 value)
++		{
++			return static_cast<uint64>(static_cast<int64>(static_cast<int32>(value)));
++		}
++
++		static bool Test(COND cond, uint64 a, uint64 b)
++		{
++			switch(cond)
++			{
++			case COND_EQ: return a == b;
++			case COND_NE: return a != b;
++			case COND_LEZ: return static_cast<int64>(a) <= 0;
++			case COND_GTZ: return static_cast<int64>(a) > 0;
++			case COND_LTZ: return static_cast<int64>(a) < 0;
++			case COND_GEZ: return static_cast<int64>(a) >= 0;
++			}
++			return false;
++		}
++
++		void Run(const INST& inst)
++		{
++			uint64 s = Get(inst.rs), t = Get(inst.rt);
++			uint32 s32 = static_cast<uint32>(s), t32 = static_cast<uint32>(t);
++			auto address = [&]() { return static_cast<uint32>(s32 + inst.imm); };
++			auto* ctx = &m_context;
++			switch(inst.op)
++			{
++			case OP_ADDU: Set(inst.rd, Sx(s32 + t32)); break;
++			case OP_SUBU: Set(inst.rd, Sx(s32 - t32)); break;
++			case OP_SLLV: Set(inst.rd, Sx(t32 << (s32 & 31))); break;
++			case OP_SRLV: Set(inst.rd, Sx(t32 >> (s32 & 31))); break;
++			case OP_SRAV: Set(inst.rd, Sx(static_cast<uint32>(static_cast<int32>(t32) >> (s32 & 31)))); break;
++			case OP_AND: Set(inst.rd, s & t); break;
++			case OP_OR: Set(inst.rd, s | t); break;
++			case OP_XOR: Set(inst.rd, s ^ t); break;
++			case OP_NOR: Set(inst.rd, ~(s | t)); break;
++			case OP_SLT: Set(inst.rd, (static_cast<int64>(s) < static_cast<int64>(t)) ? 1 : 0); break;
++			case OP_SLTU: Set(inst.rd, (s < t) ? 1 : 0); break;
++			case OP_DADDU: Set(inst.rd, s + t); break;
++			case OP_DSUBU: Set(inst.rd, s - t); break;
++			case OP_DSLLV: Set(inst.rd, t << (s32 & 63)); break;
++			case OP_DSRLV: Set(inst.rd, t >> (s32 & 63)); break;
++			case OP_DSRAV: Set(inst.rd, static_cast<uint64>(static_cast<int64>(t) >> (s32 & 63))); break;
++			case OP_MOVZ:
++				if(t == 0) Set(inst.rd, s);
++				break;
++			case OP_MOVN:
++				if(t != 0) Set(inst.rd, s);
++				break;
++			case OP_SLL: Set(inst.rd, Sx(t32 << inst.sa)); break;
++			case OP_SRL: Set(inst.rd, Sx(t32 >> inst.sa)); break;
++			case OP_SRA: Set(inst.rd, Sx(static_cast<uint32>(static_cast<int32>(t32) >> inst.sa))); break;
++			case OP_DSLL: Set(inst.rd, t << inst.sa); break;
++			case OP_DSRL: Set(inst.rd, t >> inst.sa); break;
++			case OP_DSRA: Set(inst.rd, static_cast<uint64>(static_cast<int64>(t) >> inst.sa)); break;
++			case OP_ADDIU: Set(inst.rd, Sx(s32 + inst.imm)); break;
++			case OP_DADDIU: Set(inst.rd, s + static_cast<uint64>(static_cast<int64>(inst.imm))); break;
++			case OP_SLTI: Set(inst.rd, (static_cast<int64>(s) < static_cast<int64>(inst.imm)) ? 1 : 0); break;
++			case OP_SLTIU: Set(inst.rd, (s < static_cast<uint64>(static_cast<int64>(inst.imm))) ? 1 : 0); break;
++			case OP_ANDI: Set(inst.rd, s & static_cast<uint32>(inst.imm)); break;
++			case OP_ORI: Set(inst.rd, s | static_cast<uint32>(inst.imm)); break;
++			case OP_XORI: Set(inst.rd, s ^ static_cast<uint32>(inst.imm)); break;
++			case OP_LI: Set(inst.rd, Sx(static_cast<uint32>(inst.imm))); break;
++			case OP_LB: Set(inst.rd, static_cast<uint64>(static_cast<int64>(static_cast<int8>(MemoryUtils_GetByteProxy(ctx, address()))))); break;
++			case OP_LBU: Set(inst.rd, static_cast<uint8>(MemoryUtils_GetByteProxy(ctx, address()))); break;
++			case OP_LH: Set(inst.rd, static_cast<uint64>(static_cast<int64>(static_cast<int16>(MemoryUtils_GetHalfProxy(ctx, address()))))); break;
++			case OP_LHU: Set(inst.rd, static_cast<uint16>(MemoryUtils_GetHalfProxy(ctx, address()))); break;
++			case OP_LW: Set(inst.rd, Sx(MemoryUtils_GetWordProxy(ctx, address()))); break;
++			case OP_LWU: Set(inst.rd, MemoryUtils_GetWordProxy(ctx, address())); break;
++			case OP_LD: Set(inst.rd, MemoryUtils_GetDoubleProxy(ctx, address())); break;
++			case OP_SB: MemoryUtils_SetByteProxy(ctx, t32, address()); break;
++			case OP_SH: MemoryUtils_SetHalfProxy(ctx, t32, address()); break;
++			case OP_SW: MemoryUtils_SetWordProxy(ctx, t32, address()); break;
++			case OP_SD: MemoryUtils_SetDoubleProxy(ctx, t, address()); break;
++			case OP_COND: Set(inst.rd, Test(static_cast<COND>(inst.sa), s, t) ? 1 : 0); break;
++			}
++		}
++
++	private:
++		CMIPS& m_context;
++		uint64& m_temp;
++	};
++
++	//------------------------------------------------------------------------
++	//ARM (AArch32) code
++
++	namespace Arm
++	{
++		enum REG
++		{
++			R0 = 0,
++			R1 = 1,
++			R2 = 2,
++			R3 = 3,
++			R4 = 4,
++			R8 = 8,
++			R9 = 9,   //cycle quota (pinned)
++			R10 = 10, //EE RAM base (pinned)
++			FP = 11,  //context
++			IP = 12,
++			SP = 13,
++			LR = 14,
++			PC = 15,
++		};
++
++		enum CC
++		{
++			EQ = 0x0,
++			NE = 0x1,
++			CS = 0x2,
++			CC_ = 0x3,
++			MI = 0x4,
++			PL = 0x5,
++			HI = 0x8,
++			LS = 0x9,
++			GE = 0xA,
++			LT = 0xB,
++			GT = 0xC,
++			LE = 0xD,
++			AL = 0xE,
++		};
++
++		enum DP
++		{
++			AND = 0x0,
++			EOR = 0x1,
++			SUB = 0x2,
++			RSB = 0x3,
++			ADD = 0x4,
++			ADC = 0x5,
++			SBC = 0x6,
++			RSC = 0x7,
++			TST = 0x8,
++			TEQ = 0x9,
++			CMP = 0xA,
++			CMN = 0xB,
++			ORR = 0xC,
++			MOV = 0xD,
++			BIC = 0xE,
++			MVN = 0xF,
++		};
++
++		enum SHIFT
++		{
++			LSL = 0,
++			LSR = 1,
++			ASR = 2,
++			ROR = 3,
++		};
++
++		bool EncodeImm(uint32 value, uint32& encoded)
++		{
++			for(uint32 rot = 0; rot < 16; rot++)
++			{
++				uint32 v = (value << (rot * 2)) | (rot ? (value >> (32 - rot * 2)) : 0);
++				if(v <= 0xFF)
++				{
++					encoded = (rot << 8) | v;
++					return true;
++				}
++			}
++			return false;
++		}
++
++		class CEmitter
++		{
++		public:
++			std::vector<uint32> code;
++
++			int NewLabel()
++			{
++				m_labels.push_back(-1);
++				return static_cast<int>(m_labels.size()) - 1;
++			}
++
++			void Mark(int label)
++			{
++				m_labels[label] = static_cast<int>(code.size());
++			}
++
++			int Position() const
++			{
++				return static_cast<int>(code.size());
++			}
++
++			void Word(uint32 word)
++			{
++				code.push_back(word);
++			}
++
++			void B(int label, CC cc = AL)
++			{
++				m_fixups.push_back({static_cast<int>(code.size()), label});
++				Word((static_cast<uint32>(cc) << 28) | 0x0A000000);
++			}
++
++			bool Resolve()
++			{
++				for(const auto& fixup : m_fixups)
++				{
++					int target = m_labels[fixup.second];
++					if(target < 0) return false;
++					int32 offset = target - (fixup.first + 2);
++					code[fixup.first] |= static_cast<uint32>(offset) & 0x00FFFFFF;
++				}
++				return true;
++			}
++
++			//Data processing, immediate operand (must be encodable)
++			void DpImm(DP op, bool s, int rd, int rn, uint32 imm, CC cc = AL)
++			{
++				uint32 encoded = 0;
++				bool ok = EncodeImm(imm, encoded);
++				assert(ok);
++				(void)ok;
++				Word((static_cast<uint32>(cc) << 28) | 0x02000000 | (op << 21) | ((s ? 1 : 0) << 20) | (rn << 16) | (rd << 12) | encoded);
++			}
++
++			//Data processing, register operand shifted by a constant
++			void DpReg(DP op, bool s, int rd, int rn, int rm, SHIFT shift = LSL, uint32 amount = 0, CC cc = AL)
++			{
++				Word((static_cast<uint32>(cc) << 28) | (op << 21) | ((s ? 1 : 0) << 20) | (rn << 16) | (rd << 12) | ((amount & 0x1F) << 7) |
++				     (shift << 5) | rm);
++			}
++
++			//Data processing, register operand shifted by a register
++			void DpRegShift(DP op, bool s, int rd, int rn, int rm, SHIFT shift, int rsReg, CC cc = AL)
++			{
++				Word((static_cast<uint32>(cc) << 28) | (op << 21) | ((s ? 1 : 0) << 20) | (rn << 16) | (rd << 12) | (rsReg << 8) |
++				     (shift << 5) | 0x10 | rm);
++			}
++
++			void Mov(int rd, int rm, CC cc = AL)
++			{
++				if((rd == rm) && (cc == AL)) return;
++				DpReg(MOV, false, rd, 0, rm, LSL, 0, cc);
++			}
++
++			void Movw(int rd, uint32 value, CC cc = AL)
++			{
++				Word((static_cast<uint32>(cc) << 28) | 0x03000000 | ((value & 0xF000) << 4) | (rd << 12) | (value & 0xFFF));
++			}
++
++			void Movt(int rd, uint32 value, CC cc = AL)
++			{
++				Word((static_cast<uint32>(cc) << 28) | 0x03400000 | ((value & 0xF000) << 4) | (rd << 12) | (value & 0xFFF));
++			}
++
++			void LoadConst(int rd, uint32 value, CC cc = AL)
++			{
++				uint32 encoded = 0;
++				if(EncodeImm(value, encoded))
++				{
++					DpImm(MOV, false, rd, 0, value, cc);
++					return;
++				}
++				if(EncodeImm(~value, encoded))
++				{
++					DpImm(MVN, false, rd, 0, ~value, cc);
++					return;
++				}
++				Movw(rd, value & 0xFFFF, cc);
++				if(value >> 16) Movt(rd, value >> 16, cc);
++			}
++
++			//rd = rn op imm (through 'scratch' when imm isn't encodable)
++			void DpConst(DP op, bool s, int rd, int rn, uint32 imm, int scratch, CC cc = AL)
++			{
++				uint32 encoded = 0;
++				if(EncodeImm(imm, encoded))
++				{
++					DpImm(op, s, rd, rn, imm, cc);
++					return;
++				}
++				//add/sub of a negated immediate
++				if(((op == ADD) || (op == SUB)) && EncodeImm(static_cast<uint32>(-static_cast<int32>(imm)), encoded))
++				{
++					DpImm((op == ADD) ? SUB : ADD, s, rd, rn, static_cast<uint32>(-static_cast<int32>(imm)), cc);
++					return;
++				}
++				if((op == AND) && EncodeImm(~imm, encoded))
++				{
++					DpImm(BIC, s, rd, rn, ~imm, cc);
++					return;
++				}
++				if((op == CMP) && EncodeImm(static_cast<uint32>(-static_cast<int32>(imm)), encoded))
++				{
++					DpImm(CMN, s, rd, rn, static_cast<uint32>(-static_cast<int32>(imm)), cc);
++					return;
++				}
++				LoadConst(scratch, imm, cc);
++				DpReg(op, s, rd, rn, scratch, LSL, 0, cc);
++			}
++
++			//ldr/str/ldrb/strb [rn, #offset] (-4095..4095)
++			void MemImm(bool load, bool byte, int rt, int rn, int32 offset, CC cc = AL)
++			{
++				uint32 u = (offset >= 0) ? 1 : 0;
++				uint32 magnitude = static_cast<uint32>((offset >= 0) ? offset : -offset);
++				assert(magnitude < 0x1000);
++				Word((static_cast<uint32>(cc) << 28) | 0x05000000 | (u << 23) | ((byte ? 1 : 0) << 22) | ((load ? 1 : 0) << 20) | (rn << 16) |
++				     (rt << 12) | magnitude);
++			}
++
++			//ldr/str/ldrb/strb [rn, rm]
++			void MemReg(bool load, bool byte, int rt, int rn, int rm, CC cc = AL)
++			{
++				Word((static_cast<uint32>(cc) << 28) | 0x07800000 | ((byte ? 1 : 0) << 22) | ((load ? 1 : 0) << 20) | (rn << 16) | (rt << 12) | rm);
++			}
++
++			enum HALF
++			{
++				STRH = 0x0B,
++				LDRH = 0x10B,
++				LDRSB = 0x10D,
++				LDRSH = 0x10F,
++			};
++
++			//ldrh/strh/ldrsb/ldrsh [rn, rm]
++			void HalfReg(HALF kind, int rt, int rn, int rm)
++			{
++				uint32 load = (kind >> 8) & 1;
++				uint32 sh = kind & 0xFF;
++				Word((static_cast<uint32>(AL) << 28) | 0x01800000 | (load << 20) | (rn << 16) | (rt << 12) | (sh << 4) | rm);
++			}
++
++			void Ldr(int rt, int rn, int32 offset, CC cc = AL)
++			{
++				MemImm(true, false, rt, rn, offset, cc);
++			}
++
++			void Str(int rt, int rn, int32 offset, CC cc = AL)
++			{
++				MemImm(false, false, rt, rn, offset, cc);
++			}
++
++			void Blx(int rm)
++			{
++				Word(0xE12FFF30 | rm);
++			}
++
++			void Stmdb(int rn, uint32 mask)
++			{
++				Word(0xE9200000 | (rn << 16) | mask); //with writeback
++			}
++
++			void Ldmia(int rn, uint32 mask)
++			{
++				Word(0xE8B00000 | (rn << 16) | mask); //with writeback
++			}
++
++			void Sxtb(int rd, int rm)
++			{
++				Word(0xE6AF0070 | (rd << 12) | rm);
++			}
++
++			void Sxth(int rd, int rm)
++			{
++				Word(0xE6BF0070 | (rd << 12) | rm);
++			}
++
++			void Uxtb(int rd, int rm)
++			{
++				Word(0xE6EF0070 | (rd << 12) | rm);
++			}
++
++			void Uxth(int rd, int rm)
++			{
++				Word(0xE6FF0070 | (rd << 12) | rm);
++			}
++
++			//ldr pc, [pc, #-4]; .word target
++			void JumpAbsolute(uint32 target)
++			{
++				Word(0xE51FF004);
++				Word(target);
++			}
++
++		private:
++			std::vector<int> m_labels;
++			std::vector<std::pair<int, int>> m_fixups;
++		};
++	}
++
++	//Where a guest register's upper 32 bits are
++	enum HISTATE : uint8
++	{
++		HI_MEM, //in the context (true value)
++		HI_SX,  //the sign extension of the lower 32 bits (the context's is stale)
++		HI_UNSET,
++	};
++
++	struct STATE
++	{
++		HISTATE hi[REG_COUNT];
++		bool operator==(const STATE& other) const
++		{
++			return memcmp(hi, other.hi, sizeof(hi)) == 0;
++		}
++	};
++
++	class CArmCompiler
++	{
++	public:
++		CArmCompiler(const CTier2Block::REGION& region)
++		    : m_region(region)
++		{
++		}
++
++		//Code and link entry offset (bytes); false: something not handled
++		bool Compile(std::vector<uint8>& out, uint32& linkEntryOffset);
++
++	private:
++		static constexpr int ALLOCATABLE[] = {4, 5, 6, 7, 8, 2, 3};
++		static constexpr int ALLOCATABLE_COUNT = 7;
++
++		static int32 LoOffset(uint8 reg)
++		{
++			return static_cast<int32>(offsetof(CMIPS, m_State.nGPR)) + (reg * 16);
++		}
++
++		static int32 HiOffset(uint8 reg)
++		{
++			return LoOffset(reg) + 4;
++		}
++
++		//Frame slots (the chained frame's temporaries, sp relative)
++		enum
++		{
++			FRAME_TEMP = 0,       //REG_TEMP's low word
++			FRAME_SAVE_R2 = 16,   //r2/r3 across calls into the emulator
++			FRAME_SAVE_R3 = 20,
++			FRAME_VALUE64 = 24,   //64-bit store values for the slow path
++		};
++
++		bool IsAllocated(uint8 reg) const
++		{
++			return (reg < 32) && (m_alloc[reg] >= 0);
++		}
++
++		void Allocate();
++		void Analyse();
++		HISTATE ResultState(const INST&, const STATE&) const;
++		void Transfer(const INST&, STATE&) const;
++
++		//Code emission
++		int Lo(uint8 reg, int scratch);
++		int Hi(uint8 reg, int scratch, const STATE&);
++		void CommitSx(uint8 reg, int value, STATE&);
++		void Commit64(uint8 reg, int lo, int hi, STATE&);
++		int Dst(uint8 reg)
++		{
++			return IsAllocated(reg) ? m_alloc[reg] : Arm::IP;
++		}
++		void Materialize(uint8 reg, STATE&);
++		void EmitInst(const INST&, STATE&);
++		void EmitLoad(const INST&, STATE&);
++		void EmitStore(const INST&, STATE&);
++		void EmitShift64Const(const INST&, STATE&);
++		void EmitShift64Var(const INST&, STATE&);
++		Arm::CC EmitCompare(COND, uint8 a, uint8 b, const STATE&);
++		void EmitCall(uintptr_t function);
++		void EmitEdge(const BLOCK&, const EDGE&, const STATE&, const uint32* written);
++		void EmitExit(const BLOCK&, const EDGE&, const STATE&, const uint32* written, bool checked);
++		void EmitColdCode();
++
++		const CTier2Block::REGION& m_region;
++		Arm::CEmitter m_emit;
++		int m_alloc[32];
++		std::vector<STATE> m_in, m_out;
++		std::vector<uint32> m_writtenIn; //allocated registers possibly written before each block (bit mask)
++		std::vector<int> m_blockLabels;
++		int m_slowExitLabel = -1;
++		std::vector<std::function<void()>> m_cold;
++		std::map<std::string, int> m_stubs;
++	};
++
++	constexpr int CArmCompiler::ALLOCATABLE[];
++
++	void CArmCompiler::Allocate()
++	{
++		//Uses weighted by loops (blocks reached again from later ones)
++		uint32 weight[32] = {};
++		const auto& blocks = m_region.blocks;
++		std::vector<bool> inLoop(blocks.size(), false);
++		for(size_t i = 0; i < blocks.size(); i++)
++		{
++			for(const EDGE* edge : {&blocks[i].taken, &blocks[i].next})
++			{
++				if((edge->target >= 0) && (static_cast<size_t>(edge->target) <= i))
++				{
++					for(size_t j = edge->target; j <= i; j++) inLoop[j] = true;
++				}
++			}
++		}
++		for(size_t i = 0; i < blocks.size(); i++)
++		{
++			uint32 w = inLoop[i] ? 8 : 1;
++			auto use = [&](uint8 reg) {
++				if((reg != 0) && (reg < 32)) weight[reg] += w;
++			};
++			for(const auto& inst : blocks[i].insts)
++			{
++				use(inst.rd);
++				use(inst.rs);
++				use(inst.rt);
++			}
++			use(blocks[i].rs);
++			use(blocks[i].rt);
++		}
++		for(auto& a : m_alloc) a = -1;
++		for(int n = 0; n < std::min<int>(ALLOCATABLE_COUNT, g_settings.maxRegisters); n++)
++		{
++			int best = 0;
++			for(int reg = 1; reg < 32; reg++)
++			{
++				if((m_alloc[reg] < 0) && (weight[reg] > weight[best])) best = reg;
++			}
++			if(best == 0) break;
++			m_alloc[best] = ALLOCATABLE[n];
++		}
++	}
++
++	//The upper half's state after an instruction (rd's)
++	HISTATE CArmCompiler::ResultState(const INST& inst, const STATE& state) const
++	{
++		auto sx = [&](uint8 reg) { return (reg == 0) || (reg == REG_TEMP) || (IsAllocated(reg) && (state.hi[reg] == HI_SX)); };
++		switch(inst.op)
++		{
++		case OP_ADDU:
++		case OP_SUBU:
++		case OP_SLLV:
++		case OP_SRLV:
++		case OP_SRAV:
++		case OP_SLT:
++		case OP_SLTU:
++		case OP_SLL:
++		case OP_SRL:
++		case OP_SRA:
++		case OP_ADDIU:
++		case OP_SLTI:
++		case OP_SLTIU:
++		case OP_ANDI:
++		case OP_LI:
++		case OP_LB:
++		case OP_LBU:
++		case OP_LH:
++		case OP_LHU:
++		case OP_LW:
++		case OP_COND:
++			return HI_SX;
++		case OP_AND:
++		case OP_OR:
++		case OP_XOR:
++		case OP_NOR:
++			return (sx(inst.rs) && sx(inst.rt)) ? HI_SX : HI_MEM;
++		case OP_ORI:
++		case OP_XORI:
++			return sx(inst.rs) ? HI_SX : HI_MEM;
++		case OP_DADDU:
++			if(inst.rt == 0) return sx(inst.rs) ? HI_SX : HI_MEM;
++			if(inst.rs == 0) return sx(inst.rt) ? HI_SX : HI_MEM;
++			return HI_MEM;
++		case OP_DSUBU:
++			if(inst.rt == 0) return sx(inst.rs) ? HI_SX : HI_MEM;
++			return HI_MEM;
++		case OP_DADDIU:
++			if(inst.imm == 0) return sx(inst.rs) ? HI_SX : HI_MEM;
++			return HI_MEM;
++		case OP_MOVZ:
++		case OP_MOVN:
++			return (sx(inst.rd) && sx(inst.rs)) ? HI_SX : HI_MEM;
++		case OP_DSLL:
++			if(inst.sa == 0) return sx(inst.rt) ? HI_SX : HI_MEM;
++			return HI_MEM;
++		case OP_DSRL:
++			if(inst.sa == 0) return sx(inst.rt) ? HI_SX : HI_MEM;
++			return (inst.sa > 32) ? HI_SX : HI_MEM;
++		case OP_DSRA:
++			if(inst.sa == 0) return sx(inst.rt) ? HI_SX : HI_MEM;
++			return (inst.sa >= 32) ? HI_SX : HI_MEM;
++		default:
++			return HI_MEM;
++		}
++	}
++
++	void CArmCompiler::Transfer(const INST& inst, STATE& state) const
++	{
++		uint8 reg = Written(inst);
++		if((reg == 0) || (reg == REG_TEMP)) return;
++		//Registers in the context have their upper half there
++		state.hi[reg] = IsAllocated(reg) ? ResultState(inst, state) : HI_MEM;
++	}
++
++	void CArmCompiler::Analyse()
++	{
++		const auto& blocks = m_region.blocks;
++		size_t count = blocks.size();
++		STATE unset;
++		for(auto& h : unset.hi) h = HI_UNSET;
++		m_in.assign(count, unset);
++		m_out.assign(count, unset);
++		m_writtenIn.assign(count, 0);
++		//Entry: everything in the context
++		for(auto& h : m_in[0].hi) h = HI_MEM;
++		std::vector<uint32> writtenOut(count, 0);
++		bool changed = true;
++		std::vector<bool> reached(count, false);
++		reached[0] = true;
++		while(changed)
++		{
++			changed = false;
++			for(size_t i = 0; i < count; i++)
++			{
++				if(!reached[i]) continue;
++				STATE state = m_in[i];
++				uint32 written = m_writtenIn[i];
++				for(const auto& inst : blocks[i].insts)
++				{
++					Transfer(inst, state);
++					uint8 reg = Written(inst);
++					if(IsAllocated(reg)) written |= (1u << reg);
++				}
++				if(!(state == m_out[i]) || (written != writtenOut[i]))
++				{
++					m_out[i] = state;
++					writtenOut[i] = written;
++					changed = true;
++				}
++				for(const EDGE* edge : {&blocks[i].taken, &blocks[i].next})
++				{
++					if(edge->target < 0) continue;
++					if((blocks[i].term == TERM_GOTO) && (edge == &blocks[i].taken)) continue;
++					size_t t = edge->target;
++					STATE merged = m_in[t];
++					for(int reg = 0; reg < REG_COUNT; reg++)
++					{
++						HISTATE incoming = state.hi[reg];
++						if(merged.hi[reg] == HI_UNSET)
++							merged.hi[reg] = incoming;
++						else if(merged.hi[reg] != incoming)
++							merged.hi[reg] = HI_MEM;
++					}
++					uint32 mergedWritten = m_writtenIn[t] | written;
++					if(!reached[t] || !(merged == m_in[t]) || (mergedWritten != m_writtenIn[t]))
++					{
++						reached[t] = true;
++						m_in[t] = merged;
++						m_writtenIn[t] = mergedWritten;
++						changed = true;
++					}
++				}
++			}
++		}
++	}
++
++	int CArmCompiler::Lo(uint8 reg, int scratch)
++	{
++		using namespace Arm;
++		if(reg == 0)
++		{
++			m_emit.DpImm(MOV, false, scratch, 0, 0);
++			return scratch;
++		}
++		if(reg == REG_TEMP)
++		{
++			m_emit.Ldr(scratch, SP, FRAME_TEMP);
++			return scratch;
++		}
++		if(IsAllocated(reg)) return m_alloc[reg];
++		m_emit.Ldr(scratch, FP, LoOffset(reg));
++		return scratch;
++	}
++
++	int CArmCompiler::Hi(uint8 reg, int scratch, const STATE& state)
++	{
++		using namespace Arm;
++		if(reg == 0)
++		{
++			m_emit.DpImm(MOV, false, scratch, 0, 0);
++			return scratch;
++		}
++		if(reg == REG_TEMP)
++		{
++			m_emit.Ldr(scratch, SP, FRAME_TEMP);
++			m_emit.DpReg(MOV, false, scratch, 0, scratch, ASR, 31);
++			return scratch;
++		}
++		if(IsAllocated(reg) && (state.hi[reg] == HI_SX))
++		{
++			m_emit.DpReg(MOV, false, scratch, 0, m_alloc[reg], ASR, 31);
++			return scratch;
++		}
++		m_emit.Ldr(scratch, FP, HiOffset(reg));
++		return scratch;
++	}
++
++	//A 32-bit result (sign extended)
++	void CArmCompiler::CommitSx(uint8 reg, int value, STATE& state)
++	{
++		using namespace Arm;
++		if(reg == 0) return;
++		if(reg == REG_TEMP)
++		{
++			m_emit.Str(value, SP, FRAME_TEMP);
++			return;
++		}
++		if(IsAllocated(reg))
++		{
++			m_emit.Mov(m_alloc[reg], value);
++			state.hi[reg] = HI_SX;
++			return;
++		}
++		m_emit.Str(value, FP, LoOffset(reg));
++		m_emit.DpReg(MOV, false, R1, 0, value, ASR, 31);
++		m_emit.Str(R1, FP, HiOffset(reg));
++		state.hi[reg] = HI_MEM;
++	}
++
++	//A 64-bit result
++	void CArmCompiler::Commit64(uint8 reg, int lo, int hi, STATE& state)
++	{
++		using namespace Arm;
++		if(reg == 0) return;
++		assert(reg != REG_TEMP);
++		m_emit.Str(hi, FP, HiOffset(reg));
++		if(IsAllocated(reg))
++		{
++			m_emit.Mov(m_alloc[reg], lo);
++		}
++		else
++		{
++			m_emit.Str(lo, FP, LoOffset(reg));
++		}
++		state.hi[reg] = HI_MEM;
++	}
++
++	void CArmCompiler::Materialize(uint8 reg, STATE& state)
++	{
++		using namespace Arm;
++		if(!IsAllocated(reg) || (state.hi[reg] != HI_SX)) return;
++		m_emit.DpReg(MOV, false, LR, 0, m_alloc[reg], ASR, 31);
++		m_emit.Str(LR, FP, HiOffset(reg));
++		state.hi[reg] = HI_MEM;
++	}
++
++	//Calls into the emulator: r0 = context, r1/r2 set by the caller; r2/r3 (guest
++	//registers) saved in the frame around it
++	void CArmCompiler::EmitCall(uintptr_t function)
++	{
++		using namespace Arm;
++		m_emit.DpReg(MOV, false, R0, 0, FP);
++		m_emit.LoadConst(IP, static_cast<uint32>(function));
++		m_emit.Blx(IP);
++		m_emit.Ldr(R2, SP, FRAME_SAVE_R2);
++		m_emit.Ldr(R3, SP, FRAME_SAVE_R3);
++		//An exception left by the handler: flag the quota (the next check leaves)
++		m_emit.Ldr(LR, FP, offsetof(CMIPS, m_State.nHasException));
++		m_emit.DpImm(CMP, true, 0, LR, 0);
++		m_emit.DpImm(ORR, false, R9, R9, 0xC0000000, NE);
++	}
++
++	void CArmCompiler::EmitLoad(const INST& inst, STATE& state)
++	{
++		using namespace Arm;
++		//Address in ip
++		int base = Lo(inst.rs, IP);
++		m_emit.DpConst(ADD, false, IP, base, static_cast<uint32>(inst.imm), LR);
++		bool is64 = (inst.op == OP_LD);
++		int dst = (IsAllocated(inst.rd) && !is64) ? m_alloc[inst.rd] : (is64 ? LR : IP);
++		int slow = m_emit.NewLabel();
++		int done = m_emit.NewLabel();
++		m_emit.DpImm(TST, true, 0, IP, 0xFE000000);
++		m_emit.B(slow, NE);
++		switch(inst.op)
++		{
++		case OP_LB: m_emit.HalfReg(CEmitter::LDRSB, dst, R10, IP); break;
++		case OP_LBU: m_emit.MemReg(true, true, dst, R10, IP); break;
++		case OP_LH: m_emit.HalfReg(CEmitter::LDRSH, dst, R10, IP); break;
++		case OP_LHU: m_emit.HalfReg(CEmitter::LDRH, dst, R10, IP); break;
++		case OP_LW:
++		case OP_LWU: m_emit.MemReg(true, false, dst, R10, IP); break;
++		case OP_LD:
++			m_emit.DpReg(ADD, false, IP, R10, IP);
++			m_emit.Ldr(R1, IP, 4);
++			m_emit.Ldr(LR, IP, 0);
++			break;
++		default: assert(false); break;
++		}
++		m_emit.Mark(done);
++		OP op = inst.op;
++		m_cold.push_back([this, op, slow, done, dst]() {
++			m_emit.Mark(slow);
++			m_emit.Str(R2, SP, FRAME_SAVE_R2);
++			m_emit.Str(R3, SP, FRAME_SAVE_R3);
++			m_emit.DpReg(MOV, false, R1, 0, IP);
++			uintptr_t function = 0;
++			switch(op)
++			{
++			case OP_LB:
++			case OP_LBU: function = reinterpret_cast<uintptr_t>(&MemoryUtils_GetByteProxy); break;
++			case OP_LH:
++			case OP_LHU: function = reinterpret_cast<uintptr_t>(&MemoryUtils_GetHalfProxy); break;
++			case OP_LW:
++			case OP_LWU: function = reinterpret_cast<uintptr_t>(&MemoryUtils_GetWordProxy); break;
++			case OP_LD: function = reinterpret_cast<uintptr_t>(&MemoryUtils_GetDoubleProxy); break;
++			default: break;
++			}
++			EmitCall(function);
++			switch(op)
++			{
++			case OP_LB: m_emit.Sxtb(dst, R0); break;
++			case OP_LBU: m_emit.Uxtb(dst, R0); break;
++			case OP_LH: m_emit.Sxth(dst, R0); break;
++			case OP_LHU: m_emit.Uxth(dst, R0); break;
++			case OP_LD: m_emit.Mov(LR, R0); break; //hi already in r1
++			default: m_emit.Mov(dst, R0); break;
++			}
++			m_emit.B(done);
++		});
++		if(is64)
++		{
++			Commit64(inst.rd, LR, R1, state);
++			return;
++		}
++		if(inst.op == OP_LWU)
++		{
++			m_emit.DpImm(MOV, false, R1, 0, 0);
++			Commit64(inst.rd, dst, R1, state);
++			return;
++		}
++		CommitSx(inst.rd, dst, state);
++	}
++
++	void CArmCompiler::EmitStore(const INST& inst, STATE& state)
++	{
++		using namespace Arm;
++		int base = Lo(inst.rs, IP);
++		m_emit.DpConst(ADD, false, IP, base, static_cast<uint32>(inst.imm), LR);
++		int value = Lo(inst.rt, LR);
++		bool is64 = (inst.op == OP_SD);
++		if(is64) Hi(inst.rt, R0, state);
++		int slow = m_emit.NewLabel();
++		int done = m_emit.NewLabel();
++		m_emit.DpImm(TST, true, 0, IP, 0xFE000000);
++		m_emit.B(slow, NE);
++		switch(inst.op)
++		{
++		case OP_SB: m_emit.MemReg(false, true, value, R10, IP); break;
++		case OP_SH: m_emit.HalfReg(CEmitter::STRH, value, R10, IP); break;
++		case OP_SW: m_emit.MemReg(false, false, value, R10, IP); break;
++		case OP_SD:
++			m_emit.DpReg(ADD, false, IP, R10, IP);
++			m_emit.Str(value, IP, 0);
++			m_emit.Str(R0, IP, 4);
++			break;
++		default: assert(false); break;
++		}
++		m_emit.Mark(done);
++		OP op = inst.op;
++		m_cold.push_back([this, op, slow, done, value]() {
++			m_emit.Mark(slow);
++			m_emit.Str(R2, SP, FRAME_SAVE_R2);
++			m_emit.Str(R3, SP, FRAME_SAVE_R3);
++			uintptr_t function = 0;
++			if(op == OP_SD)
++			{
++				//(context, address, pointer to the value)
++				m_emit.Str(value, SP, FRAME_VALUE64);
++				m_emit.Str(R0, SP, FRAME_VALUE64 + 4);
++				m_emit.DpReg(MOV, false, R1, 0, IP);
++				m_emit.DpImm(ADD, false, R2, SP, FRAME_VALUE64);
++				function = reinterpret_cast<uintptr_t>(&MemoryUtils_SetDoubleProxyPtr);
++			}
++			else
++			{
++				//(context, value, address)
++				m_emit.Mov(R1, value);
++				m_emit.DpReg(MOV, false, R2, 0, IP);
++				function = (op == OP_SB) ? reinterpret_cast<uintptr_t>(&MemoryUtils_SetByteProxy) : (op == OP_SH) ? reinterpret_cast<uintptr_t>(&MemoryUtils_SetHalfProxy) : reinterpret_cast<uintptr_t>(&MemoryUtils_SetWordProxy);
++			}
++			EmitCall(function);
++			m_emit.B(done);
++		});
++	}
++
++	void CArmCompiler::EmitShift64Const(const INST& inst, STATE& state)
++	{
++		using namespace Arm;
++		uint32 sa = inst.sa;
++		HISTATE result = ResultState(inst, state);
++		int lo = Lo(inst.rt, IP);
++		if(sa == 0)
++		{
++			//A move
++			if(result == HI_SX)
++			{
++				CommitSx(inst.rd, lo, state);
++			}
++			else
++			{
++				m_emit.Mov(IP, lo);
++				Hi(inst.rt, R0, state);
++				Commit64(inst.rd, IP, R0, state);
++			}
++			return;
++		}
++		Hi(inst.rt, R0, state);
++		if(lo != IP) m_emit.Mov(IP, lo);
++		//ip: lo, r0: hi -> lr: new lo, r1: new hi
++		switch(inst.op)
++		{
++		case OP_DSLL:
++			if(sa < 32)
++			{
++				m_emit.DpReg(MOV, false, R1, 0, R0, LSL, sa);
++				m_emit.DpReg(ORR, false, R1, R1, IP, LSR, 32 - sa);
++				m_emit.DpReg(MOV, false, LR, 0, IP, LSL, sa);
++			}
++			else
++			{
++				m_emit.DpReg(MOV, false, R1, 0, IP, LSL, sa - 32);
++				m_emit.DpImm(MOV, false, LR, 0, 0);
++			}
++			break;
++		case OP_DSRL:
++		case OP_DSRA:
++		{
++			SHIFT hiShift = (inst.op == OP_DSRA) ? ASR : LSR;
++			if(sa < 32)
++			{
++				m_emit.DpReg(MOV, false, LR, 0, IP, LSR, sa);
++				m_emit.DpReg(ORR, false, LR, LR, R0, LSL, 32 - sa);
++				m_emit.DpReg(MOV, false, R1, 0, R0, hiShift, sa);
++			}
++			else
++			{
++				if(sa == 32)
++					m_emit.Mov(LR, R0);
++				else
++					m_emit.DpReg(MOV, false, LR, 0, R0, hiShift, sa - 32);
++				if(inst.op == OP_DSRA)
++					m_emit.DpReg(MOV, false, R1, 0, R0, ASR, 31);
++				else
++					m_emit.DpImm(MOV, false, R1, 0, 0);
++			}
++			break;
++		}
++		default: assert(false); break;
++		}
++		if(result == HI_SX)
++			CommitSx(inst.rd, LR, state);
++		else
++			Commit64(inst.rd, LR, R1, state);
++	}
++
++	void CArmCompiler::EmitShift64Var(const INST& inst, STATE& state)
++	{
++		using namespace Arm;
++		//lr: amount, ip: lo, r0: hi, r1: 32 - amount
++		int amount = Lo(inst.rs, LR);
++		m_emit.DpImm(AND, false, LR, amount, 63);
++		int lo = Lo(inst.rt, IP);
++		if(lo != IP) m_emit.Mov(IP, lo);
++		Hi(inst.rt, R0, state);
++		int big = m_emit.NewLabel();
++		int done = m_emit.NewLabel();
++		m_emit.DpImm(CMP, true, 0, LR, 32);
++		m_emit.B(big, GE);
++		m_emit.DpImm(RSB, false, R1, LR, 32);
++		switch(inst.op)
++		{
++		case OP_DSLLV:
++			m_emit.DpRegShift(MOV, false, R0, 0, R0, LSL, LR);
++			m_emit.DpRegShift(ORR, false, R0, R0, IP, LSR, R1);
++			m_emit.DpRegShift(MOV, false, IP, 0, IP, LSL, LR);
++			m_emit.B(done);
++			m_emit.Mark(big);
++			m_emit.DpImm(SUB, false, LR, LR, 32);
++			m_emit.DpRegShift(MOV, false, R0, 0, IP, LSL, LR);
++			m_emit.DpImm(MOV, false, IP, 0, 0);
++			break;
++		case OP_DSRLV:
++		case OP_DSRAV:
++		{
++			SHIFT hiShift = (inst.op == OP_DSRAV) ? ASR : LSR;
++			m_emit.DpRegShift(MOV, false, IP, 0, IP, LSR, LR);
++			m_emit.DpRegShift(ORR, false, IP, IP, R0, LSL, R1);
++			m_emit.DpRegShift(MOV, false, R0, 0, R0, hiShift, LR);
++			m_emit.B(done);
++			m_emit.Mark(big);
++			m_emit.DpImm(SUB, false, LR, LR, 32);
++			m_emit.DpRegShift(MOV, false, IP, 0, R0, hiShift, LR);
++			if(inst.op == OP_DSRAV)
++				m_emit.DpReg(MOV, false, R0, 0, R0, ASR, 31);
++			else
++				m_emit.DpImm(MOV, false, R0, 0, 0);
++			break;
++		}
++		default: assert(false); break;
++		}
++		m_emit.Mark(done);
++		Commit64(inst.rd, IP, R0, state);
++	}
++
++	//Sets the flags for cond(a, b) (64-bit); returns the ARM condition for "true"
++	Arm::CC CArmCompiler::EmitCompare(COND cond, uint8 a, uint8 b, const STATE& state)
++	{
++		using namespace Arm;
++		auto sx = [&](uint8 reg) { return (reg == 0) || (reg == REG_TEMP) || (IsAllocated(reg) && (state.hi[reg] == HI_SX)); };
++		if((cond == COND_EQ) || (cond == COND_NE))
++		{
++			CC cc = (cond == COND_EQ) ? EQ : NE;
++			if(sx(a) && sx(b))
++			{
++				int ra = Lo(a, IP);
++				if(b == 0)
++				{
++					m_emit.DpImm(CMP, true, 0, ra, 0);
++				}
++				else
++				{
++					int rb = Lo(b, LR);
++					m_emit.DpReg(CMP, true, 0, ra, rb);
++				}
++				return cc;
++			}
++			int ha = Hi(a, R0, state);
++			int hb = Hi(b, R1, state);
++			int ra = Lo(a, IP);
++			int rb = Lo(b, LR);
++			m_emit.DpReg(CMP, true, 0, ra, rb);
++			m_emit.DpReg(CMP, true, 0, ha, hb, LSL, 0, EQ);
++			return cc;
++		}
++		//Against zero
++		assert(b == 0);
++		if(sx(a))
++		{
++			int ra = Lo(a, IP);
++			m_emit.DpImm(CMP, true, 0, ra, 0);
++			switch(cond)
++			{
++			case COND_LEZ: return LE;
++			case COND_GTZ: return GT;
++			case COND_LTZ: return LT;
++			default: return GE;
++			}
++		}
++		int ha = Hi(a, R0, state);
++		if((cond == COND_LTZ) || (cond == COND_GEZ))
++		{
++			m_emit.DpImm(CMP, true, 0, ha, 0);
++			return (cond == COND_LTZ) ? LT : GE;
++		}
++		//a - 1 < 0 (64-bit): a <= 0
++		int ra = Lo(a, IP);
++		m_emit.DpImm(CMP, true, 0, ra, 1);
++		m_emit.DpImm(SBC, true, R1, ha, 0);
++		return (cond == COND_LEZ) ? LT : GE;
++	}
++
++	void CArmCompiler::EmitInst(const INST& inst, STATE& state)
++	{
++		using namespace Arm;
++		if(IsLoad(inst.op))
++		{
++			EmitLoad(inst, state);
++			return;
++		}
++		if(IsStore(inst.op))
++		{
++			EmitStore(inst, state);
++			return;
++		}
++		HISTATE result = ResultState(inst, state);
++		int d = Dst(inst.rd);
++		if(inst.rd == REG_TEMP) d = IP;
++		switch(inst.op)
++		{
++		case OP_ADDU:
++		case OP_SUBU:
++		{
++			int a = Lo(inst.rs, IP);
++			if(inst.rt == 0)
++			{
++				CommitSx(inst.rd, a, state);
++				return;
++			}
++			int b = Lo(inst.rt, LR);
++			m_emit.DpReg((inst.op == OP_ADDU) ? ADD : SUB, false, d, a, b);
++			CommitSx(inst.rd, d, state);
++			return;
++		}
++		case OP_SLLV:
++		case OP_SRLV:
++		case OP_SRAV:
++		{
++			int amount = Lo(inst.rs, LR);
++			m_emit.DpImm(AND, false, LR, amount, 31);
++			int t = Lo(inst.rt, IP);
++			SHIFT shift = (inst.op == OP_SLLV) ? LSL : (inst.op == OP_SRLV) ? LSR : ASR;
++			m_emit.DpRegShift(MOV, false, d, 0, t, shift, LR);
++			CommitSx(inst.rd, d, state);
++			return;
++		}
++		case OP_SLL:
++		case OP_SRL:
++		case OP_SRA:
++		{
++			int t = Lo(inst.rt, IP);
++			if(inst.sa == 0)
++			{
++				CommitSx(inst.rd, t, state);
++				return;
++			}
++			SHIFT shift = (inst.op == OP_SLL) ? LSL : (inst.op == OP_SRL) ? LSR : ASR;
++			m_emit.DpReg(MOV, false, d, 0, t, shift, inst.sa);
++			CommitSx(inst.rd, d, state);
++			return;
++		}
++		case OP_ADDIU:
++		{
++			int a = Lo(inst.rs, IP);
++			m_emit.DpConst(ADD, false, d, a, static_cast<uint32>(inst.imm), LR);
++			CommitSx(inst.rd, d, state);
++			return;
++		}
++		case OP_LI:
++			m_emit.LoadConst(d, static_cast<uint32>(inst.imm));
++			CommitSx(inst.rd, d, state);
++			return;
++		case OP_ANDI:
++		{
++			int a = Lo(inst.rs, IP);
++			m_emit.DpConst(AND, false, d, a, static_cast<uint32>(inst.imm), LR);
++			CommitSx(inst.rd, d, state);
++			return;
++		}
++		case OP_ORI:
++		case OP_XORI:
++		{
++			if(result == HI_SX)
++			{
++				int a = Lo(inst.rs, IP);
++				m_emit.DpConst((inst.op == OP_ORI) ? ORR : EOR, false, d, a, static_cast<uint32>(inst.imm), LR);
++				CommitSx(inst.rd, d, state);
++				return;
++			}
++			//Upper half unchanged: copied from rs
++			Hi(inst.rs, R0, state);
++			int a = Lo(inst.rs, IP);
++			m_emit.DpConst((inst.op == OP_ORI) ? ORR : EOR, false, IP, a, static_cast<uint32>(inst.imm), LR);
++			Commit64(inst.rd, IP, R0, state);
++			return;
++		}
++		case OP_AND:
++		case OP_OR:
++		case OP_XOR:
++		case OP_NOR:
++		{
++			DP op = (inst.op == OP_AND) ? AND : (inst.op == OP_XOR) ? EOR : ORR;
++			if(result != HI_SX)
++			{
++				int ha = Hi(inst.rs, R0, state);
++				int hb = Hi(inst.rt, R1, state);
++				m_emit.DpReg(op, false, R0, ha, hb);
++				if(inst.op == OP_NOR) m_emit.DpReg(MVN, false, R0, 0, R0);
++				int a = Lo(inst.rs, IP);
++				int b = Lo(inst.rt, LR);
++				m_emit.DpReg(op, false, IP, a, b);
++				if(inst.op == OP_NOR) m_emit.DpReg(MVN, false, IP, 0, IP);
++				Commit64(inst.rd, IP, R0, state);
++				return;
++			}
++			int a = Lo(inst.rs, IP);
++			int b = Lo(inst.rt, LR);
++			m_emit.DpReg(op, false, d, a, b);
++			if(inst.op == OP_NOR) m_emit.DpReg(MVN, false, d, 0, d);
++			CommitSx(inst.rd, d, state);
++			return;
++		}
++		case OP_SLT:
++		case OP_SLTU:
++		case OP_SLTI:
++		case OP_SLTIU:
++		{
++			bool isImm = (inst.op == OP_SLTI) || (inst.op == OP_SLTIU);
++			bool isSigned = (inst.op == OP_SLT) || (inst.op == OP_SLTI);
++			auto sx = [&](uint8 reg) { return (reg == 0) || (reg == REG_TEMP) || (IsAllocated(reg) && (state.hi[reg] == HI_SX)); };
++			bool narrow = sx(inst.rs) && (isImm || sx(inst.rt));
++			if(narrow)
++			{
++				int a = Lo(inst.rs, IP);
++				if(isImm)
++					m_emit.DpConst(CMP, true, 0, a, static_cast<uint32>(inst.imm), LR);
++				else
++				{
++					int b = Lo(inst.rt, LR);
++					m_emit.DpReg(CMP, true, 0, a, b);
++				}
++			}
++			else
++			{
++				int ha = Hi(inst.rs, R0, state);
++				int a = Lo(inst.rs, IP);
++				if(isImm)
++				{
++					m_emit.DpConst(CMP, true, 0, a, static_cast<uint32>(inst.imm), LR);
++					m_emit.LoadConst(R1, (inst.imm < 0) ? 0xFFFFFFFF : 0); //mov/mvn: flags kept
++					m_emit.DpReg(SBC, true, R1, ha, R1);
++				}
++				else
++				{
++					int hb = Hi(inst.rt, R1, state);
++					int b = Lo(inst.rt, LR);
++					m_emit.DpReg(CMP, true, 0, a, b);
++					m_emit.DpReg(SBC, true, R1, ha, hb);
++				}
++			}
++			m_emit.DpImm(MOV, false, d, 0, 0);
++			m_emit.DpImm(MOV, false, d, 0, 1, isSigned ? LT : CC_);
++			CommitSx(inst.rd, d, state);
++			return;
++		}
++		case OP_COND:
++		{
++			CC cc = EmitCompare(static_cast<COND>(inst.sa), inst.rs, inst.rt, state);
++			m_emit.DpImm(MOV, false, IP, 0, 0);
++			m_emit.DpImm(MOV, false, IP, 0, 1, cc);
++			CommitSx(inst.rd, IP, state);
++			return;
++		}
++		case OP_DADDU:
++		case OP_DSUBU:
++		case OP_DADDIU:
++		{
++			bool isMove = ((inst.op == OP_DADDIU) && (inst.imm == 0)) || ((inst.op != OP_DADDIU) && (inst.rt == 0)) ||
++			              ((inst.op == OP_DADDU) && (inst.rs == 0));
++			if(isMove)
++			{
++				uint8 src = ((inst.op == OP_DADDU) && (inst.rs == 0)) ? inst.rt : inst.rs;
++				if(result == HI_SX)
++				{
++					int a = Lo(src, IP);
++					CommitSx(inst.rd, a, state);
++					return;
++				}
++				int a = Lo(src, IP);
++				m_emit.Mov(IP, a);
++				if((src == inst.rd) && !IsAllocated(src)) return; //unchanged
++				Hi(src, R0, state);
++				Commit64(inst.rd, IP, R0, state);
++				return;
++			}
++			int ha = Hi(inst.rs, R0, state);
++			if(ha != R0) m_emit.Mov(R0, ha);
++			int a = Lo(inst.rs, IP);
++			if(inst.op == OP_DADDIU)
++			{
++				uint32 imm = static_cast<uint32>(inst.imm);
++				m_emit.LoadConst(LR, imm);
++				m_emit.DpReg(ADD, true, IP, a, LR);
++				if(inst.imm < 0)
++					m_emit.DpImm(SBC, false, R0, R0, 0); //+ 0xFFFFFFFF + carry
++				else
++					m_emit.DpImm(ADC, false, R0, R0, 0);
++			}
++			else
++			{
++				int hb = Hi(inst.rt, R1, state);
++				int b = Lo(inst.rt, LR);
++				m_emit.DpReg((inst.op == OP_DADDU) ? ADD : SUB, true, IP, a, b);
++				m_emit.DpReg((inst.op == OP_DADDU) ? ADC : SBC, false, R0, R0, hb);
++			}
++			Commit64(inst.rd, IP, R0, state);
++			return;
++		}
++		case OP_DSLL:
++		case OP_DSRL:
++		case OP_DSRA:
++			EmitShift64Const(inst, state);
++			return;
++		case OP_DSLLV:
++		case OP_DSRLV:
++		case OP_DSRAV:
++			EmitShift64Var(inst, state);
++			return;
++		case OP_MOVZ:
++		case OP_MOVN:
++		{
++			CC cc = (inst.op == OP_MOVZ) ? EQ : NE;
++			if(result == HI_SX)
++			{
++				//Both sign extended: the lower halves
++				int a = Lo(inst.rs, IP);
++				auto sx = [&](uint8 reg) { return (reg == 0) || (IsAllocated(reg) && (state.hi[reg] == HI_SX)); };
++				if(sx(inst.rt))
++				{
++					int t = Lo(inst.rt, LR);
++					m_emit.DpImm(CMP, true, 0, t, 0);
++				}
++				else
++				{
++					int ht = Hi(inst.rt, R1, state);
++					int t = Lo(inst.rt, LR);
++					m_emit.DpReg(ORR, true, LR, t, ht);
++				}
++				m_emit.Mov(m_alloc[inst.rd], a, cc);
++				state.hi[inst.rd] = HI_SX;
++				return;
++			}
++			//rd's upper half to the context first, then a conditional copy of both halves
++			Materialize(inst.rd, state);
++			Hi(inst.rs, R0, state);
++			int a = Lo(inst.rs, IP);
++			if(a != IP) m_emit.Mov(IP, a);
++			int ht = Hi(inst.rt, R1, state);
++			int t = Lo(inst.rt, LR);
++			m_emit.DpReg(ORR, true, LR, t, ht);
++			if(IsAllocated(inst.rd))
++				m_emit.Mov(m_alloc[inst.rd], IP, cc);
++			else
++				m_emit.Str(IP, FP, LoOffset(inst.rd), cc);
++			m_emit.Str(R0, FP, HiOffset(inst.rd), cc);
++			state.hi[inst.rd] = HI_MEM;
++			return;
++		}
++		default:
++			assert(false);
++			return;
++		}
++	}
++
++	//Leaves the region: guest registers to the context, nPC, then the next block
++	//(indirect dispatch) or the executor (quota spent, exception)
++	void CArmCompiler::EmitExit(const BLOCK& block, const EDGE& edge, const STATE& state, const uint32* written, bool checked)
++	{
++		using namespace Arm;
++		for(int reg = 1; reg < 32; reg++)
++		{
++			if(!IsAllocated(reg)) continue;
++			if(!(*written & (1u << reg))) continue;
++			m_emit.Str(m_alloc[reg], FP, LoOffset(reg));
++			if(state.hi[reg] == HI_SX)
++			{
++				m_emit.DpReg(MOV, false, LR, 0, m_alloc[reg], ASR, 31);
++				m_emit.Str(LR, FP, HiOffset(reg));
++			}
++		}
++		uint32 pc = 0;
++		if(edge.target == EDGE_EXIT_REG)
++		{
++			int target = Lo(block.rs, IP);
++			m_emit.Str(target, FP, offsetof(CMIPS, m_State.nPC));
++		}
++		else
++		{
++			pc = (edge.target >= 0) ? m_region.blocks[edge.target].pc : edge.pc;
++			m_emit.LoadConst(IP, pc);
++			m_emit.Str(IP, FP, offsetof(CMIPS, m_State.nPC));
++		}
++		if(checked) m_emit.B(m_slowExitLabel, LE);
++#ifdef TIER2_ARM
++		m_emit.JumpAbsolute(static_cast<uint32>(Jitter::CCodeGen_AArch32::GetChainedThunk(reinterpret_cast<uintptr_t>(&RegionExitTrampoline))));
++#else
++		m_emit.B(m_slowExitLabel);
++#endif
++	}
++
++	void CArmCompiler::EmitEdge(const BLOCK& block, const EDGE& edge, const STATE& state, const uint32* written)
++	{
++		using namespace Arm;
++		if(edge.cycles != 0)
++		{
++			uint32 cycles = edge.cycles;
++			while(cycles > 0)
++			{
++				uint32 step = std::min<uint32>(cycles, 255);
++				cycles -= step;
++				m_emit.DpImm(SUB, edge.check && (cycles == 0), R9, R9, step);
++			}
++		}
++		//The flags hold the quota check from here (stores and moves keep them)
++		if(edge.check && (edge.cycles == 0)) m_emit.DpImm(CMP, true, 0, R9, 0);
++		if(edge.target < 0)
++		{
++			EmitExit(block, edge, state, written, true);
++			return;
++		}
++		//Upper halves the target expects in the context
++		STATE current = state;
++		const STATE& in = m_in[edge.target];
++		for(uint8 reg = 1; reg < 32; reg++)
++		{
++			if((current.hi[reg] == HI_SX) && (in.hi[reg] == HI_MEM)) Materialize(reg, current);
++		}
++		if(edge.check)
++		{
++			//One stub per target, register state and registers to store
++			uint32 stubWritten = *written;
++			std::string key(reinterpret_cast<const char*>(current.hi), sizeof(current.hi));
++			key.append(reinterpret_cast<const char*>(&stubWritten), sizeof(stubWritten));
++			key.append(reinterpret_cast<const char*>(&edge.target), sizeof(edge.target));
++			auto found = m_stubs.find(key);
++			int stub = 0;
++			if(found != m_stubs.end())
++			{
++				stub = found->second;
++			}
++			else
++			{
++				stub = m_emit.NewLabel();
++				m_stubs[key] = stub;
++				const BLOCK* blockPtr = &block;
++				EDGE stubEdge = edge;
++				m_cold.push_back([this, stub, current, stubWritten, blockPtr, stubEdge]() {
++					m_emit.Mark(stub);
++					//Flags still those of the quota check (LE)
++					EmitExit(*blockPtr, stubEdge, current, &stubWritten, true);
++				});
++			}
++			m_emit.B(stub, LE);
++		}
++		m_emit.B(m_blockLabels[edge.target]);
++	}
++
++	void CArmCompiler::EmitColdCode()
++	{
++		using namespace Arm;
++		//Cold code may add more (stubs don't)
++		for(size_t i = 0; i < m_cold.size(); i++)
++		{
++			auto fn = m_cold[i];
++			fn();
++		}
++	}
++
++	bool CArmCompiler::Compile(std::vector<uint8>& out, uint32& linkEntryOffset)
++	{
++		using namespace Arm;
++		Allocate();
++		Analyse();
++		const auto& blocks = m_region.blocks;
++		for(size_t i = 0; i < blocks.size(); i++) m_blockLabels.push_back(m_emit.NewLabel());
++		m_slowExitLabel = m_emit.NewLabel();
++
++		//Chained frame, as the JIT's (CCodeGen_AArch32::Emit_Prolog)
++		alignas(16) static const uint32 g_clampMasks[8] = {0x7F7FFFFF, 0x7F7FFFFF, 0x7F7FFFFF, 0x7F7FFFFF, 0xFF7FFFFF, 0xFF7FFFFF, 0xFF7FFFFF, 0xFF7FFFFF};
++		m_emit.Stmdb(SP, 0x4FF0);   //push {r4-r11, lr}
++		m_emit.Word(0xED2D8B10);    //vpush {d8-d15}
++		m_emit.Mov(FP, R0);
++		m_emit.Ldr(R9, FP, offsetof(CMIPS, m_State.cycleQuota));
++		m_emit.Ldr(R10, FP, offsetof(CMIPS, m_fastRamBase));
++		m_emit.LoadConst(R1, static_cast<uint32>(reinterpret_cast<uintptr_t>(&g_clampMasks[0])));
++		m_emit.Word(0xF421CA8F);    //vld1.32 {d12-d13}, [r1]
++		m_emit.LoadConst(R1, static_cast<uint32>(reinterpret_cast<uintptr_t>(&g_clampMasks[4])));
++		m_emit.Word(0xF421EA8F);    //vld1.32 {d14-d15}, [r1]
++		m_emit.Mov(R0, SP);
++		m_emit.DpImm(BIC, false, SP, SP, 0xF);
++		m_emit.DpImm(SUB, false, SP, SP, 0xC);
++		m_emit.Stmdb(SP, 1 << R0);
++		m_emit.DpImm(SUB, false, SP, SP, 0x200);
++		linkEntryOffset = static_cast<uint32>(m_emit.Position() * 4);
++		//Allocated guest registers
++		for(int reg = 1; reg < 32; reg++)
++		{
++			if(IsAllocated(reg)) m_emit.Ldr(m_alloc[reg], FP, LoOffset(reg));
++		}
++
++		for(size_t i = 0; i < blocks.size(); i++)
++		{
++			const auto& block = blocks[i];
++			m_emit.Mark(m_blockLabels[i]);
++			if(m_in[i].hi[0] == HI_UNSET)
++			{
++				//Never reached: nothing (can't happen for the entry)
++				m_emit.B(m_slowExitLabel);
++				continue;
++			}
++			STATE state = m_in[i];
++			uint32 written = m_writtenIn[i];
++			for(const auto& inst : block.insts)
++			{
++				EmitInst(inst, state);
++				uint8 reg = Written(inst);
++				if(IsAllocated(reg)) written |= (1u << reg);
++			}
++			switch(block.term)
++			{
++			case TERM_GOTO:
++				EmitEdge(block, block.next, state, &written);
++				break;
++			case TERM_BRANCH:
++			{
++				CC cc = EmitCompare(block.cond, block.rs, block.rt, state);
++				int taken = m_emit.NewLabel();
++				m_emit.B(taken, cc);
++				EmitEdge(block, block.next, state, &written);
++				m_emit.Mark(taken);
++				EmitEdge(block, block.taken, state, &written);
++				break;
++			}
++			case TERM_GUARD:
++			{
++				int target = Lo(block.rs, IP);
++				m_emit.LoadConst(LR, block.expected);
++				m_emit.DpReg(CMP, true, 0, target, LR);
++				int miss = m_emit.NewLabel();
++				m_emit.B(miss, NE);
++				EmitEdge(block, block.taken, state, &written);
++				m_emit.Mark(miss);
++				EmitEdge(block, block.next, state, &written);
++				break;
++			}
++			}
++		}
++
++		EmitColdCode();
++
++		//Back to the executor (CBasicBlock::CompileQuotaPoisonFix, then the quota flag)
++		m_emit.Mark(m_slowExitLabel);
++		{
++			int noPoison = m_emit.NewLabel();
++			m_emit.DpImm(CMP, true, 0, R9, 0xE0000000);
++			m_emit.B(noPoison, GE);
++			m_emit.DpImm(ADD, false, R9, R9, 0x40000000);
++			m_emit.Mark(noPoison);
++			m_emit.Ldr(LR, FP, offsetof(CMIPS, m_State.nHasException));
++			m_emit.DpImm(CMP, true, 0, R9, 0);
++			m_emit.DpImm(ORR, false, LR, LR, 0x80, LE);
++			m_emit.Str(LR, FP, offsetof(CMIPS, m_State.nHasException));
++			//Epilog (CCodeGen_AArch32::Emit_Epilog, chained)
++			m_emit.Str(R9, FP, offsetof(CMIPS, m_State.cycleQuota));
++			m_emit.DpImm(ADD, false, SP, SP, 0x200);
++			m_emit.Ldmia(SP, 1 << R3);
++			m_emit.Mov(SP, R3);
++			m_emit.Word(0xECBD8B10); //vpop {d8-d15}
++			m_emit.Ldmia(SP, 0x4FF0);
++			m_emit.Word(0xE12FFF1E); //bx lr
++		}
++		if(!m_emit.Resolve()) return false;
++		out.resize(m_emit.code.size() * 4);
++		memcpy(out.data(), m_emit.code.data(), out.size());
++		return true;
++	}
++}
++
++//--------------------------------------------------------------------------
++
++CTier2Block::CTier2Block(CMIPS& context, uint32 begin, BLOCK_CATEGORY category)
++    : CBasicBlock(context, begin, begin, category)
++{
++}
++
++CTier2Block::~CTier2Block() = default;
++
++void CTier2Block::SetExcluded(std::function<bool(uint32)> excluded)
++{
++	m_excluded = std::move(excluded);
++}
++
++bool CTier2Block::Build()
++{
++	using namespace Tier2;
++	auto start = std::chrono::steady_clock::now();
++	m_region = std::make_unique<REGION>();
++	CBuilder builder(m_context, *m_region);
++	builder.m_excluded = m_excluded;
++	if(!builder.Build(m_begin))
++	{
++		g_stats.failed++;
++		m_region.reset();
++		return false;
++	}
++	//Guest ranges (for invalidation)
++	for(const auto& block : m_region->blocks)
++	{
++		if(block.begin <= block.end) m_ranges.push_back({block.begin, block.end});
++	}
++	m_end = m_region->blocks[0].end >= m_begin ? m_region->blocks[0].end : m_begin;
++
++	MODE mode = GetEffectiveMode();
++	if((mode == MODE_NATIVE) && ((m_begin < g_settings.nativeLow) || (m_begin >= g_settings.nativeHigh))) mode = MODE_INTERPRET;
++	bool compiled = false;
++	//Debugging: the ARM code written to TIER2_DUMP/<address>.bin, whatever the host
++	if(const char* dumpDir = getenv("TIER2_DUMP"))
++	{
++		std::vector<uint8> code;
++		uint32 linkEntryOffset = 0;
++		CArmCompiler compiler(*m_region);
++		if(compiler.Compile(code, linkEntryOffset))
++		{
++			char path[512];
++			snprintf(path, sizeof(path), "%s/%08X.bin", dumpDir, m_begin);
++			if(FILE* file = fopen(path, "wb"))
++			{
++				fwrite(code.data(), 1, code.size(), file);
++				fclose(file);
++			}
++		}
++	}
++	if(mode == MODE_NATIVE)
++	{
++		std::vector<uint8> code;
++		uint32 linkEntryOffset = 0;
++		CArmCompiler compiler(*m_region);
++		if(compiler.Compile(code, linkEntryOffset))
++		{
++			SetNativeCode(code.data(), code.size(), linkEntryOffset);
++			g_stats.codeBytes += code.size();
++			compiled = true;
++		}
++	}
++	if(!compiled)
++	{
++		//Interpreted: the JIT makes an empty function to link to (it returns to the executor,
++		//which calls Execute)
++		m_interpret = true;
++		Compile();
++	}
++	if(g_settings.dumpPath && (m_begin >= g_settings.nativeLow) && (m_begin < g_settings.nativeHigh))
++	{
++		if(FILE* file = fopen(g_settings.dumpPath, "a"))
++		{
++			fprintf(file, "region %08X (nPC %08X, ra %08X, sp %08X)", m_begin, m_context.m_State.nPC, m_context.m_State.nGPR[31].nV0, m_context.m_State.nGPR[29].nV0);
++			fputc(10, file);
++			for(const auto& range : m_ranges)
++			{
++				fprintf(file, "code %08X:", range.begin);
++				for(uint32 address = range.begin; address <= range.end; address += 4) fprintf(file, " %08X", m_context.m_pMemoryMap->GetInstruction(address));
++				fputc(10, file);
++			}
++			Dump(file);
++			fclose(file);
++		}
++	}
++	if(g_stats.regions < 1024) g_stats.entries[g_stats.regions] = m_begin;
++	g_stats.regions++;
++	g_stats.guestInstructions += m_region->instructions;
++	g_stats.compileUs += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
++	return true;
++}
++
++void CTier2Block::Dump(FILE* file) const
++{
++	using namespace Tier2;
++	static const char* opNames[] = {"addu", "subu", "sllv", "srlv", "srav", "and", "or", "xor", "nor", "slt", "sltu", "daddu", "dsubu",
++	                                "dsllv", "dsrlv", "dsrav", "movz", "movn", "sll", "srl", "sra", "dsll", "dsrl", "dsra", "addiu", "daddiu",
++	                                "slti", "sltiu", "andi", "ori", "xori", "li", "lb", "lbu", "lh", "lhu", "lw", "lwu", "ld", "sb", "sh",
++	                                "sw", "sd", "cond"};
++	static const char* condNames[] = {"eq", "ne", "lez", "gtz", "ltz", "gez"};
++	if(!m_region)
++	{
++		fprintf(file, "no region\n");
++		return;
++	}
++	auto edgeText = [&](const EDGE& edge, char* text, size_t size) {
++		const char* check = edge.check ? "" : " nocheck";
++		if(edge.target >= 0)
++			snprintf(text, size, "b%d (%08X) c%u%s", edge.target, m_region->blocks[edge.target].pc, edge.cycles, check);
++		else if(edge.target == EDGE_EXIT)
++			snprintf(text, size, "exit %08X c%u%s", edge.pc, edge.cycles, check);
++		else
++			snprintf(text, size, "exit reg c%u%s", edge.cycles, check);
++	};
++	for(size_t i = 0; i < m_region->blocks.size(); i++)
++	{
++		const auto& block = m_region->blocks[i];
++		fprintf(file, "b%u %08X [%08X-%08X] stack %u\n", static_cast<unsigned int>(i), block.pc, block.begin, block.end, static_cast<unsigned int>(block.stack.size()));
++		for(const auto& inst : block.insts)
++		{
++			fprintf(file, "  %-6s rd %u rs %u rt %u sa %u imm %d\n", opNames[inst.op], inst.rd, inst.rs, inst.rt, inst.sa, inst.imm);
++		}
++		char taken[128], next[128];
++		edgeText(block.taken, taken, sizeof(taken));
++		edgeText(block.next, next, sizeof(next));
++		switch(block.term)
++		{
++		case TERM_GOTO: fprintf(file, "  goto %s (reg %u)\n", next, block.rs); break;
++		case TERM_BRANCH: fprintf(file, "  if %s(r%u, r%u) %s else %s\n", condNames[block.cond], block.rs, block.rt, taken, next); break;
++		case TERM_GUARD: fprintf(file, "  if r%u == %08X %s else %s\n", block.rs, block.expected, taken, next); break;
++		}
++	}
++}
++
++void CTier2Block::CompileRange(CMipsJitter*)
++{
++	//The interpreter's stub: nothing (prolog, epilog)
++}
++
++void CTier2Block::Execute()
++{
++	using namespace Tier2;
++	if(!m_interpret)
++	{
++		CBasicBlock::Execute();
++		return;
++	}
++	auto& state = m_context.m_State;
++	g_stats.interpretedRuns++;
++	uint64 temp = 0;
++	CInterpreter interpreter(m_context, temp);
++	const auto& blocks = m_region->blocks;
++	int index = 0;
++	while(true)
++	{
++		const auto& block = blocks[index];
++		for(const auto& inst : block.insts) interpreter.Run(inst);
++		const EDGE* edge = &block.next;
++		switch(block.term)
++		{
++		case TERM_GOTO: break;
++		case TERM_BRANCH:
++			if(CInterpreter::Test(block.cond, interpreter.Get(block.rs), interpreter.Get(block.rt))) edge = &block.taken;
++			break;
++		case TERM_GUARD:
++			if(static_cast<uint32>(interpreter.Get(block.rs)) == block.expected) edge = &block.taken;
++			break;
++		}
++		state.cycleQuota -= edge->cycles;
++		bool stay = (edge->target >= 0) && (!edge->check || ((state.cycleQuota > 0) && (state.nHasException == 0)));
++		if(stay)
++		{
++			index = edge->target;
++			continue;
++		}
++		if(edge->target == EDGE_EXIT_REG)
++			state.nPC = static_cast<uint32>(interpreter.Get(block.rs));
++		else if(edge->target == EDGE_EXIT)
++			state.nPC = edge->pc;
++		else
++			state.nPC = blocks[edge->target].pc;
++		if(state.cycleQuota <= 0) state.nHasException |= MIPS_EXCEPTION_STATUS_QUOTADONE;
++		return;
++	}
++}

@@ -374,6 +374,22 @@ void CEmuSession::ProfilerProc()
 		if((section == EmuProfile::SECTION_EE) && m_vm)
 		{
 			AddHotSample(m_eeHotPc, m_eeHotCount, m_eeHotSamples, m_vm->m_ee->m_EE.m_State.nPC);
+			//Tier 2: block starts sampled often enough get a region
+			if(Tier2::g_settings.mode != Tier2::MODE_OFF)
+			{
+				uint32_t pc = m_vm->m_ee->m_EE.m_State.nPC;
+				if(m_tier2Requested < g_tier2MaxRequests)
+				{
+					uint32_t& count = m_tier2Samples[pc];
+					++count;
+					//Asked again now and then: compiled code may have been dropped since (JIT memory full)
+					if((count == g_tier2HotSamples) || ((count % 512) == 0))
+					{
+						static_cast<CEeExecutor*>(m_vm->m_ee->m_EE.m_executor.get())->RequestTier2(pc);
+						if(count == g_tier2HotSamples) m_tier2Requested++;
+					}
+				}
+			}
 		}
 		if((section == EmuProfile::SECTION_IOP) && m_vm)
 		{

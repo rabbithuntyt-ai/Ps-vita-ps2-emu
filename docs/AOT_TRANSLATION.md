@@ -158,8 +158,69 @@ units.
 | Results of 3c-3e on the Vita (RE4 intro, warm, 4 runs) | | Fast RAM, compares and likely exits: 16.2 -> 17.65 pictures/s (33.8 -> 36.8 emulated fps). Exceptions in the quota, `subs`, cold 64/128-bit slow paths: 18.35 (38.2). Per emulated frame: EE code 14.3 -> 11.1 ms, IOP code 4.1 -> 3.0 ms. Vita fuzz with likely branches: 16 of 16 (fast RAM, likely exits), 7 of 7 (quota flag); host tests 33 of 33 |
 | 3a. **Regions** (patches 0079, 0080): consecutive blocks of a function compiled as one (`CEeRegionBlock`): branches between them jump to labels (no exit, link or dispatch), cycles counted per part as before, quota checked on loops back, exits through the indirect dispatch | Done, **off by default** (`jit_regions=1`, host `--regions`) | Same results: 40 EE fuzz programs (plain and with loops, 125-276 regions each) give the same checksums; Silent Hill 2 on a PC, 1500 frames, 672 regions: the same final picture. RE4 on the Vita: stable, but **no gain** (15.0 pictures/s either way): its hot code is small functions joined by calls and returns, which end a region |
 | Regions compiled again and again: after a quota exit a loop is entered mid-region, and each such entry compiled a new overlapping region of up to 256 instructions. Loop programs took over 12 s on the Vita (correct results, given 60 s). Fix: an entry inside a region's range gets a plain block | Fixed | Loop fuzz on the Vita with regions: 3 of 3 within 12 s; PC fuzz still 40 of 40 |
-| 3b. Guest registers kept in host registers across a region's parts (the Jitter's allocator spills at every label today) | Planned | Needed before regions pay off |
-| 4. Register width across blocks (no upper-half stores where never read) | Planned | |
+| 3b. Guest registers kept in host registers across a region's parts (the Jitter's allocator spills at every label today) | Superseded by 4 | |
+| 4. **The tier 2 recompiler** (patch 0094, Play `ee/Tier2.cpp`, `tier2=1`, off by default): a compiler of its own next to the JIT. See below | First version done, correct, no gain yet | RE4 intro movie, 200 s runs, movie section: 18.54 pictures/s against 18.08 without (444 regions, 37000 EE instructions); EE code 11.1 ms per frame either way |
+
+### The tier 2 recompiler (2026-11-09)
+
+Not the Jitter: its own front end, IR and ARM code generator, so nothing is spilled at
+block edges and the upper halves of registers are tracked across the whole region.
+
+- **Regions.** From a block start, the code is followed through conditional branches,
+  jumps and calls: `jal` inlines the callee (3 levels), whose `jr ra` checks that ra is
+  the inlined call's return address (else it leaves to ra). Likely branches get their
+  delay slot as a block of its own. Anything not handled (FPU, MMI, `lq`/`sq`, `mult`,
+  `syscall`, COP0...) ends the block with an exit to that address: the JIT runs it.
+  Idle loops (`CEeBasicBlock::IsIdleLoopRange`) and blocks with per-block settings are
+  left to the JIT too. Up to 48 blocks, 768 instructions.
+- **IR**: operations on guest registers with their full 64-bit meaning (32-bit ALU and
+  shifts, 64-bit logic/add/shifts, `movz`/`movn`, compares, loads and stores of 8-64
+  bits), a temporary for branch conditions the delay slot changes, terminators (goto,
+  conditional branch, return check) with edges carrying the cycles of the guest block
+  they end and whether the quota is checked there.
+- **Two back ends.** An interpreter (any host: `--tier2` in the host runner, the fuzz
+  tests) and AArch32 code (`tier2=1`, needs chained frames, pinned fields with the fast
+  RAM base, exception poison, indirect dispatch: the Vita defaults). The ARM code keeps
+  up to 7 guest registers in r4-r8, r2, r3 for the whole region (chosen by use, loops
+  counted 8x), loaded at the link entry and stored at exits. Each register's upper half
+  is "the sign extension of the lower 32 bits" (most 32-bit code) or "in the context":
+  32-bit operations need no upper half at all, 64-bit compares and logic on sign-extended
+  values use 32-bit instructions, and the upper half is only written where a block that
+  needs it in the context is reached (edges between blocks) or the region is left.
+  Loads and stores use the JIT's fast RAM path (`tst addr, #0xFE000000`), with the
+  memory handlers after the code (r2/r3 saved in the frame, exceptions flagged in the
+  quota like the JIT's).
+- **Same conventions as the JIT's blocks**: chained frame (same prolog, link entry,
+  epilog), cycles counted per guest block and the quota checked at each block's end, exits
+  through the indirect dispatch (`RegionExitTrampoline`): JIT blocks link to regions and
+  regions jump to JIT blocks.
+- **Hot code only.** The profiler samples the EE's PC every millisecond; a block start
+  seen 8 times (`tier2_hot`) gets a region, built before the next EE slice (the JIT's block
+  there is dropped and its links moved to the region). `tier2_eager=1`: a region at every
+  block start (tests). Regions are dropped with the code they hold (inlined callees
+  included) when it is cleared.
+- **Checks.** Host tests: 6 fuzz programs through tier 2 (`ee_fuzz_test_*_tier2`, new
+  generator options `--calls`: leaf and non-leaf functions, `jalr`, callees returning past
+  their call site; `--spr`: loads and stores in the scratchpad, the memory handlers). On
+  the PC, 90 more programs against the JIT. On the Vita (`vita_jit_fuzz.sh ... tier2=1
+  tier2_eager=1`): 59 of 59 with native code. RE4 boots, loads and plays its intro with
+  native regions.
+- **Debugging aids**: `jit_arm_dump RAM ADDRESS --tier2` prints a region's IR (and its ARM
+  code in `TIER2_DUMP`), `tier2_dump=1` writes each region built in
+  [`tier2_lo`, `tier2_hi`) with its guest code on the Vita, `tier2_lo`/`tier2_hi` keep
+  native code to an address window (the rest interpreted), `tier2.txt` lists the regions
+  and the instructions that ended blocks.
+- **A trap found on the way**: RE4 test runs press buttons at fixed real-time seconds.
+  A faster or slower EE moves the game's timeline, so a 115 s run can end before the movie
+  starts. "No pictures" then looked like a hang (an address bisection chased it for an
+  hour). Look at the frames (`frame_dump_every`) before calling a run broken.
+
+**Why no gain yet**: what ends RE4's blocks (`tier2.txt`, movie section): `lq` 86, `swc1`
+72, `sq` 67, MMI 59, `syscall` 57, `mult` 52, COP0 35, `lwc1` 35, COP1 arithmetic 31, `ldl`
+31, `div` 16. Its hot code is FPU, 128-bit and multiply code; regions stop at the first such
+instruction, and 325 hot block starts get no region at all. Next: `lq`/`sq` and the
+common MMI moves (`por`, `pcpyld`...), `mult`/`div`/`mfhi`/`mflo`, then FPU loads, stores
+and arithmetic with the JIT's clamping.
 
 ## What it could gain
 

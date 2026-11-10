@@ -27,6 +27,7 @@
 //
 // Exit code is 0 when at least one frame was presented.
 
+#include "ee/Tier2.h"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -226,6 +227,18 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-stay-in-slice")) Iop::CSubSystem::g_stayInSlice = false;
 		else if(!std::strcmp(argv[i], "--no-ee-stay-in-slice")) Ee::CSubSystem::g_stayInSlice = false;
 		else if(!std::strcmp(argv[i], "--regions")) CEmuSession::SetRegions(true);
+		else if(!std::strcmp(argv[i], "--tier2") || !std::strcmp(argv[i], "--tier2-interpret"))
+		{
+			//A tier 2 region at every block start (native code on ARM, else interpreted)
+			bool interpret = !std::strcmp(argv[i], "--tier2-interpret");
+#if defined(__arm__) && !defined(__aarch64__)
+			Tier2::g_settings.mode = interpret ? Tier2::MODE_INTERPRET : Tier2::MODE_NATIVE;
+#else
+			(void)interpret;
+			Tier2::g_settings.mode = Tier2::MODE_INTERPRET;
+#endif
+			Tier2::g_settings.eager = true;
+		}
 		else if(!std::strcmp(argv[i], "--shot-every") && (i + 1 < argc)) shotEvery = std::strtoull(argv[++i], nullptr, 10);
 		else if(!std::strcmp(argv[i], "--shot-dir") && (i + 1 < argc)) shotDir = argv[++i];
 		else if(!std::strcmp(argv[i], "--stats") && (i + 1 < argc)) statsPath = argv[++i];
@@ -464,6 +477,10 @@ int main(int argc, char** argv)
 			            (unsigned long long)EmuProfile::g_executeCalls[0], (unsigned long long)EmuProfile::g_dispatches[1],
 			            (unsigned long long)EmuProfile::g_executeCalls[1]);
 			std::printf("regions: %u (%llu EE instructions)\n", EmuProfile::g_regions, (unsigned long long)EmuProfile::g_regionInstructions);
+			std::printf("tier2: %u regions, %u not built, %llu EE instructions, %u inlined calls, %llu code bytes, %llu us\n", Tier2::g_stats.regions,
+			            Tier2::g_stats.failed, (unsigned long long)Tier2::g_stats.guestInstructions, Tier2::g_stats.inlinedCalls,
+			            (unsigned long long)Tier2::g_stats.codeBytes, (unsigned long long)Tier2::g_stats.compileUs);
+			std::printf("tier2 runs: %llu\n", (unsigned long long)Tier2::g_stats.interpretedRuns);
 		}
 		session.GetFrames().Fetch(serial, pixels, width, height);
 		for(const auto& usage : threadUsage)

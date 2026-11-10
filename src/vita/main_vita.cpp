@@ -70,6 +70,7 @@
 #include "GsHardwareBenchmark.h"
 #include "JitMemory.h"
 #include "PH_Vita.h"
+#include "ee/Tier2.h"
 #include "PS2VM.h"
 #include "ee/IPU.h"
 #include "SH_Vita.h"
@@ -282,7 +283,7 @@ namespace
 
 	void ApplySetting(GAME_SETTINGS& settings, const std::string& key, const std::string& text)
 	{
-		uint32_t value = static_cast<uint32_t>(std::strtoul(text.c_str(), nullptr, 10));
+		uint32_t value = static_cast<uint32_t>(std::strtoul(text.c_str(), nullptr, 0));
 		if(key == "ee_cycle_rate") settings.eeCycleRate = value;
 		else if(key == "ee_slice") settings.eeSlice = value;
 		else if(key == "iop_rate") settings.iopRate = value;
@@ -314,6 +315,15 @@ namespace
 		else if(key == "iop_batch") CPS2VM::g_iopBatchSlices = std::max(1, static_cast<int>(value));
 		else if(key == "iop_lag") CPS2VM::g_iopMaxLagSlices = std::max(2, static_cast<int>(value));
 		else if(key == "iop_inline_drain") CPS2VM::g_iopInlineDrain = value != 0;
+		else if(key == "tier2") Tier2::g_settings.mode = (value == 2) ? Tier2::MODE_INTERPRET : (value != 0) ? Tier2::MODE_NATIVE : Tier2::MODE_OFF;
+		else if(key == "tier2_eager") Tier2::g_settings.eager = value != 0;
+		else if(key == "tier2_hot") CEmuSession::g_tier2HotSamples = std::max(1, static_cast<int>(value));
+		else if(key == "tier2_blocks") Tier2::g_settings.maxBlocks = std::max(1, static_cast<int>(value));
+		else if(key == "tier2_regs") Tier2::g_settings.maxRegisters = static_cast<uint32>(std::max(0, static_cast<int>(value)));
+		else if(key == "tier2_lo") Tier2::g_settings.nativeLow = static_cast<uint32>(value);
+		else if(key == "tier2_hi") Tier2::g_settings.nativeHigh = static_cast<uint32>(value);
+		else if(key == "tier2_dump") Tier2::g_settings.dumpPath = (value != 0) ? "ux0:data/VitaPS2/tier2ir.txt" : nullptr;
+		else if(key == "tier2_depth") Tier2::g_settings.maxCallDepth = std::max(0, static_cast<int>(value));
 		else if(key == "iop_spin_us") CPS2VM::g_iopSpinUs = std::max(0, static_cast<int>(value));
 		else if(key == "ee_stay_in_slice") settings.eeStayInSlice = value != 0;
 		else if(key == "threaded_spu") settings.threadedSpu = value != 0;
@@ -687,7 +697,7 @@ namespace
 				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop");
 				//The IOP thread's sections (iop_thread)
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",iopt_%s", EmuProfile::GetSectionName(i));
-				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms");
+				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined");
 				std::fprintf(perfFile, "\n");
 			}
 		}
@@ -1228,6 +1238,16 @@ namespace
 							eeHotMovie = true;
 							session->ResetEeHotspots();
 						}
+						//Tier 2 report (regions, instructions left to the JIT), every 10 seconds
+						static uint32_t tier2Seconds = 0;
+						if((Tier2::g_settings.mode != Tier2::MODE_OFF) && ((++tier2Seconds % 10) == 0))
+						{
+							if(FILE* stops = std::fopen("ux0:data/VitaPS2/tier2.txt", "w"))
+							{
+								Tier2::WriteStops(stops);
+								std::fclose(stops);
+							}
+						}
 						if(eeHotMovie && ((++eeHotSeconds % 10) == 0))
 						{
 							if(FILE* hot = std::fopen("ux0:data/VitaPS2/eehot.txt", "w"))
@@ -1398,6 +1418,10 @@ namespace
 								else std::fprintf(perfFile, ",%llu", static_cast<unsigned long long>(delta));
 								lastTimings[i] = timings[i];
 							}
+							//Tier 2 (totals)
+							const auto& t2 = Tier2::g_stats;
+							std::fprintf(perfFile, ",%u,%u,%llu,%llu,%llu,%u", t2.regions, t2.failed, static_cast<unsigned long long>(t2.guestInstructions),
+							             static_cast<unsigned long long>(t2.codeBytes / 1024), static_cast<unsigned long long>(t2.compileUs / 1000), t2.inlinedCalls);
 						}
 						std::fprintf(perfFile, "\n");
 						std::fflush(perfFile);

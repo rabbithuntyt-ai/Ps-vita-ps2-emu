@@ -20,6 +20,7 @@
 #include "ee/COP_VU.h"
 #include "ee/MA_EE.h"
 #include "ee/EeBasicBlock.h"
+#include "ee/Tier2.h"
 #include "MipsJitter.h"
 #include "MemStream.h"
 #include "Jitter_CodeGen_AArch32.h"
@@ -36,6 +37,7 @@ int main(int argc, char** argv)
 	std::string outDir;
 	bool chained = true;
 	bool regions = false;
+	bool tier2 = false;
 	uint32 findStart = 0, findEnd = 0;
 	std::vector<uint32> addresses;
 	for(int i = 2; i < argc; i++)
@@ -43,6 +45,7 @@ int main(int argc, char** argv)
 		if(!std::strcmp(argv[i], "--out") && (i + 1 < argc)) outDir = argv[++i];
 		else if(!std::strcmp(argv[i], "--unchained")) chained = false;
 		else if(!std::strcmp(argv[i], "--region")) regions = true; //compile a tier 2 region where there is one
+		else if(!std::strcmp(argv[i], "--tier2")) tier2 = true;    //a Tier2.h region: its IR (and ARM code in TIER2_DUMP)
 		else if(!std::strcmp(argv[i], "--find-regions") && (i + 2 < argc))
 		{
 			findStart = static_cast<uint32>(std::strtoul(argv[++i], nullptr, 16));
@@ -110,6 +113,14 @@ int main(int argc, char** argv)
 	for(uint32 start : addresses)
 	{
 		start &= ~3U;
+		if(tier2)
+		{
+			CTier2Block block(ee, start, BLOCK_CATEGORY_PS2_EE);
+			bool built = block.Build();
+			std::printf("tier2 %08X: %s\n", start, built ? "built" : "not built");
+			block.Dump(stdout);
+			continue;
+		}
 		if(regions)
 		{
 			auto parts = CEeRegionBlock::Find(ee, start, 32, 256);
