@@ -120,7 +120,7 @@ static void RunCopyBench()
 		     other.join();
 	     }},
 	};
-	if(FILE* out = std::fopen("ux0:data/VitaPS2/copybench.txt", "w"))
+	if(FILE* out = std::fopen(VITAPS2_DATA_DIR "/copybench.txt", "w"))
 	{
 		for(const auto& method : methods)
 		{
@@ -138,17 +138,17 @@ static void RunCopyBench()
 
 namespace
 {
-	constexpr const char* DATA_PATH = "ux0:data/VitaPS2";
-	constexpr const char* GAMES_PATH = "ux0:data/VitaPS2/games";
-	constexpr const char* SETTINGS_PATH = "ux0:data/VitaPS2/settings";
-	constexpr const char* STATES_PATH = "ux0:data/VitaPS2/states";
-	constexpr const char* JIT_CACHE_PATH = "ux0:data/VitaPS2/jitcache";
-	constexpr const char* LOG_PATH = "ux0:data/VitaPS2/log.txt";
-	constexpr const char* BENCHMARK_PATH = "ux0:data/VitaPS2/benchmark.txt";
+	constexpr const char* DATA_PATH = VITAPS2_DATA_DIR "";
+	constexpr const char* GAMES_PATH = VITAPS2_DATA_DIR "/games";
+	constexpr const char* SETTINGS_PATH = VITAPS2_DATA_DIR "/settings";
+	constexpr const char* STATES_PATH = VITAPS2_DATA_DIR "/states";
+	constexpr const char* JIT_CACHE_PATH = VITAPS2_DATA_DIR "/jitcache";
+	constexpr const char* LOG_PATH = VITAPS2_DATA_DIR "/log.txt";
+	constexpr const char* BENCHMARK_PATH = VITAPS2_DATA_DIR "/benchmark.txt";
 	// Scripted runs (e.g. from Vita Lab): see ReadAutostart.
-	constexpr const char* AUTOSTART_PATH = "ux0:data/VitaPS2/autostart.txt";
-	constexpr const char* AUTOSTART_DONE_PATH = "ux0:data/VitaPS2/autostart.done";
-	constexpr const char* PERF_PATH = "ux0:data/VitaPS2/perf.csv";
+	constexpr const char* AUTOSTART_PATH = VITAPS2_DATA_DIR "/autostart.txt";
+	constexpr const char* AUTOSTART_DONE_PATH = VITAPS2_DATA_DIR "/autostart.done";
+	constexpr const char* PERF_PATH = VITAPS2_DATA_DIR "/perf.csv";
 	uint64_t g_presentUs = 0; //frontend frame drawing + vglSwapBuffers (perf.csv)
 
 	// autostart.txt boots a game directly, for scripted tests:
@@ -322,7 +322,7 @@ namespace
 		else if(key == "tier2_regs") Tier2::g_settings.maxRegisters = static_cast<uint32>(std::max(0, static_cast<int>(value)));
 		else if(key == "tier2_lo") Tier2::g_settings.nativeLow = static_cast<uint32>(value);
 		else if(key == "tier2_hi") Tier2::g_settings.nativeHigh = static_cast<uint32>(value);
-		else if(key == "tier2_dump") Tier2::g_settings.dumpPath = (value != 0) ? "ux0:data/VitaPS2/tier2ir.txt" : nullptr;
+		else if(key == "tier2_dump") Tier2::g_settings.dumpPath = (value != 0) ? VITAPS2_DATA_DIR "/tier2ir.txt" : nullptr;
 		else if(key == "tier2_max") Tier2::g_settings.maxRegions = static_cast<uint32>(value);
 		else if(key == "tier2_verify")
 		{
@@ -339,6 +339,7 @@ namespace
 		else if(key == "movie_zero_copy") CMpegHle::g_zeroCopy = value != 0;
 		else if(key == "movie_async_copy") CMpegHle::g_asyncCopy = value != 0;
 		else if(key == "picture_textures") CGSH_Hardware::g_pictureTextures = value != 0;
+		else if(key == "content_textures") CGSH_Hardware::g_contentTextures = value != 0;
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
 	}
 
@@ -704,15 +705,16 @@ namespace
 				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop");
 				//The IOP thread's sections (iop_thread)
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",iopt_%s", EmuProfile::GetSectionName(i));
-				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined");
+				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts");
 				std::fprintf(perfFile, "\n");
 			}
 		}
 		const uint64_t runStart = sceKernelGetProcessTimeWide();
-		constexpr const char* GS_DIAG_PATH = "ux0:data/VitaPS2/gsdiag.txt";
+		constexpr const char* GS_DIAG_PATH = VITAPS2_DATA_DIR "/gsdiag.txt";
 		int gsDiagFlips = 0;
 		uint32_t gsDiagAfterSeconds = 0;
-		std::vector<std::pair<uint64_t, uint32_t>> padScript; //autostart: time (us), button held for the game
+		struct PadScriptEntry { uint64_t start, end; uint32_t buttons; };
+		std::vector<PadScriptEntry> padScript; //autostart: times (us), buttons held for the game
 		uint32_t dumpTargetsAtSeconds = 0; //autostart: every render target to ux0:data/VitaPS2/frames/ at this second
 		uint32_t saveStateAtSeconds = 0; //autostart: save a state at this second, to retest a scene quickly
 		uint32_t eeHotAfterSeconds = 0; //autostart: EE hotspots (eehot.txt) sampled from this second on
@@ -855,7 +857,7 @@ namespace
 				// Native movie decoding (libmpeg 2.2 sceMpegGetPicture), decoder on
 				// core 2 (VU1 has little to do while the EE does not decode).
 				uint32_t mpegCoreMask = 0x10000u << std::min<uint32_t>(settings.mpegCore, 2);
-				mpegHle.Enable(session->GetVm()->m_ee->m_ram, "ux0:data/VitaPS2/mpeghle.txt", [mpegCoreMask]() {
+				mpegHle.Enable(session->GetVm()->m_ee->m_ram, VITAPS2_DATA_DIR "/mpeghle.txt", [mpegCoreMask]() {
 					sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mpegCoreMask);
 					ThreadProfiler::RegisterCurrentThread("MPEG decoder");
 				}, [copyCoreMask = 0x10000u << std::min<uint32_t>(settings.mpegCopyCore, 2), copyPriority = static_cast<int>(settings.mpegCopyPriority)]() {
@@ -879,7 +881,7 @@ namespace
 					if(key == "mpeg_shadow")
 					{
 						// Silent Hill 2 (SLUS-20228): sceMpeg context at 0x1213080 (docs/HLE_MPEG.md).
-						if(value == "1") mpegShadow.Enable(session->GetVm()->m_ee->m_ram, 0x1213080, "ux0:data/VitaPS2/mpegshadow.txt");
+						if(value == "1") mpegShadow.Enable(session->GetVm()->m_ee->m_ram, 0x1213080, VITAPS2_DATA_DIR "/mpegshadow.txt");
 						continue;
 					}
 					if(key == "gs_debug")
@@ -899,7 +901,9 @@ namespace
 					}
 					if(key == "pad_script")
 					{
-						// seconds:button,seconds:button...: held 400 ms for the game.
+						// seconds:button[:ms],...: held 400 ms (or ms) for the game. Buttons:
+						// start select cross circle square triangle up down left right l1 r1 l2 r2,
+						// lup ldown lleft lright (left stick pushed fully), several joined with '+'.
 						size_t position = 0;
 						while(position < value.size())
 						{
@@ -910,11 +914,34 @@ namespace
 							size_t colon = entry.find(':');
 							if(colon == std::string::npos) continue;
 							std::string name = entry.substr(colon + 1);
-							static const std::pair<const char*, uint32_t> names[] = {{"start", SCE_CTRL_START}, {"select", SCE_CTRL_SELECT}, {"cross", SCE_CTRL_CROSS}, {"circle", SCE_CTRL_CIRCLE},
-							    {"square", SCE_CTRL_SQUARE}, {"triangle", SCE_CTRL_TRIANGLE}, {"up", SCE_CTRL_UP}, {"down", SCE_CTRL_DOWN}, {"left", SCE_CTRL_LEFT}, {"right", SCE_CTRL_RIGHT}, {"l1", SCE_CTRL_L1}, {"r1", SCE_CTRL_R1}};
-							for(const auto& button : names)
+							uint64_t holdUs = 400000;
+							size_t colon2 = name.find(':');
+							if(colon2 != std::string::npos)
 							{
-								if(name == button.first) padScript.emplace_back(static_cast<uint64_t>(std::atoi(entry.c_str())) * 1000000ULL, button.second);
+								holdUs = static_cast<uint64_t>(std::atoi(name.c_str() + colon2 + 1)) * 1000ULL;
+								name.resize(colon2);
+							}
+							uint32_t mask = 0;
+							static const std::pair<const char*, uint32_t> names[] = {{"start", SCE_CTRL_START}, {"select", SCE_CTRL_SELECT}, {"cross", SCE_CTRL_CROSS}, {"circle", SCE_CTRL_CIRCLE},
+							    {"square", SCE_CTRL_SQUARE}, {"triangle", SCE_CTRL_TRIANGLE}, {"up", SCE_CTRL_UP}, {"down", SCE_CTRL_DOWN}, {"left", SCE_CTRL_LEFT}, {"right", SCE_CTRL_RIGHT}, {"l1", SCE_CTRL_L1}, {"r1", SCE_CTRL_R1},
+							    {"l2", SCE_CTRL_L2}, {"r2", SCE_CTRL_R2}, {"lup", CPH_Vita::INJECT_LSTICK_UP}, {"ldown", CPH_Vita::INJECT_LSTICK_DOWN},
+							    {"lleft", CPH_Vita::INJECT_LSTICK_LEFT}, {"lright", CPH_Vita::INJECT_LSTICK_RIGHT}};
+							size_t part = 0;
+							while(part <= name.size())
+							{
+								size_t plus = name.find('+', part);
+								if(plus == std::string::npos) plus = name.size();
+								std::string one = name.substr(part, plus - part);
+								part = plus + 1;
+								for(const auto& button : names)
+								{
+									if(one == button.first) mask |= button.second;
+								}
+							}
+							if(mask != 0)
+							{
+								uint64_t startUs = static_cast<uint64_t>(std::atof(entry.c_str()) * 1000000.0);
+								padScript.push_back({startUs, startUs + holdUs, mask});
 							}
 						}
 						continue;
@@ -936,7 +963,7 @@ namespace
 					}
 					if(key == "mpeg_dump_mb")
 					{
-						mpegHle.SetInputDump("ux0:data/VitaPS2/mpegstream.bin", static_cast<size_t>(std::atoi(value.c_str())) * 1024 * 1024);
+						mpegHle.SetInputDump(VITAPS2_DATA_DIR "/mpegstream.bin", static_cast<size_t>(std::atoi(value.c_str())) * 1024 * 1024);
 						continue;
 					}
 					if(key == "jit_limit_kb")
@@ -998,7 +1025,7 @@ namespace
 				uint32_t injected = 0;
 				for(const auto& entry : padScript)
 				{
-					if((elapsed >= entry.first) && (elapsed < entry.first + 400000)) injected |= entry.second;
+					if((elapsed >= entry.start) && (elapsed < entry.end)) injected |= entry.buttons;
 				}
 				pad->SetInjectedButtons(injected);
 			}
@@ -1008,16 +1035,16 @@ namespace
 			if(dumpTargetsAtSeconds && (sceKernelGetProcessTimeWide() - runStart >= dumpTargetsAtSeconds * 1000000ULL))
 			{
 				dumpTargetsAtSeconds = 0;
-				sceIoMkdir("ux0:data/VitaPS2/frames", 0777);
-				if(auto gs = GetHardwareGs(session.get())) gs->RequestTargetDump("ux0:data/VitaPS2/frames");
+				sceIoMkdir(VITAPS2_DATA_DIR "/frames", 0777);
+				if(auto gs = GetHardwareGs(session.get())) gs->RequestTargetDump(VITAPS2_DATA_DIR "/frames");
 			}
 			if(frameDumpEverySeconds && (sceKernelGetProcessTimeWide() - runStart >= nextFrameDump))
 			{
 				uint64_t seconds = (sceKernelGetProcessTimeWide() - runStart) / 1000000ULL;
 				nextFrameDump = (seconds + frameDumpEverySeconds) * 1000000ULL;
-				sceIoMkdir("ux0:data/VitaPS2/frames", 0777);
+				sceIoMkdir(VITAPS2_DATA_DIR "/frames", 0777);
 				char path[96];
-				std::snprintf(path, sizeof(path), "ux0:data/VitaPS2/frames/f_%04u.ppm", static_cast<unsigned int>(seconds));
+				std::snprintf(path, sizeof(path), VITAPS2_DATA_DIR "/frames/f_%04u.ppm", static_cast<unsigned int>(seconds));
 				if(auto gs = GetHardwareGs(session.get())) gs->RequestFrameDump(path);
 			}
 			if(gsDiagFlips && (sceKernelGetProcessTimeWide() - runStart >= gsDiagAfterSeconds * 1000000ULL))
@@ -1030,7 +1057,7 @@ namespace
 				std::printf("autostart: %u seconds done\n", autostart->seconds);
 				// The EE's registers at the end (test programs leave a checksum
 				// there: tools/vita_jit_fuzz.sh compares it with a PC run).
-				if(FILE* gprs = std::fopen("ux0:data/VitaPS2/eegprs.txt", "w"))
+				if(FILE* gprs = std::fopen(VITAPS2_DATA_DIR "/eegprs.txt", "w"))
 				{
 					const auto& state = session->GetVm()->m_ee->m_EE.m_State;
 					std::fprintf(gprs, "EE s6 %08X s7 %08X\npc %08X\n", state.nGPR[22].nV0, state.nGPR[23].nV0, state.nPC);
@@ -1249,7 +1276,7 @@ namespace
 						static uint32_t tier2Seconds = 0;
 						if((Tier2::g_settings.mode != Tier2::MODE_OFF) && ((++tier2Seconds % 10) == 0))
 						{
-							if(FILE* stops = std::fopen("ux0:data/VitaPS2/tier2.txt", "w"))
+							if(FILE* stops = std::fopen(VITAPS2_DATA_DIR "/tier2.txt", "w"))
 							{
 								Tier2::WriteStops(stops);
 								std::fclose(stops);
@@ -1257,17 +1284,17 @@ namespace
 						}
 						if(eeHotMovie && ((++eeHotSeconds % 10) == 0))
 						{
-							if(FILE* hot = std::fopen("ux0:data/VitaPS2/eehot.txt", "w"))
+							if(FILE* hot = std::fopen(VITAPS2_DATA_DIR "/eehot.txt", "w"))
 							{
 								session->WriteEeHotspots(hot, 80);
 								std::fclose(hot);
 							}
-							if(FILE* hot = std::fopen("ux0:data/VitaPS2/iophot.txt", "w"))
+							if(FILE* hot = std::fopen(VITAPS2_DATA_DIR "/iophot.txt", "w"))
 							{
 								session->WriteIopHotspots(hot, 80);
 								std::fclose(hot);
 							}
-							if(FILE* calls = std::fopen("ux0:data/VitaPS2/syscalls.txt", "w"))
+							if(FILE* calls = std::fopen(VITAPS2_DATA_DIR "/syscalls.txt", "w"))
 							{
 								for(unsigned int i = 0; i < 128; i++)
 								{
@@ -1281,7 +1308,7 @@ namespace
 								}
 								std::fclose(calls);
 							}
-							if(FILE* calls = std::fopen("ux0:data/VitaPS2/iopcalls.txt", "w"))
+							if(FILE* calls = std::fopen(VITAPS2_DATA_DIR "/iopcalls.txt", "w"))
 							{
 								for(const auto& entry : CIopBios::g_callCounts) std::fprintf(calls, "%s %u\n", entry.first.c_str(), entry.second);
 								//Their parts: the IOPcounters, IOPbios and IOPdma profiler sections
@@ -1303,19 +1330,19 @@ namespace
 							for(const auto& [key, value] : autostart->settings)
 							{
 								if((key != "dump_ee_ram") || (value != "1")) continue;
-								if(FILE* dump = std::fopen("ux0:data/VitaPS2/eeram.bin", "wb"))
+								if(FILE* dump = std::fopen(VITAPS2_DATA_DIR "/eeram.bin", "wb"))
 								{
 									std::fwrite(session->GetVm()->m_ee->m_ram, 1, PS2::EE_RAM_SIZE, dump);
 									std::fclose(dump);
 								}
-								if(FILE* dump = std::fopen("ux0:data/VitaPS2/iopram.bin", "wb"))
+								if(FILE* dump = std::fopen(VITAPS2_DATA_DIR "/iopram.bin", "wb"))
 								{
 									std::fwrite(session->GetVm()->m_iop->m_ram, 1, PS2::IOP_RAM_SIZE, dump);
 									std::fclose(dump);
 								}
 								// The MPEG input path at the same moment: DMA4 (to IPU),
 								// DMA3 (from IPU) and the IPU registers.
-								if(FILE* regs = std::fopen("ux0:data/VitaPS2/eeregs.txt", "w"))
+								if(FILE* regs = std::fopen(VITAPS2_DATA_DIR "/eeregs.txt", "w"))
 								{
 									auto& ee = *session->GetVm()->m_ee;
 									static const uint32_t dmacRegs[] = {0x1000B000, 0x1000B010, 0x1000B020, 0x1000B030, 0x1000B400, 0x1000B410, 0x1000B420, 0x1000B430, 0x1000E010};
@@ -1429,6 +1456,14 @@ namespace
 							const auto& t2 = Tier2::g_stats;
 							std::fprintf(perfFile, ",%u,%u,%llu,%llu,%llu,%u", t2.regions, t2.failed, static_cast<unsigned long long>(t2.guestInstructions),
 							             static_cast<unsigned long long>(t2.codeBytes / 1024), static_cast<unsigned long long>(t2.compileUs / 1000), t2.inlinedCalls);
+							//GPU thread time by part (ms, CGSH_Hardware::GPU_PART), separated by ';'
+							static uint64_t lastParts[CGSH_Hardware::GPU_PART_COUNT] = {};
+							const auto& gpuParts = CGSH_Hardware::GetTimes().partUs;
+							for(unsigned int i = 0; i < CGSH_Hardware::GPU_PART_COUNT; i++)
+							{
+								std::fprintf(perfFile, "%c%.1f", (i == 0) ? ',' : ';', (gpuParts[i] - lastParts[i]) / 1000.0);
+								lastParts[i] = gpuParts[i];
+							}
 						}
 						std::fprintf(perfFile, "\n");
 						std::fflush(perfFile);
@@ -1711,7 +1746,7 @@ int main()
 	std::printf("VitaPS2 %s starting\n", VITAPS2_BUILD);
 	// Aborts (uncaught exceptions) leave no crash dump: record why.
 	std::set_terminate([]() {
-		if(FILE* file = std::fopen("ux0:data/VitaPS2/crash.txt", "w"))
+		if(FILE* file = std::fopen(VITAPS2_DATA_DIR "/crash.txt", "w"))
 		{
 			const char* what = "no exception";
 			if(auto exception = std::current_exception())
@@ -1782,8 +1817,8 @@ int main()
 	std::printf("free memory before vitaGL: user %u KB, cdram %u KB, phycont %u KB\n", memInfo.size_user / 1024,
 	            memInfo.size_cdram / 1024, memInfo.size_phycont / 1024);
 	// Compiled fixed-function shaders are cached so they are only built once.
-	sceIoMkdir("ux0:data/VitaPS2/shaders", 0777);
-	vglSetShaderCachePath("ux0:data/VitaPS2/shaders/");
+	sceIoMkdir(VITAPS2_DATA_DIR "/shaders", 0777);
+	vglSetShaderCachePath(VITAPS2_DATA_DIR "/shaders/");
 	vglInitExtended(0x80000, SCREEN_WIDTH, SCREEN_HEIGHT, GL_RAM_LEFT_FREE, SCE_GXM_MULTISAMPLE_NONE);
 	vglWaitVblankStart(GL_TRUE);
 	if(!Gfx::Init())

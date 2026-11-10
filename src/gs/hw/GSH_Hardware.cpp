@@ -37,6 +37,25 @@ namespace
 		uint64 m_start;
 	};
 
+	// Adds the scope's time to one part (parts may nest; each counts its own time in full).
+	class CPartTimer
+	{
+	public:
+		explicit CPartTimer(int part)
+		    : m_part(part)
+		    , m_start(NowUs())
+		{
+		}
+		~CPartTimer()
+		{
+			CGSH_Hardware::GetTimes().partUs[m_part] += NowUs() - m_start;
+		}
+
+	private:
+		int m_part;
+		uint64 m_start;
+	};
+
 	bool IsPsm16(uint32 psm)
 	{
 		return (psm == CGSHandler::PSMCT16) || (psm == CGSHandler::PSMCT16S);
@@ -459,6 +478,7 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 
 void CGSH_Hardware::AllocateTargetGl(TARGET& target)
 {
+	CPartTimer timer(GPU_PART_TARGET_CREATE);
 	glGenTextures(1, &target.colorTexture);
 	glBindTexture(GL_TEXTURE_2D, target.colorTexture);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -595,6 +615,7 @@ void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 wi
 	bool is24 = GsMemory::IsPsm24(target.psm);
 	m_transferPixels.resize(width * height);
 	uint32* pixels = m_transferPixels.data();
+	uint64 swizzleStart = NowUs();
 	for(uint32 y = 0; y < height; y++)
 	{
 		uint32 rowBase = surface.RowBase(y0 + y);
@@ -620,11 +641,13 @@ void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 wi
 			}
 		}
 	}
+	GetTimes().partUs[GPU_PART_UPLOAD_SWIZZLE] += NowUs() - swizzleStart;
 	glBindTexture(GL_TEXTURE_2D, target.colorTexture);
 	uint64 glStart = NowUs();
 	glTexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 	m_depthSceneValid = false;
 	GetTimes().uploadGlUs += NowUs() - glStart;
+	GetTimes().partUs[GPU_PART_UPLOAD_GL] += NowUs() - glStart;
 	GetTimes().uploadPixels += width * height;
 	m_stats.targetUploads++;
 	m_stats.uploadedPixels += width * height;
@@ -688,6 +711,8 @@ void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEn
 	glReadPixels(x0, y0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 	m_depthSceneValid = false;
 	GetTimes().downloadGlUs += NowUs() - glStart;
+	GetTimes().partUs[GPU_PART_DOWNLOAD_PIXELS] += NowUs() - glStart;
+	CPartTimer swizzleTimer(GPU_PART_DOWNLOAD_SWIZZLE);
 	GetTimes().downloadPixels += width * height;
 
 	GS_SURFACE surface;
@@ -942,6 +967,7 @@ void CGSH_Hardware::ProcessLocalToLocalTransfer()
 	uint32 height = trxReg.nRRH;
 	if((width != 0) && (height != 0))
 	{
+		CPartTimer timer(GPU_PART_LOCAL_COPY);
 		std::vector<uint32> pixels(width * height);
 		for(uint32 y = 0; y < height; y++)
 			for(uint32 x = 0; x < width; x++)
@@ -1056,6 +1082,7 @@ void CGSH_Hardware::BindTexture()
 			glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
 			uint32 copyW = std::min(s.tw, target->width - std::min(offsetX, target->width));
 			uint32 copyH = std::min(s.th, target->height - offsetY);
+			CPartTimer copyTimer(GPU_PART_FEEDBACK_COPY);
 			glCopyTexSubImage2D(GL_TEXTURE_2D, 0, offsetX, offsetY, offsetX, offsetY, copyW, copyH);
 			m_depthSceneValid = false;
 			texture = m_feedbackTexture;
@@ -1109,11 +1136,44 @@ void CGSH_Hardware::BindTexture()
 	bool alphaTexture = (s.tpsm == CGSHandler::PSMT8H) || (s.tpsm == CGSHandler::PSMT4HL) || (s.tpsm == CGSHandler::PSMT4HH);
 	DownloadTargetsOverlapping(firstPage * 8192, pageCount * 8192, false, alphaTexture);
 
+	uint64 lookupStart = NowUs();
 	auto texture = m_textureCache.Get(key);
+	GetTimes().partUs[GPU_PART_TEX_LOOKUP] += NowUs() - lookupStart;
 	auto regionU = ResolveWrap(s.wms, s.minu, s.maxu, s.tw);
 	auto regionV = ResolveWrap(s.wmt, s.minv, s.maxv, s.th);
 	uint64 regionKey = static_cast<uint64>(regionU.origin) | (static_cast<uint64>(regionU.size) << 16) |
 	                   (static_cast<uint64>(regionV.origin) << 32) | (static_cast<uint64>(regionV.size) << 48);
+	// Games stream their textures through a few slots of GS memory (Resident Evil 4:
+	// about 130 small CLUT textures per frame through 0x348000-0x3FE000), so the same
+	// texture comes back at the same address with other textures in between, and an
+	// entry per address is decoded and uploaded again each time. Textures whose pages
+	// hash the same (same format, size, CLUT and TEXA) share one GL texture instead.
+	uint64 contentHash = g_contentTextures ? texture->GetContentHash() : 0;
+	uint64 contentKey = 0;
+	if(contentHash != 0)
+	{
+		uint64 parts[6] = {contentHash, key.clutHash, static_cast<uint64>(key.tpsm) | (static_cast<uint64>(key.tbw) << 8) | (static_cast<uint64>(key.tbp & 0x1FFF) << 16) | (static_cast<uint64>(key.cpsm) << 32) | (static_cast<uint64>(key.csa) << 40),
+		                   static_cast<uint64>(key.tw) | (static_cast<uint64>(key.th) << 16), key.texa, 0};
+		contentKey = XXH3_64bits(parts, sizeof(parts)) | (1ULL << 63); //unique ids never reach bit 63
+		auto found = m_glTextures.find({contentKey, regionKey});
+		if((found != m_glTextures.end()) && found->second.texture)
+		{
+			m_stats.contentTextureHits++;
+			GetTimes().partUs[GPU_PART_CONTENT_HITS] += 1000;
+			found->second.lastUse = ++m_useCounter;
+			glBindTexture(GL_TEXTURE_2D, found->second.texture);
+			GLint filter = s.bilinear ? GL_LINEAR : GL_NEAREST;
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, regionU.wrap);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, regionV.wrap);
+			m_texScaleS = static_cast<float>(s.tw) / static_cast<float>(regionU.size);
+			m_texScaleT = static_cast<float>(s.th) / static_cast<float>(regionV.size);
+			m_texOffsetS = -static_cast<float>(regionU.origin) / static_cast<float>(regionU.size);
+			m_texOffsetT = -static_cast<float>(regionV.origin) / static_cast<float>(regionV.size);
+			return;
+		}
+	}
 	auto& glTexture = m_glTextures[{texture->GetUniqueId(), regionKey}];
 	// Movie pictures: rows the decoder's buffers hold go to GL from there, column by
 	// column (TextureCache::GetPictureBand); only the rows below are decoded.
@@ -1156,6 +1216,7 @@ void CGSH_Hardware::BindTexture()
 		uint64 decodeStart = NowUs();
 		texture->DecodeAll();
 		GetTimes().texDecodeUs += NowUs() - decodeStart;
+		GetTimes().partUs[GPU_PART_TEX_DECODE] += NowUs() - decodeStart;
 		if(!glTexture.texture) glGenTextures(1, &glTexture.texture);
 		glBindTexture(GL_TEXTURE_2D, glTexture.texture);
 		const void* texels = texture->Texels();
@@ -1174,8 +1235,32 @@ void CGSH_Hardware::BindTexture()
 		uint64 glStart = NowUs();
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, regionU.size, regionV.size, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
 		GetTimes().texGlUs += NowUs() - glStart;
+		GetTimes().partUs[GPU_PART_TEX_GL] += NowUs() - glStart;
 		glTexture.generation = texture->GetGeneration();
 		m_stats.textureUploads++;
+		if(contentKey != 0)
+		{
+			// Kept under its contents: the address entry's GL texture moves there (the
+			// address entry gets a new one next time, as draws queued earlier may still
+			// sample this one).
+			auto& contentTexture = m_glTextures[{contentKey, regionKey}];
+			if(contentTexture.texture) glDeleteTextures(1, &contentTexture.texture);
+			contentTexture = glTexture;
+			glTexture.texture = 0;
+			glTexture.generation = ~0U;
+			contentTexture.lastUse = ++m_useCounter;
+			glBindTexture(GL_TEXTURE_2D, contentTexture.texture);
+			GLint filter = s.bilinear ? GL_LINEAR : GL_NEAREST;
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, regionU.wrap);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, regionV.wrap);
+			m_texScaleS = static_cast<float>(s.tw) / static_cast<float>(regionU.size);
+			m_texScaleT = static_cast<float>(s.th) / static_cast<float>(regionV.size);
+			m_texOffsetS = -static_cast<float>(regionU.origin) / static_cast<float>(regionU.size);
+			m_texOffsetT = -static_cast<float>(regionV.origin) / static_cast<float>(regionV.size);
+			return;
+		}
 	}
 	glTexture.lastUse = ++m_useCounter;
 	glBindTexture(GL_TEXTURE_2D, glTexture.texture);
@@ -1196,7 +1281,7 @@ void CGSH_Hardware::BindTexture()
 	{
 		for(auto it = m_glTextures.begin(); it != m_glTextures.end();)
 		{
-			if((it->first.first != 0) && (m_useCounter - it->second.lastUse > 8192))
+			if((it->first.first != 0) && ((m_useCounter - it->second.lastUse > 8192) || !it->second.texture))
 			{
 				glDeleteTextures(1, &it->second.texture);
 				it = m_glTextures.erase(it);
@@ -1294,6 +1379,7 @@ void CGSH_Hardware::ApplyState()
 	m_depthSceneTarget = target;
 	if(!m_depthSceneValid && depthActive)
 	{
+		CPartTimer timer(GPU_PART_DEPTH_CLEAR);
 		glDisable(GL_SCISSOR_TEST);
 		glDepthMask(GL_TRUE);
 		glClearDepth(0.0);
@@ -1871,7 +1957,10 @@ void CGSH_Hardware::FlushBatch()
 		glTexCoordPointer(2, GL_FLOAT, stride, &m_batch[0].fogS);
 		glClientActiveTexture(GL_TEXTURE0);
 	}
-	glDrawArrays(m_batchMode, 0, static_cast<GLsizei>(m_batch.size()));
+	{
+		CPartTimer timer(GPU_PART_DRAW);
+		glDrawArrays(m_batchMode, 0, static_cast<GLsizei>(m_batch.size()));
+	}
 	if(m_alphaPass)
 	{
 		glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);

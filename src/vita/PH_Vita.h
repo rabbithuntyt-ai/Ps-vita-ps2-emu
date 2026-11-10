@@ -29,6 +29,15 @@ public:
 	{
 		m_injectedButtons = buttons;
 	}
+	// Scripted left stick directions, in the injected mask's top bits (not used by SceCtrl).
+	enum : uint32
+	{
+		INJECT_LSTICK_UP = 0x10000000,
+		INJECT_LSTICK_DOWN = 0x20000000,
+		INJECT_LSTICK_LEFT = 0x40000000,
+		INJECT_LSTICK_RIGHT = 0x80000000,
+		INJECT_STICKS = 0xF0000000,
+	};
 
 	// Called by the VM at every vblank.
 	void Update(uint8*) override;

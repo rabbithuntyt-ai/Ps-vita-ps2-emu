@@ -84,6 +84,12 @@ public:
 			return m_pageCount;
 		}
 
+		// Hash of the GS memory pages it was decoded from (0: too large to hash).
+		uint64 GetContentHash() const
+		{
+			return m_contentHash;
+		}
+
 		// Incremented whenever the decoded contents are thrown away.
 		uint32 GetGeneration() const
 		{
