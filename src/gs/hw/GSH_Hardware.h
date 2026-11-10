@@ -102,6 +102,7 @@ public:
 		uint32 targetsShrunk = 0;      //targets cut short for a new one in their unused rows
 		uint32 pointRects = 0;         //point runs uploaded as one rectangle
 		uint32 pointsDrawn = 0;        //points drawn as points
+		uint32 relayouts = 0;          //targets copied into a new layout on the GPU
 		uint32 contentTextureHits = 0; //textures found by content (see BindTexture)
 		uint32 redundantStateChanges = 0; //state rewrites that did not break batching //state changes with a blend GL cannot express
 	};
@@ -161,6 +162,7 @@ public:
 		GPU_PART_DEPTH_CLEAR,     //depth restores at new GPU scenes
 		GPU_PART_DRAW,            //glDrawArrays
 		GPU_PART_LOCAL_COPY,      //local to local transfers
+		GPU_PART_RELAYOUT,        //targets copied into a new layout on the GPU
 		GPU_PART_CONTENT_HITS,    //not a time: textures found by content, in thousandths (count = value)
 		GPU_PART_COUNT
 	};
@@ -201,7 +203,11 @@ public:
 	static inline bool g_pictureTextures = true;
 	static inline uint32 g_pictureUploadCount = 0;
 	// GL textures shared by textures with the same contents (content_textures, on by default)
-	static inline bool g_contentTextures = true; //movie pictures uploaded from their buffers (perf.csv gpu_pic_up)
+	static inline bool g_contentTextures = true;
+	// Targets copied into a new layout (buffer width) on the GPU (gpu_relayout, on by default)
+	static inline bool g_gpuRelayout = true;
+	// Copies of the target being drawn made by a draw, not glCopyTexSubImage2D (feedback_draw, on)
+	static inline bool g_feedbackDraw = true; //movie pictures uploaded from their buffers (perf.csv gpu_pic_up)
 
 public:
 	// Diagnostics: the picture of the next flip goes to this file (PPM). Same
@@ -283,6 +289,14 @@ private:
 	// starting some page rows into it.
 	TARGET* FindTargetContaining(uint32 ptr, uint32 fbw, uint32 psm, uint32 rows, uint32& offsetX, uint32& offsetY);
 	void DeleteTarget(TARGET&);
+	// Same pixel size, inside the new target's memory [start, end): copy instead of a read-back.
+	bool CanRelayout(const TARGET& old, const TARGET& target, uint32 start, uint32 end) const;
+	void RelayoutTarget(TARGET& old, TARGET& target);
+	// Textured quads (clip space positions, normalized texcoords) from a texture into a
+	// framebuffer, nothing but the color written; GL state is applied again afterwards.
+	void DrawCopyQuads(GLuint texture, GLuint framebuffer, uint32 width, uint32 height, const std::vector<BATCH_VERTEX>& quads);
+	// A rectangle of a texture to the same place of another of the same size.
+	void CopyRegionOnGpu(GLuint texture, uint32 width, uint32 height, GLuint framebuffer, uint32 x, uint32 y, uint32 w, uint32 h);
 	void AllocateTargetGl(TARGET&);
 	// Keeps only the first rows of a target (on the GPU, no read back).
 	void ShrinkTarget(TARGET&, uint32 rows);
@@ -381,6 +395,7 @@ private:
 	GLuint m_displayUploadTexture = 0;
 	GLuint m_fogRamp = 0;
 	GLuint m_feedbackTexture = 0;
+	GLuint m_feedbackFramebuffer = 0;
 	uint32 m_feedbackWidth = 0, m_feedbackHeight = 0;
 	std::vector<uint32> m_frameBuffer;
 	std::vector<uint32> m_transferPixels;

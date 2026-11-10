@@ -75,6 +75,7 @@
 #include "ee/IPU.h"
 #include "SH_Vita.h"
 #include "ThreadProfiler.h"
+#include "Vu1Stats.h"
 
 // Memory layout: the newlib heap holds the emulated PS2 (EE/IOP RAM, VU, GS
 // RAM, recompiler tables). The JIT code pool is a separate VM block allocated
@@ -340,6 +341,9 @@ namespace
 		else if(key == "movie_async_copy") CMpegHle::g_asyncCopy = value != 0;
 		else if(key == "picture_textures") CGSH_Hardware::g_pictureTextures = value != 0;
 		else if(key == "content_textures") CGSH_Hardware::g_contentTextures = value != 0;
+		else if(key == "gpu_relayout") CGSH_Hardware::g_gpuRelayout = value != 0;
+		else if(key == "feedback_draw") CGSH_Hardware::g_feedbackDraw = value != 0;
+		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
 	}
 
@@ -1280,6 +1284,15 @@ namespace
 							{
 								Tier2::WriteStops(stops);
 								std::fclose(stops);
+							}
+						}
+						static uint32_t vu1StatsSeconds = 0;
+						if(EmuProfile::g_vu1Programs.enabled && ((++vu1StatsSeconds % 10) == 0))
+						{
+							if(FILE* file = std::fopen(VITAPS2_DATA_DIR "/vu1prog.txt", "w"))
+							{
+								WriteVu1ProgramStats(file);
+								std::fclose(file);
 							}
 						}
 						if(eeHotMovie && ((++eeHotSeconds % 10) == 0))
