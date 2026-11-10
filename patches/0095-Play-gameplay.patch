@@ -1,7 +1,7 @@
 diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
 --- a/Source/EmuProfile.h
 +++ b/Source/EmuProfile.h
-@@ -122,6 +122,18 @@
+@@ -122,6 +122,19 @@
  		std::atomic<uint32> vewGiveUps{0}; //unused (kept for perf.csv layout)
  	};
  	inline VIF_STATS g_vif;
@@ -15,6 +15,7 @@ diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
 +		uint64 cycles[2048] = {};
 +		uint32 unfinished[2048] = {};
 +		uint64 timeUs[2048] = {};
++		uint64 replaced = 0; //programs done by CVpu::g_programReplacement
 +	};
 +	inline VU1_PROGRAM_STATS g_vu1Programs;
  	//UNPACK values requested by format (CMD & 0xF), and how many of those used a
@@ -183,7 +184,7 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
  	}
  	FlushPendingXgKicks();
  	RaisePendingInterrupt();
-@@ -219,25 +253,43 @@
+@@ -219,25 +253,52 @@
  void CVpu::FlushPendingXgKicks()
  {
  	if(!m_hasPendingKicks) return;
@@ -201,13 +202,17 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
 -		uint32 size = static_cast<uint32>(packet.size());
 -		uint32 processed = 0;
 -		while(processed < size)
+-		{
+-			uint32 consumed = m_gif.ProcessSinglePacket(packet.data(), size, processed, size, metadata);
+-			if(consumed == 0) break;
+-			processed += consumed;
 +		//Another path in the middle of a packet (VIF1 DIRECT or GIF DMA data split over
 +		//transfers): the GIF would take PATH1 data as the rest of that packet and stay on
 +		//PATH1 for good (Resident Evil 4 then hung: VIF1 DIRECT waiting, GIF on PATH1).
 +		//The packets wait; Execute tries again every slice.
 +		uint32 activePath = m_gif.GetActivePath();
 +		if((activePath != 0) && (activePath != 1)) return;
-+		std::vector<uint8>* packet = nullptr;
++		PENDING_KICK* kick = nullptr;
 +		{
 +			std::lock_guard<std::mutex> lock(m_kickMutex);
 +			if(m_pendingKicks.empty())
@@ -215,15 +220,21 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
 +				m_hasPendingKicks = false;
 +				return;
 +			}
-+			packet = &m_pendingKicks.front(); //a deque: the worker's pushes leave it in place
++			kick = &m_pendingKicks.front(); //a deque: the worker's pushes leave it in place
 +		}
++		if(kick->custom)
++		{
++			if(activePath != 0) return;
++			g_customKickSubmit(m_gif, kick->custom);
++			std::lock_guard<std::mutex> lock(m_kickMutex);
++			m_pendingKicks.pop_front();
++			continue;
++		}
++		auto* packet = &kick->packet;
 +		uint32 size = static_cast<uint32>(packet->size());
 +		bool refused = false;
 +		while(m_kickOffset < size)
- 		{
--			uint32 consumed = m_gif.ProcessSinglePacket(packet.data(), size, processed, size, metadata);
--			if(consumed == 0) break;
--			processed += consumed;
++		{
 +			uint32 consumed = m_gif.ProcessSinglePacket(packet->data(), size, m_kickOffset, size, metadata);
 +			if(consumed == 0)
 +			{
@@ -240,7 +251,16 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
  	}
  }
  
-@@ -404,7 +456,11 @@
+@@ -286,7 +347,7 @@
+ 	}
+ 	{
+ 		std::lock_guard<std::mutex> lock(m_kickMutex);
+-		m_pendingKicks.push_back(std::move(packet));
++		m_pendingKicks.push_back({std::move(packet), nullptr});
+ 		m_hasPendingKicks = true;
+ 	}
+ }
+@@ -404,7 +465,11 @@
  {
  	CLog::GetInstance().Print(LOG_NAME, "Starting microprogram execution at 0x%08X.\r\n", nAddress);
  	m_programStart = nAddress;
@@ -253,20 +273,45 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
  
  	m_ctx->m_State.nPC = nAddress;
  	m_ctx->m_State.pipeTime = 0;
-@@ -422,19 +478,25 @@
- 	m_vuState = VU_STATE_RUNNING;
- 	if(m_threaded)
+@@ -419,22 +484,51 @@
+ #endif
+ 
+ 	assert(m_vuState != VU_STATE_RUNNING);
+-	m_vuState = VU_STATE_RUNNING;
+-	if(m_threaded)
++	if(g_programReplacement && (m_number == 1))
  	{
--		{
++		if(auto custom = g_programReplacement(*this, nAddress))
+ 		{
 -			std::lock_guard<std::mutex> lock(m_workerMutex);
 -			m_workPending = true;
--		}
++			if(m_threaded)
++			{
++				{
++					std::lock_guard<std::mutex> lock(m_kickMutex);
++					m_pendingKicks.push_back({{}, std::move(custom)});
++					m_hasPendingKicks = true;
++				}
++				FlushPendingXgKicks();
++			}
++			else
++			{
++				g_customKickSubmit(m_gif, custom);
++			}
++			if(EmuProfile::g_vu1Programs.enabled) EmuProfile::g_vu1Programs.replaced++;
++			return;
+ 		}
 -		m_workerCondition.notify_one();
++	}
++	m_vuState = VU_STATE_RUNNING;
++	if(m_threaded)
++	{
 +		m_workPending.store(true, std::memory_order_release);
 +		WakeWorker();
  		return;
  	}
  	VuStateChanged(m_vuState);
++	if(g_programHook && (m_number == 1)) g_programHook(*this, nAddress, true);
 +	bool stats = EmuProfile::g_vu1Programs.enabled && (m_number == 1);
 +	auto statsStart = stats ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
  	for(unsigned int i = 0; i < 100; i++)
@@ -281,30 +326,42 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
 +		if(m_vuState == VU_STATE_RUNNING) EmuProfile::g_vu1Programs.unfinished[index]++;
 +		EmuProfile::g_vu1Programs.timeUs[index] += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - statsStart).count();
 +	}
++	if(g_programHook && (m_number == 1)) g_programHook(*this, nAddress, false);
  }
  
  void CVpu::InvalidateMicroProgram()
 diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
 --- a/Source/ee/Vpu.h
 +++ b/Source/ee/Vpu.h
-@@ -2,6 +2,7 @@
+@@ -2,7 +2,9 @@
  
  #include <atomic>
  #include <condition_variable>
 +#include <deque>
  #include <functional>
++#include <memory>
  #include <mutex>
  #include <thread>
-@@ -101,6 +102,8 @@
+ #include <vector>
+@@ -101,6 +103,17 @@
  	//are queued and sent to the GIF on the EE thread by Execute(), Sync() or
  	//FlushPendingXgKicks(). Switch only while the VU is idle.
  	void SetThreaded(bool, const std::function<void()>& workerInit = std::function<void()>());
 +	//Threaded VU1: the EE waits for the program when VIF1 does (vu1_wait_on_stall, on)
 +	static inline bool g_waitOnVifStall = true;
++	//Diagnostics (VU1, inline execution only): called before a program starts (true) and after
++	//it ran (false), with its start address. Used to check program replacements on the PC.
++	static inline std::function<void(CVpu&, uint32 address, bool before)> g_programHook;
++	//Program replacement (VU1): called on the EE thread when a program starts. When it does
++	//the program's work itself, it returns data for the GIF (non-null): the program does not
++	//run (the replacement leaves the VU state as the program would) and the data goes to
++	//g_customKickSubmit in order with the XGKICK packets, as the program's output would.
++	static inline std::function<std::shared_ptr<void>(CVpu&, uint32 address)> g_programReplacement;
++	static inline std::function<void(CGIF&, const std::shared_ptr<void>&)> g_customKickSubmit;
  	bool IsThreaded() const
  	{
  		return m_threaded;
-@@ -179,10 +182,21 @@
+@@ -179,10 +192,26 @@
  	std::mutex m_workerMutex;
  	std::condition_variable m_workerCondition;
  	std::condition_variable m_idleCondition;
@@ -323,7 +380,12 @@ diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
  	std::atomic<bool> m_stopWorker = false;
  	std::mutex m_kickMutex;
 -	std::vector<std::vector<uint8>> m_pendingKicks;
-+	std::deque<std::vector<uint8>> m_pendingKicks;
++	struct PENDING_KICK
++	{
++		std::vector<uint8> packet;
++		std::shared_ptr<void> custom; //from g_programReplacement
++	};
++	std::deque<PENDING_KICK> m_pendingKicks;
 +	uint32 m_kickOffset = 0; //EE thread: bytes of the first pending packet already sent
  	std::atomic<bool> m_hasPendingKicks = false;
  	std::atomic<bool> m_pendingInterrupt = false;

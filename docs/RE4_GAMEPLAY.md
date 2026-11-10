@@ -119,3 +119,19 @@ found by content); `vu1_stats=1` (Vita) / `--vu1-stats` (PC) writes `vu1prog.txt
 programs by start address: starts, cycles, unfinished, time); `pad_script` takes hold times
 (`T:button:ms`), `l2`, `r2`, `lup`/`ldown`/`lleft`/`lright` (left stick) and `a+b`; the PC
 runner takes `--load-state` (the Vita's states load there too).
+
+## State at the end of the 2026-11-10 session
+
+- `re4_vu1_hle=1`: the world program (0x1408 and the 0x00A0/0x00C0 stubs) runs without VU1,
+  drawn on the GS thread (CPU transform, exact against the JIT). Picture right on the PC. On the
+  Vita the GS thread is then the limit (~930 ms/s; world batches ~196 of it).
+- `gpu_world` (OFF by default, unfinished): world batches through a GLSL vertex shader. The
+  transform matches the CPU path (debug prints), w > 0 for every drawn vertex, no GL error,
+  but the draws produce no fragments on Mesa, even with the debug red override at the start
+  of the fragment shader, no culling and no depth test (`--gpu-world-debug 14`). Next to check:
+  the viewport/framebuffer bound at FlushWorld time (FlushWorld runs inside FlushBatch, which
+  can be called after another target was bound), uniform array upload (uM location 0), and
+  attribute 0 aliasing. Triangles touching the clip volume already go through the CPU clipper.
+- Still to do: skinning program (0x0498/0x0000/0x0050 -> 0x01D0) HLE, the depth-of-field/haze
+  read-backs (Z as PSMZ24 -> CT16 view of 0x310000 -> PSMT8H), the GS primitive path's cost.
+- Real game frame rate on the Vita in gameplay: ~1-3 per second.

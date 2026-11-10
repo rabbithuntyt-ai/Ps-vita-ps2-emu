@@ -74,6 +74,7 @@
 #include "ee/VuBasicBlock.h"
 #include "ee/VUShared.h"
 #include "ee/Vpu.h"
+#include "Re4Vu1Hle.h"
 #include "PS2VM.h"
 #include "ee/IPU.h"
 #include "SH_Vita.h"
@@ -351,8 +352,10 @@ namespace
 		else if(key == "vu1_spin_us") CVpu::g_workerSpinUs = value; //threaded VU1: poll this long before sleeping
 		else if(key == "vu_stall_check") CVuBasicBlock::g_combinedStallCheck = (value != 0); //one test of pending FMAC writes per block
 		else if(key == "vu_flag_tracking") VUShared::g_flagTracking = (value != 0); //flag reads after flags of the same block: one load
+		else if(key == "gpu_world") CGSH_Hardware::g_gpuWorld = value != 0;
 		else if(key == "vu_no_clamp") { if(value) CVuBasicBlock::g_extraCompileHints |= VUShared::COMPILEHINT_NO_CLAMPING; else CVuBasicBlock::g_extraCompileHints &= ~VUShared::COMPILEHINT_NO_CLAMPING; }
 		else if(key == "vu1_wait_on_stall") CVpu::g_waitOnVifStall = value != 0;
+		else if(key == "re4_vu1_hle") Re4Vu1Hle::Enable(value != 0); //RE4: world vertex program without VU1
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
 	}
@@ -1488,6 +1491,9 @@ namespace
 								lastParts[i] = gpuParts[i];
 							}
 							std::fprintf(perfFile, ";%u;%u", CGSH_Hardware::g_depthForceLoadTargets, CGSH_Hardware::g_depthForceLoadFailures); //depth force load: targets, failures
+							static uint64 lastWorldUs = 0;
+							std::fprintf(perfFile, ";%.1f", (CGSH_Primitives::g_worldUs - lastWorldUs) / 1000.0); //world batches (ms)
+							lastWorldUs = CGSH_Primitives::g_worldUs;
 							static uint32 lastGameFrames = 0;
 							std::fprintf(perfFile, ",%u", CGSH_Hardware::g_gameFrames - lastGameFrames); //game_fps
 							lastGameFrames = CGSH_Hardware::g_gameFrames;

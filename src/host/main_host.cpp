@@ -48,6 +48,8 @@
 #include "MpegHle.h"
 #include "ee/Vif.h"
 #include "Vu1Stats.h"
+#include "Vu1Verify.h"
+#include "Re4Vu1Hle.h"
 #include <algorithm>
 #include <atomic>
 #include <map>
@@ -265,6 +267,12 @@ int main(int argc, char** argv)
 			CVuBasicBlock::g_combinedStallCheck = false;
 			VUShared::g_flagTracking = false;
 		}
+		else if(!std::strcmp(argv[i], "--vu1-verify")) CVpu::g_programHook = Vu1Verify::Hook; //vu1verify.txt
+		else if(!std::strcmp(argv[i], "--vu1-hle")) Re4Vu1Hle::Enable(true); //RE4 world program without VU1
+#ifdef VITAPS2_HAS_GL
+		else if(!std::strcmp(argv[i], "--gpu-world-debug") && (i + 1 < argc)) CGSH_Hardware::g_gpuWorldDebug = std::atoi(argv[++i]);
+		else if(!std::strcmp(argv[i], "--no-gpu-world")) CGSH_Hardware::g_gpuWorld = false;
+#endif
 	}
 
 	const char* home = std::getenv("HOME");
@@ -448,6 +456,7 @@ int main(int argc, char** argv)
 		}
 		if(statsFile) std::fclose(statsFile);
 		mpegHle.Disable();
+		if(CVpu::g_programHook) Vu1Verify::Write("vu1verify.txt");
 		if(EmuProfile::g_vu1Programs.enabled)
 		{
 			if(std::FILE* file = std::fopen("vu1prog.txt", "w"))
@@ -564,8 +573,13 @@ int main(int argc, char** argv)
 		std::printf("vm frames: %llu, presented frames: %llu, %.2fs (%.1f fps)\n",
 		            (unsigned long long)vmFrames, (unsigned long long)presented, seconds, vmFrames / seconds);
 #ifdef VITAPS2_HAS_GL
-		if(hardware) std::printf("game frames (GPU renderer): %u\n", CGSH_Hardware::g_gameFrames);
+		if(hardware)
+			std::printf("game frames (GPU renderer): %u, primitives drawn: %u\n", CGSH_Hardware::g_gameFrames,
+			            static_cast<CGSH_Hardware*>(session.GetVm()->GetGSHandler())->GetPrimitiveCount());
 #endif
+		if(Re4Vu1Hle::IsEnabled())
+			std::printf("world batches on the CPU: %llu (%llu vertices, %llu clipped triangles), on the GPU: %llu batches %llu draws %llu fallbacks\n", (unsigned long long)CGSH_Primitives::g_worldBatches,
+			            (unsigned long long)CGSH_Primitives::g_worldVertices, (unsigned long long)CGSH_Primitives::g_worldClipped, (unsigned long long)CGSH_Hardware::g_gpuWorldBatches, (unsigned long long)CGSH_Hardware::g_gpuWorldDraws, (unsigned long long)CGSH_Hardware::g_gpuWorldFallbacks);
 
 		if(width == 0)
 		{
