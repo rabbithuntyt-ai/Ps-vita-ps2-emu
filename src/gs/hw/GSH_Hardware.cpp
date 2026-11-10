@@ -19,20 +19,62 @@ namespace
 	// depth memory, stencil memory) but only ever stores depth, never loads it. With the
 	// layout confirmed (the surface's depth pointer and the struct's depth memory agree),
 	// the surface is set to load at each scene.
-	bool EnableDepthForceLoad(GLuint renderbuffer)
+	bool LooksLikePointer(uint32 value)
 	{
-		auto base = reinterpret_cast<uint8*>(static_cast<uintptr_t>(renderbuffer));
-		if(renderbuffer < 0x80000000u) return false; //not a pointer: another vitaGL
-		if(!base) return false;
-		for(uint32 offset = 4; offset <= 8; offset += 4)
+		return (value >= 0x60000000u) && (value < 0xF0000000u) && ((value & 3) == 0);
+	}
+
+	// Writes the first bytes of vitaGL's renderbuffer and framebuffer objects once (layout check).
+	void DumpGlObjects(GLuint renderbuffer, GLuint framebuffer)
+	{
+		static bool dumped = false;
+		if(dumped || !CGSH_Hardware::g_glObjectDumpPath) return;
+		dumped = true;
+		if(FILE* file = std::fopen(CGSH_Hardware::g_glObjectDumpPath, "w"))
 		{
-			auto surface = reinterpret_cast<SceGxmDepthStencilSurface*>(base + offset);
-			void* depthData = surface->depthData;
-			if(!depthData) continue;
-			auto pointerField = *reinterpret_cast<SceGxmDepthStencilSurface**>(base + offset + sizeof(SceGxmDepthStencilSurface));
-			auto depthField = *reinterpret_cast<void**>(base + offset + sizeof(SceGxmDepthStencilSurface) + sizeof(void*));
-			if((depthField != depthData) || ((pointerField != surface) && (pointerField != nullptr))) continue;
-			//sceGxmDepthStencilSurfaceSetForceLoadMode / SetForceStoreMode set these bits (no import)
+			std::fprintf(file, "renderbuffer %08X framebuffer %08X\n", renderbuffer, framebuffer);
+			for(GLuint handle : {renderbuffer, framebuffer})
+			{
+				if(!LooksLikePointer(handle)) continue;
+				auto words = reinterpret_cast<const uint32*>(static_cast<uintptr_t>(handle));
+				for(int i = 0; i < 48; i++) std::fprintf(file, "%08X%s", words[i], ((i % 8) == 7) ? "\n" : " ");
+				std::fprintf(file, "\n");
+				// What its pointers into user memory point to
+				for(int i = 0; i < 48; i++)
+				{
+					if((words[i] < 0x81000000u) || (words[i] >= 0xA0000000u) || (words[i] & 3)) continue;
+					auto target = reinterpret_cast<const uint32*>(static_cast<uintptr_t>(words[i]));
+					std::fprintf(file, " [%d] -> %08X:", i, words[i]);
+					for(int j = 0; j < 12; j++) std::fprintf(file, " %08X", target[j]);
+					std::fprintf(file, "\n");
+				}
+			}
+			std::fclose(file);
+		}
+	}
+
+	// vitaGL keeps a pointer to the bound depth surface (SceGxmDepthStencilSurface) in its
+	// framebuffer object, pointing into the renderbuffer object; it stores depth but never
+	// loads it. Found by that pointer, the surface is set to force load and store (the bits
+	// sceGxmDepthStencilSurfaceSetForceLoadMode/SetForceStoreMode set).
+	bool EnableDepthForceLoad(GLuint renderbuffer, GLuint framebuffer)
+	{
+		DumpGlObjects(renderbuffer, framebuffer);
+		if(!LooksLikePointer(framebuffer)) return false;
+		auto words = reinterpret_cast<const uint32*>(static_cast<uintptr_t>(framebuffer));
+		for(int i = 0; i < 48; i++)
+		{
+			uint32 value = words[i];
+			if((value < 0x81000000u) || (value >= 0xA0000000u) || (value & 3)) continue;
+			// A depth surface: zlsControl, depth memory (GPU mapped), stencil memory or 0,
+			// background depth in [0, 1].
+			auto surface = reinterpret_cast<SceGxmDepthStencilSurface*>(static_cast<uintptr_t>(value));
+			uint32 depthData = static_cast<uint32>(reinterpret_cast<uintptr_t>(surface->depthData));
+			uint32 stencilData = static_cast<uint32>(reinterpret_cast<uintptr_t>(surface->stencilData));
+			float background = surface->backgroundDepth;
+			if(!LooksLikePointer(depthData) || ((stencilData != 0) && !LooksLikePointer(stencilData))) continue;
+			if(!(background >= 0.0f) || !(background <= 1.0f)) continue;
+			if(depthData == value) continue;
 			surface->zlsControl |= SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED | SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED;
 			return true;
 		}
@@ -718,14 +760,6 @@ void CGSH_Hardware::AllocateTargetGl(TARGET& target)
 	glGenRenderbuffers(1, &target.depthBuffer);
 	glBindRenderbuffer(GL_RENDERBUFFER, target.depthBuffer);
 	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, target.width, target.height);
-#ifdef __vita__
-	target.depthKept = g_depthForceLoad && EnableDepthForceLoad(target.depthBuffer);
-	if(target.depthKept)
-		g_depthForceLoadTargets++;
-	else
-		g_depthForceLoadFailures++;
-#endif
-
 	glGenFramebuffers(1, &target.framebuffer);
 	glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target.colorTexture, 0);
@@ -1871,6 +1905,18 @@ void CGSH_Hardware::ApplyState()
 		glClear(GL_DEPTH_BUFFER_BIT);
 		m_depthSceneValid = true;
 		m_stats.depthRestores++;
+	}
+	// vitaGL sets a framebuffer's depth surface up when it is first drawn with depth: the
+	// force load is tried then (a few times), not when the target is created.
+	if(depthActive && !target->depthKept && g_depthForceLoad && (target->depthForceTries < 4))
+	{
+		target->depthForceTries++;
+		DumpGlObjects(target->depthBuffer, target->framebuffer);
+		target->depthKept = EnableDepthForceLoad(target->depthBuffer, target->framebuffer);
+		if(target->depthKept)
+			g_depthForceLoadTargets++;
+		else
+			g_depthForceLoadFailures++;
 	}
 #endif
 	glEnable(GL_SCISSOR_TEST);

@@ -1835,6 +1835,7 @@ int main()
 	// Compiled fixed-function shaders are cached so they are only built once.
 	sceIoMkdir(VITAPS2_DATA_DIR "/shaders", 0777);
 	vglSetShaderCachePath(VITAPS2_DATA_DIR "/shaders/");
+	CGSH_Hardware::g_glObjectDumpPath = VITAPS2_DATA_DIR "/globjects.txt";
 	vglInitExtended(0x80000, SCREEN_WIDTH, SCREEN_HEIGHT, GL_RAM_LEFT_FREE, SCE_GXM_MULTISAMPLE_NONE);
 	vglWaitVblankStart(GL_TRUE);
 	if(!Gfx::Init())
