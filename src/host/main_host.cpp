@@ -261,6 +261,10 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--vu1-stats")) EmuProfile::g_vu1Programs.enabled = true; //vu1prog.txt
 		else if(!std::strcmp(argv[i], "--vu1-verify")) CVpu::g_programHook = Vu1Verify::Hook; //vu1verify.txt
 		else if(!std::strcmp(argv[i], "--vu1-hle")) Re4Vu1Hle::Enable(true); //RE4 world program without VU1
+#ifdef VITAPS2_HAS_GL
+		else if(!std::strcmp(argv[i], "--gpu-world-debug") && (i + 1 < argc)) CGSH_Hardware::g_gpuWorldDebug = std::atoi(argv[++i]);
+		else if(!std::strcmp(argv[i], "--no-gpu-world")) CGSH_Hardware::g_gpuWorld = false;
+#endif
 	}
 
 	const char* home = std::getenv("HOME");
@@ -566,8 +570,8 @@ int main(int argc, char** argv)
 			            static_cast<CGSH_Hardware*>(session.GetVm()->GetGSHandler())->GetPrimitiveCount());
 #endif
 		if(Re4Vu1Hle::IsEnabled())
-			std::printf("world batches without VU1: %llu (%llu vertices, %llu clipped triangles)\n", (unsigned long long)CGSH_Primitives::g_worldBatches,
-			            (unsigned long long)CGSH_Primitives::g_worldVertices, (unsigned long long)CGSH_Primitives::g_worldClipped);
+			std::printf("world batches on the CPU: %llu (%llu vertices, %llu clipped triangles), on the GPU: %llu batches %llu draws %llu fallbacks\n", (unsigned long long)CGSH_Primitives::g_worldBatches,
+			            (unsigned long long)CGSH_Primitives::g_worldVertices, (unsigned long long)CGSH_Primitives::g_worldClipped, (unsigned long long)CGSH_Hardware::g_gpuWorldBatches, (unsigned long long)CGSH_Hardware::g_gpuWorldDraws, (unsigned long long)CGSH_Hardware::g_gpuWorldFallbacks);
 
 		if(width == 0)
 		{

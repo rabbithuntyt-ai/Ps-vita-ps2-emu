@@ -349,6 +349,7 @@ namespace
 		else if(key == "feedback_draw") CGSH_Hardware::g_feedbackDraw = value != 0;
 		else if(key == "gpu_alpha_clut") CGSH_Hardware::g_gpuAlphaClut = value != 0;
 		else if(key == "depth_force_load") CGSH_Hardware::g_depthForceLoad = value != 0;
+		else if(key == "gpu_world") CGSH_Hardware::g_gpuWorld = value != 0;
 		else if(key == "vu_no_clamp") { if(value) CVuBasicBlock::g_extraCompileHints |= VUShared::COMPILEHINT_NO_CLAMPING; else CVuBasicBlock::g_extraCompileHints &= ~VUShared::COMPILEHINT_NO_CLAMPING; }
 		else if(key == "vu1_wait_on_stall") CVpu::g_waitOnVifStall = value != 0;
 		else if(key == "re4_vu1_hle") Re4Vu1Hle::Enable(value != 0); //RE4: world vertex program without VU1

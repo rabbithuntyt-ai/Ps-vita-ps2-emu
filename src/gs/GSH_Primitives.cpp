@@ -163,6 +163,52 @@ CSoftwareRasterizer::VERTEX CGSH_Primitives::ConvertBatchVertex(const Re4Vu1::GS
 	return out;
 }
 
+bool CGSH_Primitives::BeginBatchStrip()
+{
+	if(m_pendingPrim)
+	{
+		m_pendingPrim = false;
+		BeginPrimitive(m_pendingPrimValue);
+	}
+	if((m_nReg[GS_REG_PRMODECONT] & 1) != 0)
+	{
+		m_primitiveMode <<= m_nReg[GS_REG_PRIM];
+	}
+	else
+	{
+		m_primitiveMode <<= m_nReg[GS_REG_PRMODE];
+	}
+	if(!m_drawEnabled || m_skipDrawing || (m_primitiveType != PRIM_TRIANGLESTRIP)) return false;
+	uint64 primitiveMode = m_primitiveMode;
+	if(m_stateDirty || (primitiveMode != m_lastPrimitiveMode))
+	{
+		OnStateChanged();
+		m_stateDirty = false;
+		m_lastPrimitiveMode = primitiveMode;
+	}
+	return true;
+}
+
+void CGSH_Primitives::EndBatchStrip(const Re4Vu1::GS_VERTEX* secondLast, const Re4Vu1::GS_VERTEX& last)
+{
+	auto floatBits = [](float value) {
+		uint32 bits;
+		std::memcpy(&bits, &value, 4);
+		return static_cast<uint64>(bits);
+	};
+	auto kick = [&](const Re4Vu1::GS_VERTEX& g) {
+		m_nReg[GS_REG_ST] = floatBits(g.s) | (floatBits(g.t) << 32);
+		m_nReg[GS_REG_RGBAQ] = static_cast<uint64>(g.rgba[0]) | (static_cast<uint64>(g.rgba[1]) << 8) | (static_cast<uint64>(g.rgba[2]) << 16) |
+		                       (static_cast<uint64>(g.rgba[3]) << 24) | (floatBits(g.q) << 32);
+		uint64 xyz = static_cast<uint64>(static_cast<uint16>(g.x)) | (static_cast<uint64>(static_cast<uint16>(g.y)) << 16) | (static_cast<uint64>(g.z) << 32);
+		VertexKick(GS_REG_XYZ3, xyz); //no drawing
+	};
+	if(secondLast) kick(*secondLast);
+	kick(last);
+	m_primitiveCount += m_batchPrimitives;
+	m_batchPrimitives = 0;
+}
+
 void CGSH_Primitives::DrawDirectTriangle(const CSoftwareRasterizer::VERTEX* vertices)
 {
 	if(!m_drawEnabled || m_skipDrawing) return;
@@ -225,25 +271,27 @@ void CGSH_Primitives::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 		                       (static_cast<uint64>(g.rgba[3]) << 24) | (floatBits(g.q) << 32);
 		uint64 xyz = static_cast<uint64>(static_cast<uint16>(g.x)) | (static_cast<uint64>(static_cast<uint16>(g.y)) << 16) | (static_cast<uint64>(g.z) << 32);
 		VertexKick(adc ? GS_REG_XYZ3 : GS_REG_XYZ2, xyz);
-		if(clipped && !v.restart)
-		{
-			// The program's clipping routine: the triangle clipped to the clip volume,
-			// culled like the others, drawn as a fan.
-			Re4Vu1::WORLD_VERTEX polygon[12];
-			uint32 count = Re4Vu1::ClipTriangle(&vertices[i - 2], polygon);
-			if(count < 3) continue;
-			g_worldClipped++;
-			Re4Vu1::GS_VERTEX out[12];
-			for(uint32 k = 0; k < count; k++) out[k] = Re4Vu1::Project(polygon[k]);
-			float ax = out[1].screenX - out[0].screenX, ay = out[1].screenY - out[0].screenY;
-			float bx = out[2].screenX - out[0].screenX, by = out[2].screenY - out[0].screenY;
-			if((2.0f * (bx * ay - by * ax) * v.winding) < 0) continue;
-			for(uint32 k = 1; k + 1 < count; k++)
-			{
-				CSoftwareRasterizer::VERTEX triangle[3] = {ConvertBatchVertex(out[0]), ConvertBatchVertex(out[k]), ConvertBatchVertex(out[k + 1])};
-				DrawDirectTriangle(triangle);
-			}
-		}
+		if(clipped && !v.restart) DrawClippedWorldTriangle(&vertices[i - 2]);
+	}
+}
+
+void CGSH_Primitives::DrawClippedWorldTriangle(const Re4Vu1::WORLD_VERTEX* last3)
+{
+	// The program's clipping routine: the triangle clipped to the clip volume, culled like
+	// the others, drawn as a fan.
+	Re4Vu1::WORLD_VERTEX polygon[12];
+	uint32 count = Re4Vu1::ClipTriangle(last3, polygon);
+	if(count < 3) return;
+	g_worldClipped++;
+	Re4Vu1::GS_VERTEX out[12];
+	for(uint32 k = 0; k < count; k++) out[k] = Re4Vu1::Project(polygon[k]);
+	float ax = out[1].screenX - out[0].screenX, ay = out[1].screenY - out[0].screenY;
+	float bx = out[2].screenX - out[0].screenX, by = out[2].screenY - out[0].screenY;
+	if((2.0f * (bx * ay - by * ax) * last3[2].winding) < 0) return;
+	for(uint32 k = 1; k + 1 < count; k++)
+	{
+		CSoftwareRasterizer::VERTEX triangle[3] = {ConvertBatchVertex(out[0]), ConvertBatchVertex(out[k]), ConvertBatchVertex(out[k + 1])};
+		DrawDirectTriangle(triangle);
 	}
 }
 

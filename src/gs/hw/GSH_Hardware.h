@@ -214,6 +214,10 @@ public:
 	static inline bool g_gpuAlphaClut = true;
 	// Vita: depth buffers loaded at each new GPU scene (depth_force_load, on)
 	static inline bool g_depthForceLoad = true;
+	// Resident Evil 4's world batches (Re4Vu1Hle) transformed by a vertex shader (gpu_world, on)
+	static inline bool g_gpuWorld = false; //unfinished: draws nothing yet (see docs/RE4_GAMEPLAY.md)
+	static inline uint64 g_gpuWorldBatches = 0, g_gpuWorldDraws = 0, g_gpuWorldFallbacks = 0;
+	static inline uint32 g_gpuWorldDebug = 0; //1: triangles near the clip volume left out
 	static inline uint32 g_depthForceLoadTargets = 0, g_depthForceLoadFailures = 0;
 	// Pictures the game finished: flips showing another target, or one drawn into since
 	// the previous flip (vblanks with the same picture don't count). perf.csv game_fps.
@@ -308,6 +312,34 @@ private:
 	// Same pixel size, inside the new target's memory [start, end): copy instead of a read-back.
 	bool CanRelayout(const TARGET& old, const TARGET& target, uint32 start, uint32 end) const;
 	void RelayoutTarget(TARGET& old, TARGET& target);
+public:
+	void DrawWorldBatch(const Re4Vu1::WORLD_BATCH&) override;
+
+private:
+	// World batches waiting for one draw (same GS state): vertices (raw P, T, C, slot) and
+	// triangles, constants per batch (slot).
+	enum
+	{
+		WORLD_SLOTS = 16
+	};
+	struct WORLD_GPU_VERTEX
+	{
+		float p[4], t[4], c[4];
+		float slot;
+	};
+	std::vector<WORLD_GPU_VERTEX> m_worldVertices;
+	std::vector<uint16> m_worldIndices;
+	float m_worldMatrix[WORLD_SLOTS * 16] = {};
+	float m_worldColorOffset[WORLD_SLOTS * 4] = {}, m_worldColorScale[WORLD_SLOTS * 4] = {}, m_worldTexOffset[WORLD_SLOTS * 4] = {};
+	uint32 m_worldSlots = 0;
+	GLuint m_worldProgram = 0;
+	bool m_worldProgramFailed = false;
+	GLint m_worldLocations[16] = {};
+	bool BuildWorldProgram();
+	void FlushWorld();
+	// Alpha test as ApplyState set it (GL function, reference), for the shader
+	GLenum m_alphaTestFunc = GL_ALWAYS;
+	float m_alphaTestRef = 0;
 	// The bound texture is an alpha index texture (PSMT8H/4HL/4HH) lying in a render target
 	// whose alpha the GPU drew: converted through the CLUT by a shader pass. False: not handled.
 	bool BindAlphaClutTexture();

@@ -1822,6 +1822,363 @@ bool CGSH_Hardware::BindAlphaClutTexture()
 	return true;
 }
 
+namespace
+{
+	const char* g_worldVertexShader =
+	    "attribute vec4 aP;\n"
+	    "attribute vec4 aT;\n"
+	    "attribute vec4 aC;\n"
+	    "attribute float aSlot;\n"
+	    "uniform vec4 uM[64];\n"
+	    "uniform vec4 uCO[16];\n"
+	    "uniform vec4 uCS[16];\n"
+	    "uniform vec4 uTO[16];\n"
+	    "uniform vec4 uScreen;\n"
+	    "uniform float uZ;\n"
+	    "varying vec4 vColor;\n"
+	    "varying vec3 vTex;\n"
+	    "varying float vFog;\n"
+	    "void main()\n"
+	    "{\n"
+	    "	int s = int(aSlot + 0.5);\n"
+	    "	int m = s * 4;\n"
+	    "	vec4 v = uM[m] * aP.x + uM[m + 1] * aP.y + uM[m + 2] * aP.z + uM[m + 3];\n"
+	    "	float d = v.z / v.w * uZ * 0.5;\n" //Z / ZMax, clamped per vertex like AddVertex (a negative Z is a huge unsigned one)
+	    "	d = (d < 0.0) ? 1.0 : min(d, 1.0);\n"
+	    "	gl_Position = vec4((v.x + uScreen.z * v.w) * uScreen.x - v.w, (v.y + uScreen.w * v.w) * uScreen.y - v.w, (2.0 * d - 1.0) * v.w, v.w);\n"
+	    "	vColor = min((aC + uCO[s]) * uCS[s], vec4(255.0)) * (1.0 / 255.0);\n"
+	    "	vTex = vec3(aT.x * (1.0 / 256.0) + uTO[s].x, aT.y * (1.0 / 256.0) + uTO[s].y, aT.z);\n"
+	    "	vFog = uTO[s].z;\n"
+	    "}\n";
+	// uMode: x rgb (0 primary, 1 texture * primary * 2, 2 texture), y alpha (0 primary * 2,
+	// 1 texture * k, 2 texture * primary * k, 3 constant), z k, w constant.
+	// uAlpha: x test (0 always, 1 never, 2 less, 3 equal, 4 greater, 5 not equal), y reference.
+	const char* g_worldFragmentShader =
+	    "uniform sampler2D uTex;\n"
+	    "uniform vec4 uTexXf;\n"
+	    "uniform vec4 uMode;\n"
+	    "uniform vec4 uFog;\n"
+	    "uniform vec4 uAlpha;\n"
+	    "varying vec4 vColor;\n"
+	    "varying vec3 vTex;\n"
+	    "varying float vFog;\n"
+	    "void main()\n"
+	    "{\n"
+	    "	if(uMode.x > 2.5) { gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0); return; }\n"
+	    "	vec4 t = texture2D(uTex, vTex.xy / vTex.z * uTexXf.xy + uTexXf.zw);\n"
+	    "	vec3 rgb = vColor.rgb;\n"
+	    "	if(uMode.x > 1.5) rgb = t.rgb;\n"
+	    "	else if(uMode.x > 0.5) rgb = t.rgb * vColor.rgb * 2.0;\n"
+	    "	float a = vColor.a * 2.0;\n"
+	    "	if(uMode.y > 2.5) a = uMode.w;\n"
+	    "	else if(uMode.y > 1.5) a = t.a * vColor.a * uMode.z;\n"
+	    "	else if(uMode.y > 0.5) a = t.a * uMode.z;\n"
+	    "	rgb = min(rgb, vec3(1.0));\n"
+	    "	a = min(a, 1.0);\n"
+	    "	rgb = mix(uFog.rgb, rgb, vFog);\n"
+	    "	if(uAlpha.x > 0.5)\n"
+	    "	{\n"
+	    "		bool pass = false;\n"
+	    "		if(uAlpha.x < 1.5) pass = false;\n"
+	    "		else if(uAlpha.x < 2.5) pass = a < uAlpha.y;\n"
+	    "		else if(uAlpha.x < 3.5) pass = abs(a - uAlpha.y) < (0.5 / 255.0);\n"
+	    "		else if(uAlpha.x < 4.5) pass = a > uAlpha.y;\n"
+	    "		else pass = abs(a - uAlpha.y) >= (0.5 / 255.0);\n"
+	    "		if(!pass) discard;\n"
+	    "	}\n"
+	    "	gl_FragColor = vec4(rgb, a);\n"
+	    "}\n";
+	const char* g_worldUniforms[] = {"uM", "uCO", "uCS", "uTO", "uScreen", "uZ", "uTex", "uTexXf", "uMode", "uFog", "uAlpha"};
+}
+
+bool CGSH_Hardware::BuildWorldProgram()
+{
+	if(m_worldProgram) return true;
+	if(m_worldProgramFailed) return false;
+	GLuint vs = CompileShader(GL_VERTEX_SHADER, g_worldVertexShader);
+	GLuint fs = CompileShader(GL_FRAGMENT_SHADER, g_worldFragmentShader);
+	if(!vs || !fs)
+	{
+		m_worldProgramFailed = true;
+		return false;
+	}
+	m_worldProgram = glCreateProgram();
+	glAttachShader(m_worldProgram, vs);
+	glAttachShader(m_worldProgram, fs);
+	glBindAttribLocation(m_worldProgram, 0, "aP");
+	glBindAttribLocation(m_worldProgram, 1, "aT");
+	glBindAttribLocation(m_worldProgram, 2, "aC");
+	glBindAttribLocation(m_worldProgram, 3, "aSlot");
+	glLinkProgram(m_worldProgram);
+	GLint ok = 0;
+	glGetProgramiv(m_worldProgram, GL_LINK_STATUS, &ok);
+	if(!ok)
+	{
+		std::fprintf(stderr, "GSH_Hardware: world program link failed\n");
+		glDeleteProgram(m_worldProgram);
+		m_worldProgram = 0;
+		m_worldProgramFailed = true;
+		return false;
+	}
+	for(unsigned int i = 0; i < sizeof(g_worldUniforms) / sizeof(g_worldUniforms[0]); i++)
+		m_worldLocations[i] = glGetUniformLocation(m_worldProgram, g_worldUniforms[i]);
+	return true;
+}
+
+void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
+{
+	if(!g_gpuWorld || (batch.count == 0))
+	{
+		CGSH_Primitives::DrawWorldBatch(batch);
+		return;
+	}
+	bool drawing = BeginBatchStrip();
+	if(drawing && !m_stateApplied) ApplyState();
+	const auto& s = m_state;
+	bool supported = drawing && !m_drawNothing && m_currentTarget && !m_alphaPass && s.gouraud && !s.fst && BuildWorldProgram() &&
+	                 (m_worldVertices.size() + batch.count <= 65535);
+	if(!supported)
+	{
+		if(drawing && !m_drawNothing) g_gpuWorldFallbacks++;
+		if(!drawing || m_drawNothing)
+		{
+			// Nothing drawn: only the vertex queue and registers as the batch leaves them
+			Re4Vu1::GS_VERTEX last = Re4Vu1::Project(Re4Vu1::ReadWorldVertex(batch, batch.count - 1));
+			if(batch.count >= 2)
+			{
+				Re4Vu1::GS_VERTEX secondLast = Re4Vu1::Project(Re4Vu1::ReadWorldVertex(batch, batch.count - 2));
+				EndBatchStrip(&secondLast, last);
+			}
+			else
+				EndBatchStrip(nullptr, last);
+			return;
+		}
+		CGSH_Primitives::DrawWorldBatch(batch);
+		return;
+	}
+	// Triangles of this state waiting in m_batch (clipped ones) are drawn with the world draw
+	// (FlushBatch draws both): same state, so their order does not matter.
+	if(m_worldSlots == WORLD_SLOTS) FlushWorld();
+	g_gpuWorldBatches++;
+	uint32 slot = m_worldSlots++;
+	// Constants: the matrix with the position scale folded in, colour offset and scale
+	float* m = m_worldMatrix + slot * 16;
+	for(int r = 0; r < 4; r++)
+	{
+		float factor = (r < 3) ? batch.scale : 1.0f;
+		const auto& row = batch.projection[r];
+		m[r * 4 + 0] = row.x * factor;
+		m[r * 4 + 1] = row.y * factor;
+		m[r * 4 + 2] = row.z * factor;
+		m[r * 4 + 3] = row.w * factor;
+	}
+	float* co = m_worldColorOffset + slot * 4;
+	co[0] = batch.colorOffset.x;
+	co[1] = batch.colorOffset.y;
+	co[2] = batch.colorOffset.z;
+	co[3] = 0;
+	float* cs = m_worldColorScale + slot * 4;
+	cs[0] = batch.colorScale.x * batch.colorOffset.w;
+	cs[1] = batch.colorScale.y * batch.colorOffset.w;
+	cs[2] = batch.colorScale.z * batch.colorOffset.w;
+	cs[3] = 1;
+	float* to = m_worldTexOffset + slot * 4;
+	to[0] = batch.vf31.x;
+	to[1] = batch.vf31.y;
+	// The FOG register at the batch's kicks (the packet does not set it; games set it per object)
+	to[2] = s.fog ? static_cast<float>((m_nReg[GS_REG_FOG] >> 56) & 0xFF) / 255.0f : 1.0f;
+	to[3] = 0;
+	// Vertices, and triangles where the program does not set ADC for a restart. Culling and
+	// clipping are the GPU's: each triangle's order follows its winding sign so that GL_FRONT
+	// culling drops what the program's back face test drops.
+	uint32 base = static_cast<uint32>(m_worldVertices.size());
+	m_worldVertices.resize(base + batch.count);
+	const int32* raw = batch.raw.data();
+	// Clip flags (the clip matrix): triangles touching the clip volume go through the
+	// program's clipping on the CPU, the rest is the GPU's.
+	Re4Vu1::VEC4 clip[4];
+	for(int r = 0; r < 4; r++)
+	{
+		float factor = (r < 3) ? batch.scale : 1.0f;
+		clip[r] = {batch.clip[r].x * factor, batch.clip[r].y * factor, batch.clip[r].z * factor, batch.clip[r].w * factor};
+	}
+	uint32 flags[3] = {};
+	for(uint32 i = 0; i < batch.count; i++, raw += 12)
+	{
+		{
+			float px = static_cast<float>(raw[0]), py = static_cast<float>(raw[1]), pz = static_cast<float>(raw[2]);
+			Re4Vu1::VEC4 k = {clip[0].x * px + clip[1].x * py + clip[2].x * pz + clip[3].x, clip[0].y * px + clip[1].y * py + clip[2].y * pz + clip[3].y,
+			                  clip[0].z * px + clip[1].z * py + clip[2].z * pz + clip[3].z, clip[0].w * px + clip[1].w * py + clip[2].w * pz + clip[3].w};
+			flags[0] = flags[1];
+			flags[1] = flags[2];
+			flags[2] = Re4Vu1::ClipFlags(k);
+		}
+		auto& out = m_worldVertices[base + i];
+		for(int k = 0; k < 4; k++)
+		{
+			out.p[k] = static_cast<float>(raw[k]);
+			out.t[k] = static_cast<float>(raw[4 + k]);
+			out.c[k] = static_cast<float>(raw[8 + k]);
+		}
+		out.slot = static_cast<float>(slot);
+		bool clipped = (i >= 2) && ((flags[0] | flags[1] | flags[2]) != 0);
+		if(clipped && (raw[7] == 0) && !(g_gpuWorldDebug & 1))
+		{
+			Re4Vu1::WORLD_VERTEX last3[3] = {Re4Vu1::ReadWorldVertex(batch, i - 2), Re4Vu1::ReadWorldVertex(batch, i - 1), Re4Vu1::ReadWorldVertex(batch, i)};
+			DrawClippedWorldTriangle(last3);
+		}
+		if((i >= 2) && (raw[7] == 0) && !clipped)
+		{
+			uint16 a = static_cast<uint16>(base + i - 2), b = static_cast<uint16>(base + i - 1), c = static_cast<uint16>(base + i);
+			bool flip = (static_cast<float>(raw[3]) * batch.vf31.w) < 0;
+			m_worldIndices.push_back(a);
+			m_worldIndices.push_back(flip ? c : b);
+			m_worldIndices.push_back(flip ? b : c);
+			m_batchPrimitives++;
+			if(g_gpuWorldDebug & 32)
+			{
+				static uint64 positive = 0, negative = 0, reported = 0;
+				const float* mm = m_worldMatrix + slot * 16;
+				float w = mm[3] * static_cast<float>(raw[0]) + mm[7] * static_cast<float>(raw[1]) + mm[11] * static_cast<float>(raw[2]) + mm[15];
+				(w > 0 ? positive : negative)++;
+				if(((positive + negative) % 200000) == 0 && reported++ < 5) std::fprintf(stderr, "w sign of drawn vertices: %llu positive, %llu negative\n", (unsigned long long)positive, (unsigned long long)negative);
+			}
+		}
+	}
+	if(g_gpuWorldDebug & 16)
+	{
+		static int printed = 0;
+		if(printed++ < 3)
+		{
+			auto w = Re4Vu1::ReadWorldVertex(batch, 0);
+			auto g = Re4Vu1::Project(w);
+			const auto& gv = m_worldVertices[base];
+			const float* mm = m_worldMatrix + slot * 16;
+			float v[4];
+			for(int c = 0; c < 4; c++) v[c] = mm[c] * gv.p[0] + mm[4 + c] * gv.p[1] + mm[8 + c] * gv.p[2] + mm[12 + c];
+			std::fprintf(stderr, "batch: scale %g raw %d %d %d | cpu v %g %g %g %g screen %g %g | gpu v %g %g %g %g\n", batch.scale, batch.raw[0], batch.raw[1], batch.raw[2],
+			             w.v.x, w.v.y, w.v.z, w.v.w, g.screenX, g.screenY, v[0], v[1], v[2], v[3]);
+		}
+	}
+	MarkTargetDirty(*m_currentTarget, 0, 0, m_currentTarget->width, m_currentTarget->height);
+	Re4Vu1::GS_VERTEX last = Re4Vu1::Project(Re4Vu1::ReadWorldVertex(batch, batch.count - 1));
+	if(batch.count >= 2)
+	{
+		Re4Vu1::GS_VERTEX secondLast = Re4Vu1::Project(Re4Vu1::ReadWorldVertex(batch, batch.count - 2));
+		EndBatchStrip(&secondLast, last);
+	}
+	else
+		EndBatchStrip(nullptr, last);
+}
+
+void CGSH_Hardware::FlushWorld()
+{
+	if(m_worldSlots == 0) return;
+	if(m_worldIndices.empty() || !m_currentTarget)
+	{
+		m_worldVertices.clear();
+		m_worldIndices.clear();
+		m_worldSlots = 0;
+		return;
+	}
+	CPartTimer timer(GPU_PART_DRAW);
+	const auto& s = m_state;
+	const auto& target = *m_currentTarget;
+	glUseProgram(m_worldProgram);
+	glUniform4fv(m_worldLocations[0], WORLD_SLOTS * 4, m_worldMatrix);
+	glUniform4fv(m_worldLocations[1], WORLD_SLOTS, m_worldColorOffset);
+	glUniform4fv(m_worldLocations[2], WORLD_SLOTS, m_worldColorScale);
+	glUniform4fv(m_worldLocations[3], WORLD_SLOTS, m_worldTexOffset);
+	auto offset = make_convertible<XYOFFSET>(m_nReg[GS_REG_XYOFFSET_1 + m_primitiveMode.nContext]);
+	glUniform4f(m_worldLocations[4], 2.0f / target.width, 2.0f / target.height, 0.5f - offset.nOffsetX / 16.0f, 0.5f - offset.nOffsetY / 16.0f);
+	glUniform1f(m_worldLocations[5], static_cast<float>(32.0 / static_cast<double>(ZMaxForPsm(s.zpsm))));
+	glUniform1i(m_worldLocations[6], 0);
+	glUniform4f(m_worldLocations[7], m_texScaleS, m_texScaleT, m_texOffsetS, m_texOffsetT);
+	bool decal = s.textured && (s.tfx == TEX0_FUNCTION_DECAL);
+	float rgbMode = !s.textured ? 0.0f : decal ? 2.0f : 1.0f;
+	float alphaMode = 0, alphaScale = 1, alphaConstant = 0;
+	if(m_fixAlpha)
+	{
+		alphaMode = 3;
+		alphaConstant = std::min(static_cast<float>(s.blendFix) / 128.0f, 1.0f);
+	}
+	else if(s.textured && s.tcc && !decal)
+	{
+		alphaMode = 2;
+		alphaScale = m_textureAlphaDoubled ? 2.0f : 4.0f;
+	}
+	else if(s.textured && s.tcc)
+	{
+		alphaMode = 1;
+		alphaScale = m_textureAlphaDoubled ? 1.0f : 2.0f;
+	}
+	if(g_gpuWorldDebug & 2) rgbMode = 3; //red: where the GPU world triangles land
+	glUniform4f(m_worldLocations[8], rgbMode, alphaMode, alphaScale, alphaConstant);
+	float fogFactor = s.fog ? static_cast<float>((m_nReg[GS_REG_FOG] >> 56) & 0xFF) / 255.0f : 1.0f;
+	glUniform4f(m_worldLocations[9], static_cast<float>(s.fogColor & 0xFF) / 255.0f, static_cast<float>((s.fogColor >> 8) & 0xFF) / 255.0f,
+	            static_cast<float>((s.fogColor >> 16) & 0xFF) / 255.0f, fogFactor);
+	float test = 0;
+	switch(m_alphaTestFunc)
+	{
+	case GL_NEVER: test = 1; break;
+	case GL_LESS: test = 2; break;
+	case GL_EQUAL: test = 3; break;
+	case GL_GREATER: test = 4; break;
+	case GL_NOTEQUAL: test = 5; break;
+	default: test = 0; break;
+	}
+	glUniform4f(m_worldLocations[10], test, m_alphaTestRef, 0, 0);
+	if(!s.textured)
+	{
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, m_glTextures[{0, 0}].texture);
+	}
+
+	glDisableClientState(GL_VERTEX_ARRAY);
+	glDisableClientState(GL_COLOR_ARRAY);
+	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	const GLsizei stride = sizeof(WORLD_GPU_VERTEX);
+	for(GLuint i = 0; i < 4; i++) glEnableVertexAttribArray(i);
+	glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, stride, &m_worldVertices[0].p);
+	glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride, &m_worldVertices[0].t);
+	glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, &m_worldVertices[0].c);
+	glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, &m_worldVertices[0].slot);
+	if(!(g_gpuWorldDebug & 4)) glEnable(GL_CULL_FACE); //debug 4: no culling
+	if(g_gpuWorldDebug & 8) glDisable(GL_DEPTH_TEST);  //debug 8: no depth test
+	glFrontFace(GL_CCW);
+	glCullFace(GL_BACK); //PS2 screen Y down, window Y up: the winding is mirrored
+	glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(m_worldIndices.size()), GL_UNSIGNED_SHORT, m_worldIndices.data());
+	if(g_gpuWorldDebug & 16)
+	{
+		static int printed = 0;
+		if(printed++ < 3)
+		{
+			const auto& v0 = m_worldVertices[m_worldIndices[0]];
+			int slot = static_cast<int>(v0.slot + 0.5f);
+			const float* m = m_worldMatrix + slot * 16;
+			float v[4];
+			for(int c = 0; c < 4; c++) v[c] = m[c] * v0.p[0] + m[4 + c] * v0.p[1] + m[8 + c] * v0.p[2] + m[12 + c];
+			GLint locations[3] = {m_worldLocations[0], m_worldLocations[4], m_worldLocations[8]};
+			std::fprintf(stderr, "world draw: error %X, %zu indices, locations uM %d uScreen %d uMode %d, p %g %g %g, v %g %g %g %g, screen %g %g, target %ux%u\n",
+			             glGetError(), m_worldIndices.size(), locations[0], locations[1], locations[2], v0.p[0], v0.p[1], v0.p[2], v[0], v[1], v[2], v[3], v[0] / v[3], v[1] / v[3],
+			             target.width, target.height);
+		}
+	}
+	glDisable(GL_CULL_FACE);
+	if((g_gpuWorldDebug & 8) && (m_depthFunc != GL_ALWAYS || m_depthWrite)) glEnable(GL_DEPTH_TEST);
+	for(GLuint i = 0; i < 4; i++) glDisableVertexAttribArray(i);
+	glUseProgram(0);
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glEnableClientState(GL_COLOR_ARRAY);
+	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+	g_gpuWorldDraws++;
+	m_stats.drawCalls++;
+	m_currentTarget->drawBatches++;
+	m_worldVertices.clear();
+	m_worldIndices.clear();
+	m_worldSlots = 0;
+}
+
 CGSH_Hardware::AXIS_REGION CGSH_Hardware::ResolveWrap(uint32 mode, uint32 minValue, uint32 maxValue, uint32 size)
 {
 	AXIS_REGION region;
@@ -1982,9 +2339,12 @@ void CGSH_Hardware::ApplyState()
 		}
 		glEnable(GL_ALPHA_TEST);
 		glAlphaFunc(func, ref);
+		m_alphaTestFunc = func;
+		m_alphaTestRef = ref;
 	}
 	else
 	{
+		m_alphaTestFunc = GL_ALWAYS;
 		glDisable(GL_ALPHA_TEST);
 		// Fail modes other than KEEP still write color; approximate by not
 		// writing depth for the whole primitive.
@@ -2491,6 +2851,7 @@ void CGSH_Hardware::FlushPoints()
 void CGSH_Hardware::FlushBatch()
 {
 	CStageTimer stageTimer(GPU_STAGE_GL);
+	FlushWorld();
 	FlushPoints();
 	if(m_batch.empty()) return;
 	const GLsizei stride = sizeof(BATCH_VERTEX);
