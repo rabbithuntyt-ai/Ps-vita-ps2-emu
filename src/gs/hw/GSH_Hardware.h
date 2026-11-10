@@ -214,7 +214,8 @@ public:
 	static inline bool g_gpuAlphaClut = true;
 	// Vita: depth buffers loaded at each new GPU scene (depth_force_load, on)
 	static inline bool g_depthForceLoad = true;
-	static inline uint32 g_depthForceLoadTargets = 0, g_depthForceLoadFailures = 0; //movie pictures uploaded from their buffers (perf.csv gpu_pic_up)
+	static inline uint32 g_depthForceLoadTargets = 0, g_depthForceLoadFailures = 0;
+	static inline const char* g_glObjectDumpPath = nullptr; //Vita: vitaGL object bytes, once (layout check) //movie pictures uploaded from their buffers (perf.csv gpu_pic_up)
 
 public:
 	// Diagnostics: the picture of the next flip goes to this file (PPM). Same
@@ -268,6 +269,7 @@ private:
 		// Vita: its depth buffer is loaded at each new GPU scene (GXM force load), so
 		// depth survives target switches without the clear in ApplyState.
 		bool depthKept = false;
+		uint32 depthForceTries = 0;
 		uint32 lastUseFrame = 0;
 		// Pixels rendered by the GPU and not yet written back to GS memory.
 		bool gpuDirty = false;
