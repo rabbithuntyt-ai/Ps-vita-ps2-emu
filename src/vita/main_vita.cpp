@@ -344,6 +344,7 @@ namespace
 		else if(key == "gpu_relayout") CGSH_Hardware::g_gpuRelayout = value != 0;
 		else if(key == "feedback_draw") CGSH_Hardware::g_feedbackDraw = value != 0;
 		else if(key == "gpu_alpha_clut") CGSH_Hardware::g_gpuAlphaClut = value != 0;
+		else if(key == "depth_force_load") CGSH_Hardware::g_depthForceLoad = value != 0;
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
 	}
@@ -1478,6 +1479,7 @@ namespace
 								std::fprintf(perfFile, "%c%.1f", (i == 0) ? ',' : ';', (gpuParts[i] - lastParts[i]) / 1000.0);
 								lastParts[i] = gpuParts[i];
 							}
+							std::fprintf(perfFile, ";%u;%u", CGSH_Hardware::g_depthForceLoadTargets, CGSH_Hardware::g_depthForceLoadFailures); //depth force load: targets, failures
 						}
 						std::fprintf(perfFile, "\n");
 						std::fflush(perfFile);

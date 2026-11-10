@@ -487,6 +487,36 @@ int main(int argc, char** argv)
 					std::fclose(file);
 				}
 			}
+			if(EmuProfile::g_vu1Programs.enabled)
+			{
+				// VU1 micro memory and data memory, and the microcode disassembled (upper | lower).
+				if(std::FILE* file = std::fopen("vu1micro.bin", "wb"))
+				{
+					std::fwrite(ee.m_microMem1, 1, PS2::MICROMEM1SIZE, file);
+					std::fclose(file);
+				}
+				if(std::FILE* file = std::fopen("vu1mem.bin", "wb"))
+				{
+					std::fwrite(ee.m_vuMem1, 1, PS2::VUMEM1SIZE, file);
+					std::fclose(file);
+				}
+				if(std::FILE* file = std::fopen("vu1micro.txt", "w"))
+				{
+					auto& vu1 = ee.m_VU1;
+					for(uint32 address = 0; address < PS2::MICROMEM1SIZE; address += 8)
+					{
+						uint32 lower = *reinterpret_cast<const uint32*>(ee.m_microMem1 + address);
+						uint32 upper = *reinterpret_cast<const uint32*>(ee.m_microMem1 + address + 4);
+						char upperMnemonic[64] = {}, upperOperands[64] = {}, lowerMnemonic[64] = {}, lowerOperands[64] = {};
+						vu1.m_pArch->GetInstructionMnemonic(&vu1, address + 4, upper, upperMnemonic, sizeof(upperMnemonic));
+						vu1.m_pArch->GetInstructionOperands(&vu1, address + 4, upper, upperOperands, sizeof(upperOperands));
+						vu1.m_pArch->GetInstructionMnemonic(&vu1, address, lower, lowerMnemonic, sizeof(lowerMnemonic));
+						vu1.m_pArch->GetInstructionOperands(&vu1, address, lower, lowerOperands, sizeof(lowerOperands));
+						std::fprintf(file, "%04X %08X %08X  %-10s %-24s | %-10s %s\n", address, upper, lower, upperMnemonic, upperOperands, lowerMnemonic, lowerOperands);
+					}
+					std::fclose(file);
+				}
+			}
 		}
 		if(!jitCachePath.empty())
 		{
