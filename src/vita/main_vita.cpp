@@ -71,6 +71,9 @@
 #include "JitMemory.h"
 #include "PH_Vita.h"
 #include "ee/Tier2.h"
+#include "ee/VuBasicBlock.h"
+#include "ee/VUShared.h"
+#include "ee/Vpu.h"
 #include "PS2VM.h"
 #include "ee/IPU.h"
 #include "SH_Vita.h"
@@ -345,6 +348,8 @@ namespace
 		else if(key == "feedback_draw") CGSH_Hardware::g_feedbackDraw = value != 0;
 		else if(key == "gpu_alpha_clut") CGSH_Hardware::g_gpuAlphaClut = value != 0;
 		else if(key == "depth_force_load") CGSH_Hardware::g_depthForceLoad = value != 0;
+		else if(key == "vu_no_clamp") { if(value) CVuBasicBlock::g_extraCompileHints |= VUShared::COMPILEHINT_NO_CLAMPING; else CVuBasicBlock::g_extraCompileHints &= ~VUShared::COMPILEHINT_NO_CLAMPING; }
+		else if(key == "vu1_wait_on_stall") CVpu::g_waitOnVifStall = value != 0;
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
 	}
@@ -711,7 +716,7 @@ namespace
 				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop");
 				//The IOP thread's sections (iop_thread)
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",iopt_%s", EmuProfile::GetSectionName(i));
-				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts");
+				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps");
 				std::fprintf(perfFile, "\n");
 			}
 		}
@@ -1480,6 +1485,9 @@ namespace
 								lastParts[i] = gpuParts[i];
 							}
 							std::fprintf(perfFile, ";%u;%u", CGSH_Hardware::g_depthForceLoadTargets, CGSH_Hardware::g_depthForceLoadFailures); //depth force load: targets, failures
+							static uint32 lastGameFrames = 0;
+							std::fprintf(perfFile, ",%u", CGSH_Hardware::g_gameFrames - lastGameFrames); //game_fps
+							lastGameFrames = CGSH_Hardware::g_gameFrames;
 						}
 						std::fprintf(perfFile, "\n");
 						std::fflush(perfFile);

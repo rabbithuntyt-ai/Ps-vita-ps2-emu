@@ -234,6 +234,8 @@ else()
 	# Persistent JIT cache: file format and relocation helpers (any host).
 	# The Vita JIT's ARM code for EE blocks from a RAM dump, on any host (tools/jit_arm_report.py)
 	add_executable(jit_arm_dump tools/jit_arm_dump.cpp)
+	add_executable(vu_arm_dump tools/vu_arm_dump.cpp)
+	target_link_libraries(vu_arm_dump PRIVATE PlayCore)
 	target_link_libraries(jit_arm_dump PRIVATE PlayCore)
 
 	add_executable(jit_cache_tests tests/jit_cache_tests.cpp)

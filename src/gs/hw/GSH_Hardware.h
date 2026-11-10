@@ -215,6 +215,9 @@ public:
 	// Vita: depth buffers loaded at each new GPU scene (depth_force_load, on)
 	static inline bool g_depthForceLoad = true;
 	static inline uint32 g_depthForceLoadTargets = 0, g_depthForceLoadFailures = 0;
+	// Pictures the game finished: flips showing another target, or one drawn into since
+	// the previous flip (vblanks with the same picture don't count). perf.csv game_fps.
+	static inline uint32 g_gameFrames = 0;
 	static inline const char* g_glObjectDumpPath = nullptr; //Vita: vitaGL object bytes, once (layout check) //movie pictures uploaded from their buffers (perf.csv gpu_pic_up)
 
 public:
@@ -270,6 +273,7 @@ private:
 		// depth survives target switches without the clear in ApplyState.
 		bool depthKept = false;
 		uint32 depthForceTries = 0;
+		uint32 drawBatches = 0; //batches drawn into it (game frame counting)
 		uint32 lastUseFrame = 0;
 		// Pixels rendered by the GPU and not yet written back to GS memory.
 		bool gpuDirty = false;
@@ -386,6 +390,8 @@ private:
 	bool m_stateApplied = false;
 	bool m_drawNothing = false;
 	TARGET* m_currentTarget = nullptr;
+	const TARGET* m_lastDisplayedTarget = nullptr;
+	uint32 m_lastDisplayedBatches = 0;
 	GLenum m_batchMode = GL_TRIANGLES;
 	std::vector<BATCH_VERTEX> m_batch;
 

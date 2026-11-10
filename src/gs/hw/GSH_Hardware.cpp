@@ -459,6 +459,7 @@ void CGSH_Hardware::DeleteTarget(TARGET& target)
 		m_pointTarget = nullptr;
 	}
 	if(m_currentTarget == &target) m_currentTarget = nullptr;
+	if(m_lastDisplayedTarget == &target) m_lastDisplayedTarget = nullptr;
 	if(target.framebuffer) glDeleteFramebuffers(1, &target.framebuffer);
 	if(target.colorTexture) glDeleteTextures(1, &target.colorTexture);
 	if(target.depthBuffer) glDeleteRenderbuffers(1, &target.depthBuffer);
@@ -2515,6 +2516,7 @@ void CGSH_Hardware::FlushBatch()
 	}
 	m_batch.clear();
 	m_stats.drawCalls++;
+	if(m_currentTarget) m_currentTarget->drawBatches++;
 	if(m_diagFile && m_currentTarget) m_diagDraws[DiagKey(m_currentTarget->fbp, m_currentTarget->fbw, m_currentTarget->psm)]++;
 }
 
@@ -2643,6 +2645,9 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 		if(target)
 		{
 			m_displayStats.fromTarget++;
+			if((target != m_lastDisplayedTarget) || (target->drawBatches != m_lastDisplayedBatches)) g_gameFrames++;
+			m_lastDisplayedTarget = target;
+			m_lastDisplayedBatches = target->drawBatches;
 			uint32 x = baseX + layer.offsetX, y = baseY + layer.offsetY;
 			EnsureValidRows(*target, y + height);
 			target->lastUseFrame = m_frameNumber; //displayed: still in use
