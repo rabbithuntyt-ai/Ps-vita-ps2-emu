@@ -60,6 +60,33 @@ On the PC's x86 JIT this is ~7 ms per vblank. A generic VU JIT on a 444 MHz ARM 
 4.3 M VU cycles in 16.7 ms; the options are threaded VU1 (one core), a faster VU JIT, and
 native versions of these two loops.
 
+**On the Vita (2026-11-10):** the vertex program takes ~296 us per run (6.3 us on the PC):
+36-55 ARM cycles per VU cycle, ~350 ms of VU1 work per vblank in this scene. Real game frame
+rate (`game_fps`, below) is about **1-3 per second** in gameplay, inline or threaded.
+`tools/vu_arm_dump` (VU1 block of a micro memory dump, compiled by the Vita's code
+generator) shows why: the 38-pair vertex loop is 1457 ARM instructions per iteration, of which
+~36 are vector arithmetic. The rest: every VF register loaded from and stored to the context
+around each operation (`add ip, fp, #off` + `vld1`/`vst1`: the 128-bit VF symbols are
+"aliased" in the Jitter's allocator because lane accesses and the indexed flag pipelines alias
+them, and only 8 NEON registers are allocatable), MAC flag pipeline bookkeeping (arrays indexed
+by pipeline position), Q pipeline selects, ~110 instructions of FMAC stall checks re-run at
+every iteration of a self-looping block, and float clamping (`vu_no_clamp=1` removes it: only
+4% of the code).
+
+**The budget:** RE4 needs ~258 M VU1 cycles per second here. One dedicated 444 MHz core would
+need under 2 ARM cycles per VU cycle; even a near-ideal recompiler (4-6) would not reach full
+speed in this scene. A locked 30 needs RE4's vertex microprograms run as GPU vertex shaders
+(the GPU transforms, clips and culls; the CPU only moves the unpacked vertex data), with the
+generic VU JIT made several times faster for the rest. The microprograms are uploaded per
+object type (MPG), so they must be recognised by content, not address.
+
+**Threaded VU1 and emulated time:** with the thread, the EE ran on in emulated time while VU1
+worked, so the game saw its frames take far longer: 77 game frames in 900 vblanks (393
+inline) on the PC; on the Vita "30 emulated fps" were ~5 game frames per second.
+`vu1_wait_on_stall` (on): when VIF1 waits for the program (VEW), the EE waits too, in real
+time: 263 game frames in 900 vblanks on the PC. Count game frames, not vblanks: `game_fps`
+in perf.csv (flips showing a new picture), "game frames" in the PC runner's `--hw` output.
+
 PC with the software renderer and the GPU renderer (Mesa): the gameplay picture is right
 (Leon, gun, HUD). So Leon's missing body on the Vita is a Vita GPU issue (depth lost at GPU
 scene breaks is the main suspect: `depth_force_load`).

@@ -20,6 +20,24 @@ diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
  	//UNPACK values requested by format (CMD & 0xF), and how many of those used a
  	//mask, an offset/difference mode or a write cycle other than CL == WL.
  	inline std::atomic<uint32> g_unpackValues[16];
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -341,6 +341,14 @@
+ 	{
+ 		m_dmac.ResumeDMA0();
+ 	}
++	if(CVpu::g_waitOnVifStall && m_vpu1->IsThreaded() && m_vpu1->IsVuRunning() && m_vpu1->GetVif().IsWaitingForProgramEnd())
++	{
++		//VIF1 waits for the program to end: the EE waits too (real time) instead of running on
++		//in emulated time, as if the program took no emulated time (as without the thread).
++		//Otherwise the game sees its frames take far longer: Resident Evil 4 drew 77 frames
++		//in 900 vblanks with the thread, 393 without.
++		m_vpu1->Sync();
++	}
+ 	if(m_vpu1->IsVuReady() || (m_vpu1->IsVuRunning() && !m_vpu1->GetVif().IsWaitingForProgramEnd()))
+ 	{
+ 		m_dmac.ResumeDMA1();
 diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
 --- a/Source/ee/Vpu.cpp
 +++ b/Source/ee/Vpu.cpp
@@ -277,7 +295,16 @@ diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
  #include <functional>
  #include <mutex>
  #include <thread>
-@@ -179,10 +180,21 @@
+@@ -101,6 +102,8 @@
+ 	//are queued and sent to the GIF on the EE thread by Execute(), Sync() or
+ 	//FlushPendingXgKicks(). Switch only while the VU is idle.
+ 	void SetThreaded(bool, const std::function<void()>& workerInit = std::function<void()>());
++	//Threaded VU1: the EE waits for the program when VIF1 does (vu1_wait_on_stall, on)
++	static inline bool g_waitOnVifStall = true;
+ 	bool IsThreaded() const
+ 	{
+ 		return m_threaded;
+@@ -179,10 +182,21 @@
  	std::mutex m_workerMutex;
  	std::condition_variable m_workerCondition;
  	std::condition_variable m_idleCondition;
@@ -301,3 +328,29 @@ diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
  	std::atomic<bool> m_hasPendingKicks = false;
  	std::atomic<bool> m_pendingInterrupt = false;
  	uint32 m_fbrst = 0;
+diff --git a/Source/ee/VuBasicBlock.cpp b/Source/ee/VuBasicBlock.cpp
+--- a/Source/ee/VuBasicBlock.cpp
++++ b/Source/ee/VuBasicBlock.cpp
+@@ -179,7 +179,7 @@
+ 			jitter->PullRel(offsetof(CMIPS, m_State.savedNextBlockIntRegVal));
+ 		}
+ 
+-		uint32 compileHints = hints[instructionIndex] | m_blockCompileHints;
++		uint32 compileHints = hints[instructionIndex] | m_blockCompileHints | g_extraCompileHints;
+ 		arch->SetCompileHints(compileHints);
+ 		arch->SetRelativePipeTime(relativePipeTime);
+ 		arch->CompileInstruction(addressHi, jitter, &m_context, addressHi - m_begin);
+diff --git a/Source/ee/VuBasicBlock.h b/Source/ee/VuBasicBlock.h
+--- a/Source/ee/VuBasicBlock.h
++++ b/Source/ee/VuBasicBlock.h
+@@ -10,6 +10,10 @@
+ 
+ 	bool IsLinkable() const;
+ 
++	//Compile hints added to every VU block (VUShared::COMPILEHINT_*): vu_no_clamp sets
++	//COMPILEHINT_NO_CLAMPING (no float clamping of operands, faster, less exact)
++	static inline uint32 g_extraCompileHints = 0;
++
+ protected:
+ 	void CompileRange(CMipsJitter*) override;
+ 	uint32 GetJitCacheFlags() const override

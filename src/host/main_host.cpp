@@ -555,6 +555,9 @@ int main(int argc, char** argv)
 		uint64_t vmFrames = session.GetVmFrameCount();
 		std::printf("vm frames: %llu, presented frames: %llu, %.2fs (%.1f fps)\n",
 		            (unsigned long long)vmFrames, (unsigned long long)presented, seconds, vmFrames / seconds);
+#ifdef VITAPS2_HAS_GL
+		if(hardware) std::printf("game frames (GPU renderer): %u\n", CGSH_Hardware::g_gameFrames);
+#endif
 
 		if(width == 0)
 		{
