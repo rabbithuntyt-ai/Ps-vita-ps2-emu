@@ -1,4 +1,6 @@
 #include "GSH_Primitives.h"
+#include <cstring>
+#include <vector>
 
 void CGSH_Primitives::WriteRegisterImpl(uint8 registerId, uint64 data)
 {
@@ -136,6 +138,112 @@ void CGSH_Primitives::VertexKick(uint8 registerId, uint64 data)
 		if(drawingKick) { CSoftwareRasterizer::VERTEX v[2] = {ConvertVertex(m_vtxBuffer[1]), ConvertVertex(m_vtxBuffer[0])}; OnDraw(CSoftwareRasterizer::PRIMITIVE_SPRITE, v); }
 		m_vtxCount = 2;
 		break;
+	}
+}
+
+CSoftwareRasterizer::VERTEX CGSH_Primitives::ConvertBatchVertex(const Re4Vu1::GS_VERTEX& in) const
+{
+	unsigned int context = m_primitiveMode.nContext;
+	auto offset = make_convertible<XYOFFSET>(m_nReg[GS_REG_XYOFFSET_1 + context]);
+	CSoftwareRasterizer::VERTEX out;
+	out.x = in.x - static_cast<int32>(offset.nOffsetX);
+	out.y = in.y - static_cast<int32>(offset.nOffsetY);
+	out.z = in.z;
+	out.r = in.rgba[0];
+	out.g = in.rgba[1];
+	out.b = in.rgba[2];
+	out.a = in.rgba[3];
+	out.fog = static_cast<uint8>(m_nReg[GS_REG_FOG] >> 56);
+	out.s = in.s;
+	out.t = in.t;
+	out.q = in.q;
+	auto uv = make_convertible<UV>(m_nReg[GS_REG_UV]);
+	out.u = uv.GetU();
+	out.v = uv.GetV();
+	return out;
+}
+
+void CGSH_Primitives::DrawDirectTriangle(const CSoftwareRasterizer::VERTEX* vertices)
+{
+	if(!m_drawEnabled || m_skipDrawing) return;
+	uint64 primitiveMode = m_primitiveMode;
+	if(m_stateDirty || (primitiveMode != m_lastPrimitiveMode))
+	{
+		OnStateChanged();
+		m_stateDirty = false;
+		m_lastPrimitiveMode = primitiveMode;
+	}
+	m_primitiveCount++;
+	OnDraw(CSoftwareRasterizer::PRIMITIVE_TRIANGLE, vertices);
+}
+
+void CGSH_Primitives::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
+{
+	g_worldBatches++;
+	g_worldVertices += batch.count;
+	struct TIMER
+	{
+		uint64 start = g_clockUs ? g_clockUs() : 0;
+		~TIMER()
+		{
+			if(g_clockUs) g_worldUs += g_clockUs() - start;
+		}
+	} timer;
+	if(batch.count == 0) return;
+	std::vector<Re4Vu1::WORLD_VERTEX> vertices(batch.count);
+	std::vector<Re4Vu1::GS_VERTEX> projected(batch.count);
+	for(uint32 i = 0; i < batch.count; i++)
+	{
+		vertices[i] = Re4Vu1::ReadWorldVertex(batch, i);
+		projected[i] = Re4Vu1::Project(vertices[i]);
+	}
+	auto floatBits = [](float value) {
+		uint32 bits;
+		std::memcpy(&bits, &value, 4);
+		return static_cast<uint64>(bits);
+	};
+	for(uint32 i = 0; i < batch.count; i++)
+	{
+		const auto& v = vertices[i];
+		const auto& g = projected[i];
+		bool clipped = false, back = false;
+		if(i >= 2)
+		{
+			clipped = (vertices[i - 2].clipFlags | vertices[i - 1].clipFlags | v.clipFlags) != 0;
+			if(!clipped)
+			{
+				const auto &g0 = projected[i - 2], &g1 = projected[i - 1];
+				float ax = g1.screenX - g0.screenX, ay = g1.screenY - g0.screenY;
+				float bx = g.screenX - g0.screenX, by = g.screenY - g0.screenY;
+				back = (2.0f * (bx * ay - by * ax) * v.winding) < 0;
+			}
+		}
+		bool adc = v.restart || back || clipped;
+		// The registers as the program's packet leaves them, and the kick (XYZ3: no drawing)
+		m_nReg[GS_REG_ST] = floatBits(g.s) | (floatBits(g.t) << 32);
+		m_nReg[GS_REG_RGBAQ] = static_cast<uint64>(g.rgba[0]) | (static_cast<uint64>(g.rgba[1]) << 8) | (static_cast<uint64>(g.rgba[2]) << 16) |
+		                       (static_cast<uint64>(g.rgba[3]) << 24) | (floatBits(g.q) << 32);
+		uint64 xyz = static_cast<uint64>(static_cast<uint16>(g.x)) | (static_cast<uint64>(static_cast<uint16>(g.y)) << 16) | (static_cast<uint64>(g.z) << 32);
+		VertexKick(adc ? GS_REG_XYZ3 : GS_REG_XYZ2, xyz);
+		if(clipped && !v.restart)
+		{
+			// The program's clipping routine: the triangle clipped to the clip volume,
+			// culled like the others, drawn as a fan.
+			Re4Vu1::WORLD_VERTEX polygon[12];
+			uint32 count = Re4Vu1::ClipTriangle(&vertices[i - 2], polygon);
+			if(count < 3) continue;
+			g_worldClipped++;
+			Re4Vu1::GS_VERTEX out[12];
+			for(uint32 k = 0; k < count; k++) out[k] = Re4Vu1::Project(polygon[k]);
+			float ax = out[1].screenX - out[0].screenX, ay = out[1].screenY - out[0].screenY;
+			float bx = out[2].screenX - out[0].screenX, by = out[2].screenY - out[0].screenY;
+			if((2.0f * (bx * ay - by * ax) * v.winding) < 0) continue;
+			for(uint32 k = 1; k + 1 < count; k++)
+			{
+				CSoftwareRasterizer::VERTEX triangle[3] = {ConvertBatchVertex(out[0]), ConvertBatchVertex(out[k]), ConvertBatchVertex(out[k + 1])};
+				DrawDirectTriangle(triangle);
+			}
+		}
 	}
 }
 

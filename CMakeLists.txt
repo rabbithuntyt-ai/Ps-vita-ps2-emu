@@ -66,6 +66,8 @@ endif()
 # Portable software GS renderer (no GPU API dependency).
 add_library(gsh_software STATIC
 	src/gs/GSH_Primitives.cpp
+	src/gs/Re4Vu1Hle.cpp
+	src/gs/Re4Vu1Hle.h
 	src/gs/GSH_Primitives.h
 	src/gs/GSH_Software.cpp
 	src/gs/GSH_Software.h

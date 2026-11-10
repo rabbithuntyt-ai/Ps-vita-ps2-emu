@@ -9,6 +9,7 @@
 
 #ifdef __vita__
 #include <psp2/gxm.h>
+#include <psp2/kernel/processmgr.h>
 #endif
 
 namespace
@@ -84,7 +85,13 @@ namespace
 
 	uint64 NowUs()
 	{
+#ifdef __vita__
+		// steady_clock costs several microseconds on the Vita; these timers run hundreds
+		// of times per frame
+		return sceKernelGetProcessTimeWide();
+#else
 		return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
 	}
 
 	// Charges the time of the outermost stage only (stages call each other).
@@ -256,6 +263,7 @@ CGSH_Hardware::CGSH_Hardware(const OPTIONS& options)
     : CGSH_Primitives(false)
     , m_options(options)
 {
+	g_clockUs = NowUs;
 }
 
 CGSH_Hardware::~CGSH_Hardware()

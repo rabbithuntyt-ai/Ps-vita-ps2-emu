@@ -46,6 +46,8 @@
 #include "MpegHle.h"
 #include "ee/Vif.h"
 #include "Vu1Stats.h"
+#include "Vu1Verify.h"
+#include "Re4Vu1Hle.h"
 #include <algorithm>
 #include <atomic>
 #include <map>
@@ -257,6 +259,8 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--dump-ram") && (i + 1 < argc)) ramDumpPath = argv[++i];
 		else if(!std::strcmp(argv[i], "--load-state") && (i + 1 < argc)) loadStatePath = argv[++i];
 		else if(!std::strcmp(argv[i], "--vu1-stats")) EmuProfile::g_vu1Programs.enabled = true; //vu1prog.txt
+		else if(!std::strcmp(argv[i], "--vu1-verify")) CVpu::g_programHook = Vu1Verify::Hook; //vu1verify.txt
+		else if(!std::strcmp(argv[i], "--vu1-hle")) Re4Vu1Hle::Enable(true); //RE4 world program without VU1
 	}
 
 	const char* home = std::getenv("HOME");
@@ -440,6 +444,7 @@ int main(int argc, char** argv)
 		}
 		if(statsFile) std::fclose(statsFile);
 		mpegHle.Disable();
+		if(CVpu::g_programHook) Vu1Verify::Write("vu1verify.txt");
 		if(EmuProfile::g_vu1Programs.enabled)
 		{
 			if(std::FILE* file = std::fopen("vu1prog.txt", "w"))
@@ -556,8 +561,13 @@ int main(int argc, char** argv)
 		std::printf("vm frames: %llu, presented frames: %llu, %.2fs (%.1f fps)\n",
 		            (unsigned long long)vmFrames, (unsigned long long)presented, seconds, vmFrames / seconds);
 #ifdef VITAPS2_HAS_GL
-		if(hardware) std::printf("game frames (GPU renderer): %u\n", CGSH_Hardware::g_gameFrames);
+		if(hardware)
+			std::printf("game frames (GPU renderer): %u, primitives drawn: %u\n", CGSH_Hardware::g_gameFrames,
+			            static_cast<CGSH_Hardware*>(session.GetVm()->GetGSHandler())->GetPrimitiveCount());
 #endif
+		if(Re4Vu1Hle::IsEnabled())
+			std::printf("world batches without VU1: %llu (%llu vertices, %llu clipped triangles)\n", (unsigned long long)CGSH_Primitives::g_worldBatches,
+			            (unsigned long long)CGSH_Primitives::g_worldVertices, (unsigned long long)CGSH_Primitives::g_worldClipped);
 
 		if(width == 0)
 		{

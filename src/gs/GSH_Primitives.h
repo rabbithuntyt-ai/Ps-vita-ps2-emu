@@ -2,6 +2,7 @@
 
 #include "gs/GSHandler.h"
 #include "SoftwareRasterizer.h"
+#include "Re4Vu1Batch.h"
 
 // Common front end of the VitaPS2 GS renderers: tracks GS register writes,
 // assembles primitives from vertex kicks (strips, fans, sprites...) and
@@ -28,6 +29,14 @@ public:
 	virtual void SetInterlacedRendering(bool)
 	{
 	}
+
+	// GS thread: a batch of Resident Evil 4's world vertex program, done here instead of on
+	// VU1 (Re4Vu1Hle). Same registers, kicks and draws as the program's GIF packet, but
+	// triangles crossing the clip volume are clipped here (the program's clipping routine).
+	void DrawWorldBatch(const Re4Vu1::WORLD_BATCH&);
+	static inline uint64 g_worldBatches = 0, g_worldVertices = 0, g_worldClipped = 0;
+	static inline uint64 g_worldUs = 0;           //time in DrawWorldBatch (with g_clockUs)
+	static inline uint64 (*g_clockUs)() = nullptr; //a cheap clock, set by the renderer
 
 protected:
 	void WriteRegisterImpl(uint8, uint64) override;
@@ -59,6 +68,9 @@ protected:
 	bool m_skipDrawing = false; //frame skip
 
 private:
+	// A triangle straight to OnDraw (state brought up to date first), outside the vertex queue.
+	void DrawDirectTriangle(const CSoftwareRasterizer::VERTEX*);
+	CSoftwareRasterizer::VERTEX ConvertBatchVertex(const Re4Vu1::GS_VERTEX&) const;
 	void VertexKick(uint8, uint64);
 	void BeginPrimitive(uint64);
 	CSoftwareRasterizer::VERTEX ConvertVertex(const VERTEX&) const;
