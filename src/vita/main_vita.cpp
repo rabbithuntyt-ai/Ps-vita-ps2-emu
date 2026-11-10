@@ -343,6 +343,7 @@ namespace
 		else if(key == "content_textures") CGSH_Hardware::g_contentTextures = value != 0;
 		else if(key == "gpu_relayout") CGSH_Hardware::g_gpuRelayout = value != 0;
 		else if(key == "feedback_draw") CGSH_Hardware::g_feedbackDraw = value != 0;
+		else if(key == "gpu_alpha_clut") CGSH_Hardware::g_gpuAlphaClut = value != 0;
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
 	}

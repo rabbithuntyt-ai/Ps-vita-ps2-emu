@@ -288,6 +288,19 @@ void CGSH_Hardware::ReleaseImpl()
 	if(m_fogRamp) glDeleteTextures(1, &m_fogRamp);
 	m_fogRamp = 0;
 	if(m_displayUploadTexture) glDeleteTextures(1, &m_displayUploadTexture);
+	for(auto& [size, ring] : m_alphaClutTargets)
+	{
+		for(auto& entry : ring)
+		{
+			glDeleteFramebuffers(1, &entry.framebuffer);
+			glDeleteTextures(1, &entry.texture);
+		}
+	}
+	m_alphaClutTargets.clear();
+	if(m_alphaClutTexture) glDeleteTextures(1, &m_alphaClutTexture);
+	m_alphaClutTexture = 0;
+	if(m_alphaClutProgram) glDeleteProgram(m_alphaClutProgram);
+	m_alphaClutProgram = 0;
 	if(m_feedbackTexture) glDeleteTextures(1, &m_feedbackTexture);
 	if(m_feedbackFramebuffer) glDeleteFramebuffers(1, &m_feedbackFramebuffer);
 	m_feedbackFramebuffer = 0;
@@ -1332,6 +1345,12 @@ void CGSH_Hardware::BindTexture()
 	// grade the colours by drawing the frame over itself through a palette indexed by
 	// its alpha (Resident Evil 4, in strips) would read the frame back for each strip.
 	bool alphaTexture = (s.tpsm == CGSHandler::PSMT8H) || (s.tpsm == CGSHandler::PSMT4HL) || (s.tpsm == CGSHandler::PSMT4HH);
+	// Alpha indices of a render target whose alpha the GPU drew: looked up in the CLUT on
+	// the GPU (a shader pass) instead of reading the target back.
+	if(alphaTexture && g_gpuAlphaClut && BindAlphaClutTexture())
+	{
+		return;
+	}
 	DownloadTargetsOverlapping(firstPage * 8192, pageCount * 8192, false, alphaTexture);
 
 	uint64 lookupStart = NowUs();
@@ -1490,6 +1509,236 @@ void CGSH_Hardware::BindTexture()
 			}
 		}
 	}
+}
+
+namespace
+{
+	const char* g_alphaClutVertexShader =
+	    "attribute vec4 aPosition;\n"
+	    "attribute vec2 aTexCoord;\n"
+	    "varying vec2 vTexCoord;\n"
+	    "void main()\n"
+	    "{\n"
+	    "	gl_Position = aPosition;\n"
+	    "	vTexCoord = aTexCoord;\n"
+	    "}\n";
+	// Target alpha is stored doubled (GS 0x80 -> 255): GS alpha = (stored + 1) / 2.
+	// uMode: 0 PSMT8H (index = alpha), 1 PSMT4HL (low nibble), 2 PSMT4HH (high nibble).
+	const char* g_alphaClutFragmentShader =
+	    "uniform sampler2D uSource;\n"
+	    "uniform sampler2D uClut;\n"
+	    "uniform float uMode;\n"
+	    "varying vec2 vTexCoord;\n"
+	    "void main()\n"
+	    "{\n"
+	    "	float stored = floor(texture2D(uSource, vTexCoord).a * 255.0 + 0.5);\n"
+	    "	float alpha = floor((stored + 1.0) * 0.5);\n"
+	    "	float index = alpha;\n"
+	    "	if(uMode > 1.5) index = floor(alpha / 16.0);\n"
+	    "	else if(uMode > 0.5) index = alpha - floor(alpha / 16.0) * 16.0;\n"
+	    "	gl_FragColor = texture2D(uClut, vec2((index + 0.5) / 256.0, 0.5));\n"
+	    "}\n";
+
+	GLuint CompileShader(GLenum type, const char* source)
+	{
+		GLuint shader = glCreateShader(type);
+		glShaderSource(shader, 1, &source, nullptr);
+		glCompileShader(shader);
+		GLint ok = 0;
+		glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+		if(!ok)
+		{
+			char log[512] = {};
+			glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
+			std::fprintf(stderr, "GSH_Hardware: shader compile failed: %s\n", log);
+			glDeleteShader(shader);
+			return 0;
+		}
+		return shader;
+	}
+}
+
+bool CGSH_Hardware::BindAlphaClutTexture()
+{
+	const auto& s = m_state;
+	// The target holding the texture, same buffer width, the texture page aligned in it
+	// (as for a target sampled directly: see the start of BindTexture).
+	TARGET* source = nullptr;
+	uint32 offsetX = 0, offsetY = 0;
+	for(auto& target : m_targets)
+	{
+		if((target->fbw != s.tbw) || (PsmClass(target->psm) != 32) || GsMemory::IsPsm24(target->psm)) continue;
+		if((s.tbp < target->fbp) || ((s.tbp - target->fbp) % 8192) != 0) continue;
+		GS_SURFACE surface;
+		surface.Init(target->psm, target->fbp, target->fbw);
+		uint32 pagesPerRow = std::max<uint32>(surface.pagesPerRow, 1);
+		uint32 page = (s.tbp - target->fbp) / 8192;
+		uint32 x = (page % pagesPerRow) << surface.pwShift;
+		uint32 y = (page / pagesPerRow) << surface.phShift;
+		if((y >= target->height) || (x >= target->width)) continue;
+		if((y != 0) && (y + 2 >= target->drawnRows)) continue;
+		source = target.get();
+		offsetX = x;
+		offsetY = y;
+		break;
+	}
+	// Alpha not drawn by the GPU: GS memory is current, the usual decode (cached) is cheaper.
+	if(!source || !source->alphaDirty) return false;
+	if(!m_alphaClutProgram)
+	{
+		if(m_alphaClutFailed) return false;
+		GLuint vs = CompileShader(GL_VERTEX_SHADER, g_alphaClutVertexShader);
+		GLuint fs = CompileShader(GL_FRAGMENT_SHADER, g_alphaClutFragmentShader);
+		if(!vs || !fs)
+		{
+			m_alphaClutFailed = true;
+			return false;
+		}
+		m_alphaClutProgram = glCreateProgram();
+		glAttachShader(m_alphaClutProgram, vs);
+		glAttachShader(m_alphaClutProgram, fs);
+		glBindAttribLocation(m_alphaClutProgram, 0, "aPosition");
+		glBindAttribLocation(m_alphaClutProgram, 1, "aTexCoord");
+		glLinkProgram(m_alphaClutProgram);
+		GLint ok = 0;
+		glGetProgramiv(m_alphaClutProgram, GL_LINK_STATUS, &ok);
+		if(!ok)
+		{
+			std::fprintf(stderr, "GSH_Hardware: alpha CLUT program link failed\n");
+			glDeleteProgram(m_alphaClutProgram);
+			m_alphaClutProgram = 0;
+			m_alphaClutFailed = true;
+			return false;
+		}
+		m_alphaClutSourceLocation = glGetUniformLocation(m_alphaClutProgram, "uSource");
+		m_alphaClutClutLocation = glGetUniformLocation(m_alphaClutProgram, "uClut");
+		m_alphaClutModeLocation = glGetUniformLocation(m_alphaClutProgram, "uMode");
+		glGenTextures(1, &m_alphaClutTexture);
+		glBindTexture(GL_TEXTURE_2D, m_alphaClutTexture);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	}
+	CPartTimer timer(GPU_PART_ALPHA_CLUT);
+	FlushBatch();
+	uint32 sampledRows = std::min(offsetY + s.th, source->height);
+	if(source->drawnRows > 2) sampledRows = std::min(sampledRows, std::max(source->drawnRows - 2, offsetY + 1));
+	EnsureValidRows(*source, sampledRows);
+	source->lastUseFrame = m_frameNumber;
+
+	// The palette, as the texture cache decodes it (texels hold GS alpha as is).
+	uint32 clut[256] = {};
+	{
+		bool clut32 = !GsMemory::IsPsm16(s.cpsm);
+		bool idtex4 = (s.tpsm != CGSHandler::PSMT8H);
+		uint32 count = idtex4 ? 16 : 256;
+		const uint16* clutRam = m_pCLUT;
+		for(uint32 index = 0; index < count; index++)
+		{
+			if(clut32)
+			{
+				uint32 offset = idtex4 ? (((s.csa & 0xF) * 16) + index) : (((s.csa * 16) + index) & 0xFF);
+				clut[index] = static_cast<uint32>(clutRam[offset]) | (static_cast<uint32>(clutRam[offset + 0x100]) << 16);
+			}
+			else
+			{
+				uint32 offset = ((s.csa * 16) + index) & 0x1FF;
+				uint32 color16 = clutRam[offset];
+				uint32 alpha = 0;
+				if(color16 & 0x8000)
+					alpha = s.ta1;
+				else if(!(s.aem && ((color16 & 0x7FFF) == 0)))
+					alpha = s.ta0;
+				clut[index] = (GsMemory::Color16To32(color16) & 0x00FFFFFF) | (alpha << 24);
+			}
+		}
+	}
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_alphaClutTexture);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 256, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, clut);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+	// The result: a ring of render textures of this size (draws queued earlier may still
+	// sample the previous ones).
+	uint32 width = std::min<uint32>(s.tw, 1024), height = std::min<uint32>(s.th, 1024);
+	auto& ring = m_alphaClutTargets[(static_cast<uint64>(width) << 32) | height];
+	if(ring.size() < 4)
+	{
+		ring.emplace_back();
+		auto& entry = ring.back();
+		glActiveTexture(GL_TEXTURE0);
+		glGenTextures(1, &entry.texture);
+		glBindTexture(GL_TEXTURE_2D, entry.texture);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glGenFramebuffers(1, &entry.framebuffer);
+		glBindFramebuffer(GL_FRAMEBUFFER, entry.framebuffer);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, entry.texture, 0);
+	}
+	auto& entry = ring[m_alphaClutNext++ % ring.size()];
+
+	// One quad over the result, sampling the target where the texture lies.
+	float s0 = static_cast<float>(offsetX) / source->width, t0 = static_cast<float>(offsetY) / source->height;
+	float s1 = static_cast<float>(offsetX + width) / source->width, t1 = static_cast<float>(offsetY + height) / source->height;
+	const float vertices[6][6] = {
+	    {-1, -1, 0, 1, s0, t0}, {1, -1, 0, 1, s1, t0}, {-1, 1, 0, 1, s0, t1},
+	    {1, -1, 0, 1, s1, t0}, {1, 1, 0, 1, s1, t1}, {-1, 1, 0, 1, s0, t1}};
+	glBindFramebuffer(GL_FRAMEBUFFER, entry.framebuffer);
+	glViewport(0, 0, width, height);
+	glDisable(GL_SCISSOR_TEST);
+	glDisable(GL_DEPTH_TEST);
+	glDepthMask(GL_FALSE);
+	glDisable(GL_BLEND);
+	glDisable(GL_ALPHA_TEST);
+	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, source->colorTexture);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glUseProgram(m_alphaClutProgram);
+	glUniform1i(m_alphaClutSourceLocation, 0);
+	glUniform1i(m_alphaClutClutLocation, 1);
+	glUniform1f(m_alphaClutModeLocation, (s.tpsm == CGSHandler::PSMT8H) ? 0.0f : (s.tpsm == CGSHandler::PSMT4HL) ? 1.0f : 2.0f);
+	glDisableClientState(GL_VERTEX_ARRAY);
+	glDisableClientState(GL_COLOR_ARRAY);
+	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	glEnableVertexAttribArray(0);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(vertices[0]), &vertices[0][0]);
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(vertices[0]), &vertices[0][4]);
+	glDrawArrays(GL_TRIANGLES, 0, 6);
+	glDisableVertexAttribArray(0);
+	glDisableVertexAttribArray(1);
+	glUseProgram(0);
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glEnableClientState(GL_COLOR_ARRAY);
+	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE0);
+	m_depthSceneValid = false;
+	m_stateApplied = false;
+	m_stats.alphaClutPasses++;
+	if(m_diagFile && (m_diagUploads.size() < 60000))
+	{
+		char text[64];
+		std::snprintf(text, sizeof(text), " A%X/%u/%X@%X", s.tbp, s.tbw, s.tpsm, source->fbp);
+		m_diagUploads += text;
+	}
+
+	// Bound for the draws (ApplyState binds the draw's own framebuffer next).
+	glBindTexture(GL_TEXTURE_2D, entry.texture);
+	GLint filter = s.bilinear ? GL_LINEAR : GL_NEAREST;
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (s.wms == CLAMP_MODE_REPEAT) ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (s.wmt == CLAMP_MODE_REPEAT) ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+	m_textureAlphaDoubled = false;
+	m_texScaleS = static_cast<float>(s.tw) / static_cast<float>(width);
+	m_texScaleT = static_cast<float>(s.th) / static_cast<float>(height);
+	m_texOffsetS = m_texOffsetT = 0;
+	return true;
 }
 
 CGSH_Hardware::AXIS_REGION CGSH_Hardware::ResolveWrap(uint32 mode, uint32 minValue, uint32 maxValue, uint32 size)
