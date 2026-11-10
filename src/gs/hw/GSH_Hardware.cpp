@@ -32,8 +32,8 @@ namespace
 			auto pointerField = *reinterpret_cast<SceGxmDepthStencilSurface**>(base + offset + sizeof(SceGxmDepthStencilSurface));
 			auto depthField = *reinterpret_cast<void**>(base + offset + sizeof(SceGxmDepthStencilSurface) + sizeof(void*));
 			if((depthField != depthData) || ((pointerField != surface) && (pointerField != nullptr))) continue;
-			sceGxmDepthStencilSurfaceSetForceLoadMode(surface, SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
-			sceGxmDepthStencilSurfaceSetForceStoreMode(surface, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
+			//sceGxmDepthStencilSurfaceSetForceLoadMode / SetForceStoreMode set these bits (no import)
+			surface->zlsControl |= SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED | SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED;
 			return true;
 		}
 		return false;
