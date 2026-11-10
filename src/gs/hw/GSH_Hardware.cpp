@@ -1883,6 +1883,13 @@ void CGSH_Hardware::ApplyState()
 		return;
 	}
 	EnsureValidRows(*target, static_cast<uint32>(std::max(s.scay1, 0)) + 1);
+	if(m_diagFile && (target != m_diagLastTarget) && (m_diagUploads.size() < 60000))
+	{
+		char text[96];
+		std::snprintf(text, sizeof(text), " S%X/%u/%X:z%X/%X%s%s", s.fbp, s.fbw, s.fpsm, s.zbp, s.zpsm, s.textured ? "t" : "", s.alphaBlend ? "b" : "");
+		m_diagUploads += text;
+		m_diagLastTarget = target;
+	}
 	m_currentTarget = target;
 	// Depth tested or written: the target's depth buffer matters.
 	bool depthActive = s.zte && !((s.ztst == DEPTH_TEST_ALWAYS) && s.zmsk);

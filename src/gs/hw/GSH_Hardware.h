@@ -390,6 +390,7 @@ private:
 	bool m_stateApplied = false;
 	bool m_drawNothing = false;
 	TARGET* m_currentTarget = nullptr;
+	const TARGET* m_diagLastTarget = nullptr;
 	const TARGET* m_lastDisplayedTarget = nullptr;
 	uint32 m_lastDisplayedBatches = 0;
 	GLenum m_batchMode = GL_TRIANGLES;

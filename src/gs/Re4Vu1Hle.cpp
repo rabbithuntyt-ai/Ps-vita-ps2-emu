@@ -22,14 +22,26 @@ namespace
 
 	std::shared_ptr<void> Replace(CVpu& vpu, uint32 address)
 	{
-		if(address != 0x1408) return nullptr;
 		const uint8* micro = vpu.GetMicroMemory();
 		if(!IsWorldProgram(micro)) return nullptr;
 		const uint8* mem = vpu.GetVuMemory();
 		auto& state = vpu.GetContext().m_State;
-		uint32 top = vpu.GetVif().GetTOP() & 0x3FF;
-		uint32 vi5 = state.nCOP2VI[5] & 0x3FF;
 		auto qword = [mem](uint32 index) { return mem + ((index & 0x3FF) * 16); };
+		auto lower = [micro](uint32 at) { return *reinterpret_cast<const uint32*>(micro + (at & 0x3FFF)); };
+		// Entries: 0x1408 (B 0x1040, after a batch), or a stub choosing the constants:
+		//   NOP / IADDIU VI5, VI0, imm / B 0x1040 / LQ VF31, -3(VI5) (0x00A0, 0x00C0)
+		uint32 vi5 = state.nCOP2VI[5] & 0x3FF;
+		bool stub = false;
+		if(address != 0x1408)
+		{
+			uint32 setVi5 = lower(address + 8), branch = lower(address + 16), loadVf31 = lower(address + 24);
+			bool isStub = (lower(address) == 0x8000033C) && ((setVi5 & 0xFFFF0000) == 0x10050000) && ((branch & 0xFFFFF800) == 0x40000000) &&
+			              ((((address + 16 + 8) + (branch & 0x7FF) * 8) & 0x3FFF) == 0x1040) && (loadVf31 == 0x01FF2FFD);
+			if(!isStub) return nullptr;
+			vi5 = setVi5 & 0x3FF;
+			stub = true;
+		}
+		uint32 top = vpu.GetVif().GetTOP() & 0x3FF;
 		uint32 header[4];
 		std::memcpy(header, qword(top + 0x20), 16);
 		uint64 tag = static_cast<uint64>(header[0]) | (static_cast<uint64>(header[1]) << 32);
@@ -49,6 +61,12 @@ namespace
 		}
 		std::memcpy(&batch->colorOffset, qword(vi5 - 2), 16);
 		std::memcpy(&batch->colorScale, qword(vi5 - 1), 16);
+		if(stub)
+		{
+			// The stub's own effects: VI5 and VF31 (the delay slot's LQ)
+			state.nCOP2VI[5] = vi5;
+			std::memcpy(&state.nCOP2[31], qword(vi5 - 3), 16);
+		}
 		std::memcpy(&batch->vf31, &state.nCOP2[31], 16);
 		batch->raw.resize(batch->count * 12);
 		for(uint32 i = 0; i < batch->count * 3; i++)
