@@ -134,7 +134,7 @@ diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
  	m_blockFpRoundingModes.clear();
  	m_idleLoopBlocks.clear();
  	CGenericMipsExecutor::Reset();
-@@ -148,11 +153,163 @@
+@@ -148,11 +153,164 @@
  {
  	uint32 rangeSize = end - start;
  	SetMemoryProtected(m_ram + start, rangeSize, false);
@@ -169,6 +169,7 @@ diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
 +
 +void CEeExecutor::AddTier2Links(CTier2Block* region)
 +{
++	if(Tier2::g_settings.exits < 2) return;
 +	const auto& slots = region->GetExitSlots();
 +	for(size_t i = 0; i < slots.size(); i++)
 +	{
@@ -298,7 +299,7 @@ diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
  	//Inside a region already compiled (entered there after a quota exit, or by a
  	//branch from elsewhere): a block, not another overlapping region (each would
  	//compile the same code again: loop programs spent seconds compiling)
-@@ -202,6 +359,11 @@
+@@ -202,6 +360,11 @@
  	EmuProfile::CScope profileScope(EmuProfile::SECTION_JIT);
  	uint32 blockSize = (end - start) + 4;
  
@@ -326,7 +327,7 @@ diff --git a/Source/ee/Tier2.h b/Source/ee/Tier2.h
 new file mode 100644
 --- /dev/null
 +++ b/Source/ee/Tier2.h
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,150 @@
 +#pragma once
 +
 +// Tier 2 recompiler for EE code (docs/AOT_TRANSLATION.md), next to the JIT.
@@ -375,7 +376,13 @@ new file mode 100644
 +		//Native code only for regions starting in [nativeLow, nativeHigh) (others interpreted: bisection)
 +		uint32 nativeLow = 0, nativeHigh = 0xFFFFFFFF;
 +		const char* dumpPath = nullptr; //regions in [nativeLow, nativeHigh) appended there when built (IR, guest code)
-+		uint32 maxRegisters = 7;    //guest registers in host registers (0-7; the first 5 are callee saved)
++		uint32 maxRegisters = 7;
++		//Checking (native code only): each region run is done by the interpreter first
++		//(memory writes logged), undone, then by the native code; differences go to verifyPath
++		//Region exits: 0 back to the executor, 1 through the indirect dispatch, 2 linked (default)
++		uint32 exits = 2;
++		bool verify = false;
++		const char* verifyPath = nullptr;    //guest registers in host registers (0-7; the first 5 are callee saved)
 +	};
 +	extern SETTINGS g_settings;
 +
@@ -399,6 +406,7 @@ new file mode 100644
 +		//MMI instructions that ended a block: function (0-63), or 64 + group * 32 + sa for
 +		//MMI0 (function 0x08), MMI1 (0x28), MMI2 (0x09), MMI3 (0x29)
 +		uint32 mmiStops[64 + 4 * 32] = {};
++		uint64 verified = 0, verifySkipped = 0, verifyMismatches = 0;
 +	};
 +	extern STATS g_stats;
 +	//The stops, most frequent first, as text
@@ -427,6 +435,7 @@ new file mode 100644
 +	bool Build();
 +
 +	void Execute() override;
++	struct WRITE; //checking mode: a memory write and the bytes it replaced
 +	//The region's IR, as text (debugging)
 +	void Dump(FILE*) const;
 +
@@ -462,12 +471,18 @@ new file mode 100644
 +	std::vector<EXIT_SLOT> m_exitSlots;
 +	uintptr_t m_unlinkedExit = 0;
 +	bool m_interpret = false;
++	bool m_verify = false;
++	bool m_reported = false;
++	uint32 m_verifyRuns = 0; //checked runs (the first 64; then native only)
++	CMemoryFunction m_native;
++	void Interpret(std::vector<WRITE>* log);
++	void Verify();
 +};
 diff --git a/Source/ee/Tier2.cpp b/Source/ee/Tier2.cpp
 new file mode 100644
 --- /dev/null
 +++ b/Source/ee/Tier2.cpp
-@@ -0,0 +1,3387 @@
+@@ -0,0 +1,3580 @@
 +#include "Tier2.h"
 +#include <algorithm>
 +#include <chrono>
@@ -510,6 +525,8 @@ new file mode 100644
 +			if(g_stats.mmiStops[i] != 0) mmi.push_back({g_stats.mmiStops[i], i});
 +		}
 +		std::sort(mmi.rbegin(), mmi.rend());
++		fprintf(file, "verify: checked %llu skipped %llu mismatches %llu", static_cast<unsigned long long>(g_stats.verified), static_cast<unsigned long long>(g_stats.verifySkipped), static_cast<unsigned long long>(g_stats.verifyMismatches));
++		fputc(10, file);
 +		fprintf(file, "mmi:");
 +		for(const auto& stop : mmi)
 +		{
@@ -1452,13 +1469,54 @@ new file mode 100644
 +	//------------------------------------------------------------------------
 +	//Interpreter (any host)
 +
++	//Checking mode: a region run that touches more than RAM and the scratchpad (I/O,
++	//not undoable) is not checked
++	struct VERIFY_ABORT
++	{
++	};
++
 +	class CInterpreter
 +	{
 +	public:
-+		CInterpreter(CMIPS& context, uint64& temp)
++		CInterpreter(CMIPS& context, uint64& temp, std::vector<CTier2Block::WRITE>* log = nullptr)
 +		    : m_context(context)
 +		    , m_temp(temp)
++		    , m_log(log)
 +		{
++		}
++
++		void Run(const INST& inst)
++		{
++			if(!m_log)
++			{
++				RunInner(inst);
++				return;
++			}
++			bool memory = IsLoad(inst.op) || IsStore(inst.op) || (inst.op == OP_LWC1) || (inst.op == OP_SWC1);
++			if(!memory)
++			{
++				RunInner(inst);
++				return;
++			}
++			uint32 address = static_cast<uint32>(Get(inst.rs)) + inst.imm;
++			uint32 size = 4;
++			switch(inst.op)
++			{
++			case OP_LB: case OP_LBU: case OP_SB: size = 1; break;
++			case OP_LH: case OP_LHU: case OP_SH: size = 2; break;
++			case OP_LD: case OP_SD: size = 8; break;
++			case OP_LQ: case OP_SQ: size = 16; address &= ~15; break;
++			default: break;
++			}
++			bool plain = ((address & 0xFE000000) == 0) || ((address & 0xFFFFC000) == 0x70000000);
++			if(!plain) throw VERIFY_ABORT();
++			bool write = IsStore(inst.op) || (inst.op == OP_SWC1);
++			if(!write)
++			{
++				RunInner(inst);
++				return;
++			}
++			LogWrite(address, size, inst);
 +		}
 +
 +		uint64 Get(uint8 reg) const
@@ -1497,7 +1555,9 @@ new file mode 100644
 +			return false;
 +		}
 +
-+		void Run(const INST& inst)
++		void LogWrite(uint32 address, uint32 size, const INST& inst);
++
++		void RunInner(const INST& inst)
 +		{
 +			uint64 s = Get(inst.rs), t = Get(inst.rt);
 +			uint32 s32 = static_cast<uint32>(s), t32 = static_cast<uint32>(t);
@@ -1688,6 +1748,7 @@ new file mode 100644
 +
 +		CMIPS& m_context;
 +		uint64& m_temp;
++		std::vector<CTier2Block::WRITE>* m_log = nullptr;
 +	};
 +
 +	//------------------------------------------------------------------------
@@ -2011,8 +2072,9 @@ new file mode 100644
 +	class CArmCompiler
 +	{
 +	public:
-+		CArmCompiler(const CTier2Block::REGION& region)
++		CArmCompiler(const CTier2Block::REGION& region, bool noDispatch = false)
 +		    : m_region(region)
++		    , m_noDispatch(noDispatch)
 +		{
 +		}
 +
@@ -2090,6 +2152,7 @@ new file mode 100644
 +		int m_slowExitLabel = -1;
 +		std::vector<std::function<void()>> m_cold;
 +		std::map<std::string, int> m_stubs;
++		bool m_noDispatch = false; //every exit back to the executor (checking mode)
 +	};
 +
 +	constexpr int CArmCompiler::ALLOCATABLE[];
@@ -3446,6 +3509,11 @@ new file mode 100644
 +			m_emit.Str(IP, FP, offsetof(CMIPS, m_State.nPC));
 +		}
 +		if(checked) m_emit.B(m_slowExitLabel, LE);
++		if(m_noDispatch)
++		{
++			m_emit.B(m_slowExitLabel);
++			return;
++		}
 +#ifdef TIER2_ARM
 +		if(edge.target != EDGE_EXIT_REG)
 +		{
@@ -3697,11 +3765,26 @@ new file mode 100644
 +			}
 +		}
 +	}
-+	if(mode == MODE_NATIVE)
++	if((mode == MODE_NATIVE) && g_settings.verify)
 +	{
 +		std::vector<uint8> code;
 +		uint32 linkEntryOffset = 0;
-+		CArmCompiler compiler(*m_region);
++		CArmCompiler compiler(*m_region, true);
++		if(compiler.Compile(code, linkEntryOffset))
++		{
++			//Entered from the executor only (Execute): blocks link to the JIT's empty stub
++			m_native = CMemoryFunction(code.data(), code.size());
++			m_verify = true;
++			Compile();
++			compiled = true;
++			g_stats.codeBytes += code.size();
++		}
++	}
++	else if(mode == MODE_NATIVE)
++	{
++		std::vector<uint8> code;
++		uint32 linkEntryOffset = 0;
++		CArmCompiler compiler(*m_region, g_settings.exits == 0);
 +		if(compiler.Compile(code, linkEntryOffset))
 +		{
 +			SetNativeCode(code.data(), code.size(), linkEntryOffset);
@@ -3801,18 +3884,143 @@ new file mode 100644
 +	//The interpreter's stub: nothing (prolog, epilog)
 +}
 +
++struct CTier2Block::WRITE
++{
++	uint32 address;
++	uint32 size;
++	uint8 before[16];
++	uint8 after[16];
++};
++
++void Tier2::CInterpreter::LogWrite(uint32 address, uint32 size, const INST& inst)
++{
++	CTier2Block::WRITE write;
++	write.address = address;
++	write.size = size;
++	for(uint32 i = 0; i < size; i++) write.before[i] = static_cast<uint8>(MemoryUtils_GetByteProxy(&m_context, address + i));
++	RunInner(inst);
++	for(uint32 i = 0; i < size; i++) write.after[i] = static_cast<uint8>(MemoryUtils_GetByteProxy(&m_context, address + i));
++	m_log->push_back(write);
++}
++
 +void CTier2Block::Execute()
 +{
 +	using namespace Tier2;
++	if(m_verify)
++	{
++		Verify();
++		return;
++	}
 +	if(!m_interpret)
 +	{
 +		CBasicBlock::Execute();
 +		return;
 +	}
-+	auto& state = m_context.m_State;
 +	g_stats.interpretedRuns++;
++	Interpret(nullptr);
++}
++
++//Checking mode: interpreter (logged, undone), then native code, from the same state
++void CTier2Block::Verify()
++{
++	using namespace Tier2;
++	auto& state = m_context.m_State;
++	if(m_verifyRuns >= 64)
++	{
++		m_native(&m_context);
++		return;
++	}
++	m_verifyRuns++;
++	MIPSSTATE before = state;
++	std::vector<WRITE> log;
++	bool checked = true;
++	try
++	{
++		Interpret(&log);
++	}
++	catch(const VERIFY_ABORT&)
++	{
++		checked = false;
++	}
++	MIPSSTATE expected = state;
++	for(auto it = log.rbegin(); it != log.rend(); ++it)
++	{
++		for(uint32 i = 0; i < it->size; i++) MemoryUtils_SetByteProxy(&m_context, it->before[i], it->address + i);
++	}
++	state = before;
++	m_native(&m_context);
++	if(!checked)
++	{
++		g_stats.verifySkipped++;
++		return;
++	}
++	g_stats.verified++;
++	//Memory: the last value written at each byte
++	std::map<uint32, uint8> written;
++	for(const auto& write : log)
++	{
++		for(uint32 i = 0; i < write.size; i++) written[write.address + i] = write.after[i];
++	}
++	std::vector<std::pair<uint32, std::pair<uint8, uint8>>> memoryDiffs;
++	for(const auto& byte : written)
++	{
++		uint8 now = static_cast<uint8>(MemoryUtils_GetByteProxy(&m_context, byte.first));
++		if(now != byte.second) memoryDiffs.push_back({byte.first, {byte.second, now}});
++	}
++	bool stateSame = (memcmp(&expected, &state, sizeof(MIPSSTATE)) == 0);
++	if(stateSame && memoryDiffs.empty()) return;
++	g_stats.verifyMismatches++;
++	if(m_reported || !g_settings.verifyPath || (g_stats.verifyMismatches > 40)) return;
++	m_reported = true;
++	FILE* file = fopen(g_settings.verifyPath, "a");
++	if(!file) return;
++	fprintf(file, "MISMATCH region %08X entered at nPC %08X, quota %d", m_begin, before.nPC, before.cycleQuota);
++	fputc(10, file);
++	auto field = [](uint32 offset, char* name, size_t size) {
++		uint32 gpr = static_cast<uint32>(offsetof(MIPSSTATE, nGPR));
++		if((offset >= gpr) && (offset < gpr + 32 * 16))
++			snprintf(name, size, "gpr%u.w%u", (offset - gpr) / 16, ((offset - gpr) % 16) / 4);
++		else if((offset >= offsetof(MIPSSTATE, nCOP1)) && (offset < offsetof(MIPSSTATE, nCOP1) + 32 * 4))
++			snprintf(name, size, "fpr%u", static_cast<unsigned int>((offset - offsetof(MIPSSTATE, nCOP1)) / 4));
++		else
++			snprintf(name, size, "state+0x%X", offset);
++	};
++	const uint32* a = reinterpret_cast<const uint32*>(&expected);
++	const uint32* b = reinterpret_cast<const uint32*>(&state);
++	int shown = 0;
++	for(uint32 i = 0; (i < sizeof(MIPSSTATE) / 4) && (shown < 24); i++)
++	{
++		if(a[i] == b[i]) continue;
++		char name[64];
++		field(i * 4, name, sizeof(name));
++		fprintf(file, "  %s: interpreter %08X native %08X (before %08X)", name, a[i], b[i], reinterpret_cast<const uint32*>(&before)[i]);
++		fputc(10, file);
++		shown++;
++	}
++	for(size_t i = 0; (i < memoryDiffs.size()) && (i < 16); i++)
++	{
++		fprintf(file, "  mem %08X: interpreter %02X native %02X", memoryDiffs[i].first, memoryDiffs[i].second.first, memoryDiffs[i].second.second);
++		fputc(10, file);
++	}
++	fprintf(file, "  registers before:");
++	for(uint32 r = 0; r < 32; r++) fprintf(file, " %u=%08X:%08X", r, before.nGPR[r].nV1, before.nGPR[r].nV0);
++	fputc(10, file);
++	for(const auto& range : m_ranges)
++	{
++		fprintf(file, "  code %08X:", range.begin);
++		for(uint32 address = range.begin; address <= range.end; address += 4) fprintf(file, " %08X", m_context.m_pMemoryMap->GetInstruction(address));
++		fputc(10, file);
++	}
++	Dump(file);
++	fclose(file);
++}
++
++void CTier2Block::Interpret(std::vector<WRITE>* log)
++{
++	using namespace Tier2;
++	auto& state = m_context.m_State;
 +	uint64 temp = 0;
-+	CInterpreter interpreter(m_context, temp);
++	CInterpreter interpreter(m_context, temp, log);
 +	const auto& blocks = m_region->blocks;
 +	int index = 0;
 +	while(true)

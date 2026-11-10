@@ -69,7 +69,7 @@ diff --git a/Source/DiskUtils.cpp b/Source/DiskUtils.cpp
  				if(m_position >= m_bufferStart + m_bufferValid) break;
  			}
  			uint64 offset = m_position - m_bufferStart;
-@@ -148,6 +177,69 @@
+@@ -148,6 +177,81 @@
  		SECTOR_SIZE = 2048,
  		BUFFER_SIZE = 128 * 1024,
  	};
@@ -93,7 +93,14 @@ diff --git a/Source/DiskUtils.cpp b/Source/DiskUtils.cpp
 +		if(!m_aheadThread.joinable()) return false;
 +		std::unique_lock<std::mutex> lock(m_aheadMutex);
 +		if(m_aheadStart != start) return false;
-+		m_aheadDone.wait(lock, [this]() { return m_aheadReady || (!m_aheadRequested && !m_aheadBusy); });
++		//Polled: condition variables lose wakeups on the Vita (a lost one here stopped the
++		//emulation thread for good: RE4 hung while loading)
++		while(!(m_aheadReady || (!m_aheadRequested && !m_aheadBusy)))
++		{
++			lock.unlock();
++			sceKernelDelayThread(100);
++			lock.lock();
++		}
 +		if(!m_aheadReady) return false;
 +		m_aheadReady = false;
 +		m_aheadStart = -1;
@@ -108,7 +115,12 @@ diff --git a/Source/DiskUtils.cpp b/Source/DiskUtils.cpp
 +		std::unique_lock<std::mutex> lock(m_aheadMutex);
 +		while(true)
 +		{
-+			m_aheadWake.wait(lock, [this]() { return m_aheadRequested || m_aheadQuit; });
++			while(!(m_aheadRequested || m_aheadQuit))
++			{
++				lock.unlock();
++				sceKernelDelayThread(200);
++				lock.lock();
++			}
 +			if(m_aheadQuit) break;
 +			m_aheadRequested = false;
 +			m_aheadBusy = true;

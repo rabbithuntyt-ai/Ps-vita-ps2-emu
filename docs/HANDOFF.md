@@ -95,6 +95,60 @@ findings, tools and traps that apply to every game.
 4. Timing-dependent IPU/DMA hang seen once at auto rate 75% (IPU idle with a
    full input FIFO, DMA4 still running).
 
+## Where RE4 work stopped (2026-11-09) and what's next
+
+Goal: RE4's intro movie locked at 30 pictures/s (60 emulated fps). Now about 21 (tier 2
+off) to 21.5 (tier 2 on) pictures/s, 43-45 emulated fps. The emulation thread spends about
+22.5 ms per emulated frame (EE code 11, IOP code 3.6, IOP kernel 2.3, the rest about 4.5)
+against 16.7: about 6 ms to remove. Details: docs/RE4.md, docs/AOT_TRANSLATION.md.
+
+**Measure from the save state, never from boot.** Runs from boot press buttons at fixed
+real-time seconds, so any speed change moves the timeline (a run then "shows 0 pictures"
+because the movie hadn't started). `runs/re4/bench.sh NAME [settings]` loads the title-menu
+state (`load_state=1`), presses start/cross from 8 to 44 s, the movie plays from about 40 s;
+`python3 brk4.py runs...` (in WSL) measures 55-140 s. Two runs agree within 0.3%. A new eboot
+makes the JIT cache cold: run one warm-up (`bench.sh NAMEw`) first. The state file is on the
+Vita (made by `runs/re4/mkstate.sh`: `save_state_at=44` with presses up to 31 s).
+
+**Unfinished, in this order:**
+
+1. **Test the disc read-ahead fix** (in the working tree, not tested on the Vita). Tier 2 runs
+   hung while RE4 loads, about 1 in 3 (EE threads all blocked, later the emulation thread
+   stopped: vm_fps 0). The region checking mode (`tier2_verify=1`: every region run done by
+   the interpreter, undone, then natively, compared) found no wrong results in about 14000
+   runs, and the hang showed with exits through the executor (`tier2_exits=0`) as well as
+   linked ones, so it isn't tier 2's code. Suspect: `CVitaImageStream`'s read-ahead
+   (DiskUtils.cpp, patch 0092) waited on condition variables, which lose wakeups on the
+   Vita; a lost one there blocks the emulation thread's disc read for good, and tier 2's
+   timing makes it likelier. Both waits are now polled (`sceKernelDelayThread`).
+   To do: build is `runs/build/eboot_t2y.bin`; run `runs/re4/ab127.sh` (warm-up, six tier 2
+   runs, two without; `fx.txt` gives the picture-line counts per run: about 38-40 is a full
+   movie, under 10 a hang). If the six are clean, consider `tier2=1` by default. (Patches
+   0092 and 0094 already carry the fix and the checking mode.) **Trap:** `runs/re4/mk86.sh`
+   now also regenerates 0089 against the working tree, which includes tier 2's BasicBlock
+   changes (they belong to 0094): keep the committed 0089 (`git checkout` it after running
+   mk86) until mk86 diffs 0089 against a snapshot instead. If not, the checking mode's next
+   step is to cover region runs that touch I/O (they are skipped today: about 20%).
+2. **Tier 2 on the EE, faster code** (the biggest gain left, about 3-4 ms): it saves 0.8 ms
+   of 11 so far. Blocks still end at `syscall`, `div`/`divu`, `ldl`/`ldr`, MMI `madd`, COP0;
+   loads/stores test the RAM range each time; only 7 guest registers stay in ARM registers;
+   regions average 6 KB of code. Direct exit links and lazy entry loads are done (no
+   measurable gain yet).
+3. **Tier 2 for the IOP** (about 1-1.5 ms): same front end, 32-bit only.
+4. **A cheaper SPU2 interrupt path** (about 1 ms): RE4's driver never clears the SPU2 IRQ
+   flag, so line 9 fires about 5600 times a second (IOP kernel time); delivering it less
+   often slowed the driver (`spu_irq_edge`, off), so the BIOS dispatch path (stub at 0x200,
+   10% of IOP time) has to get cheaper instead.
+
+Tier 2 settings (main_vita.cpp): `tier2` (1 native, 2 interpreted), `tier2_eager`,
+`tier2_hot` (samples, 24), `tier2_max` (800), `tier2_blocks`, `tier2_depth`, `tier2_regs`,
+`tier2_exits` (0 executor, 1 dispatch, 2 linked), `tier2_verify`, `tier2_lo`/`tier2_hi` (native
+only in that window), `tier2_dump`. Reports: `tier2.txt` (regions, what ends blocks, MMI
+breakdown, checks), `tier2verify.txt` (mismatches). PC tools: `jit_arm_dump RAM ADDR --tier2`
+(IR; ARM code in `TIER2_DUMP`), host runner `--tier2` (interpreted, every block start),
+`tools/make_ee_fuzz_elf.py` options `--calls --spr --more --fpu`, Vita fuzz
+`tools/vita_jit_fuzz.sh N tier2=1 tier2_eager=1`.
+
 ## Recent work (newest first)
 
 - Hardware renderer (title screen 10-15 -> 26-30 fps on hardware, before the
