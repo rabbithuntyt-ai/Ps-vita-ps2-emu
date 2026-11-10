@@ -21,6 +21,12 @@ loading and menu work is in [RE4.md](RE4.md) (another session); this file is the
 - The disc image is on the PC too: `C:\Users\troy2\re4iso\re4.iso` (copied from the Vita,
   4.4 GB, about 40 minutes over Vita Lab).
 
+**Trap: the Vita can fall asleep anyway** (during the 40 minute ISO copy it went to the lock
+screen). Then `vitalab launch` "succeeds" but nothing starts, `vitalab shot` returns the last
+picture before sleep (same clock in the status bar) and `stats` shows CPU 333 MHz / SHELL. A run
+that leaves `autostart.txt` unread and an empty `perf.csv` is this. Fix: `vitalab press ps`,
+`vitalab swipe 900 80 400 300 400` (unlock), `vitalab cmd "nosleep on"`.
+
 ## States
 
 - `runs/gp/state_codec.state`: Hunnigan's radio call right after the first real-time scene.
@@ -37,6 +43,26 @@ loading and menu work is in [RE4.md](RE4.md) (another session); this file is the
 
 Picture problems: Leon's body is not drawn in gameplay (only a hair-shaped blob), patches on his
 hair and jacket in the bridge scene, Hunnigan's portrait in the call is a white silhouette.
+
+### VU1 is the CPU wall (PC measurements, `--vu1-stats`)
+
+Gameplay start, per vblank: about 4.3 M VU1 cycles (88% of a real VU1's 4.9 M). Two programs
+are 87% of it:
+- continued at 0x1408 (`B 0x1040`, ends with XGKICK and E at 0x13F0): the world's vertex
+  loop. Per vertex (0x12B8-0x13E8, ~39 cycles): position and texcoords from integers (ITOF),
+  two 4x4 transforms (MULA/MADDA), CLIP against w, DIV for Q, colour scale and clamp, a
+  cross product for back faces, FTOI4 out, ADC from the clip flags. Clipping (FCOR on the
+  flags) branches to 0x14B0 / 0x1E88 / 0x14D8 / 0x1F78. About 790 runs per vblank, ~92
+  vertices each: ~70k vertices per vblank (the leaf piles at the start).
+- continued at 0x0498 (`B 0x01D0`): skinning (weighted bone matrices, lighting): Leon,
+  enemies.
+On the PC's x86 JIT this is ~7 ms per vblank. A generic VU JIT on a 444 MHz ARM core cannot do
+4.3 M VU cycles in 16.7 ms; the options are threaded VU1 (one core), a faster VU JIT, and
+native versions of these two loops.
+
+PC with the software renderer and the GPU renderer (Mesa): the gameplay picture is right
+(Leon, gun, HUD). So Leon's missing body on the Vita is a Vita GPU issue (depth lost at GPU
+scene breaks is the main suspect: `depth_force_load`).
 
 ### A gameplay frame (gs_diag)
 
@@ -56,6 +82,7 @@ hair and jacket in the bridge scene, Hunnigan's portrait in the call is a white 
 | Targets copied into a new width on the GPU | `gpu_relayout` (on) | The blur buffers changed width every frame: read-back plus upload each time |
 | Copies of the target being drawn by a draw | `feedback_draw` (on) | `glCopyTexSubImage2D` (sampling the target being drawn) |
 | VU1 worker without lost wakeups | (threaded VU1) | The worker waited on a condition variable; on the Vita those lose wakeups (found by the movie session for the IOP thread) |
+| **Threaded VU1: PATH1 packets wait while another GIF path is mid-packet** | (threaded VU1) | The hang at the first real-time scene. Queued XGKICK packets were sent on every EE slice, also in the middle of a VIF1 DIRECT (PATH2) or GIF DMA (PATH3) packet split over transfers: the GIF took them as the rest of that packet and stayed on PATH1, the next DIRECT never went through. Reproduced on the PC (`--mtvu`, gameplay state: 12 of 1200 frames shown); fixed: 1063 of 1200, picture correct, Leon walks |
 | No clock read per VU1 program start | | `steady_clock::now()` costs several us on the Vita |
 
 Diagnostics added: `perf.csv` column `gpu_parts` (GPU thread ms per part: read-back pixels,
