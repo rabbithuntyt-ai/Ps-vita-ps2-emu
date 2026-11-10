@@ -7,8 +7,39 @@
 #include "gs/GsTransferRange.h"
 #include "xxhash.h"
 
+#ifdef __vita__
+#include <psp2/gxm.h>
+#endif
+
 namespace
 {
+#ifdef __vita__
+	// vitaGL keeps a renderbuffer's GXM depth surface in the struct its handle points to
+	// (vitaGL's renderbuffer: active flag, SceGxmDepthStencilSurface, surface pointer,
+	// depth memory, stencil memory) but only ever stores depth, never loads it. With the
+	// layout confirmed (the surface's depth pointer and the struct's depth memory agree),
+	// the surface is set to load at each scene.
+	bool EnableDepthForceLoad(GLuint renderbuffer)
+	{
+		auto base = reinterpret_cast<uint8*>(static_cast<uintptr_t>(renderbuffer));
+		if(renderbuffer < 0x80000000u) return false; //not a pointer: another vitaGL
+		if(!base) return false;
+		for(uint32 offset = 4; offset <= 8; offset += 4)
+		{
+			auto surface = reinterpret_cast<SceGxmDepthStencilSurface*>(base + offset);
+			void* depthData = surface->depthData;
+			if(!depthData) continue;
+			auto pointerField = *reinterpret_cast<SceGxmDepthStencilSurface**>(base + offset + sizeof(SceGxmDepthStencilSurface));
+			auto depthField = *reinterpret_cast<void**>(base + offset + sizeof(SceGxmDepthStencilSurface) + sizeof(void*));
+			if((depthField != depthData) || ((pointerField != surface) && (pointerField != nullptr))) continue;
+			sceGxmDepthStencilSurfaceSetForceLoadMode(surface, SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
+			sceGxmDepthStencilSurfaceSetForceStoreMode(surface, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
+			return true;
+		}
+		return false;
+	}
+#endif
+
 	uint64 NowUs()
 	{
 		return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -687,6 +718,13 @@ void CGSH_Hardware::AllocateTargetGl(TARGET& target)
 	glGenRenderbuffers(1, &target.depthBuffer);
 	glBindRenderbuffer(GL_RENDERBUFFER, target.depthBuffer);
 	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, target.width, target.height);
+#ifdef __vita__
+	target.depthKept = g_depthForceLoad && EnableDepthForceLoad(target.depthBuffer);
+	if(target.depthKept)
+		g_depthForceLoadTargets++;
+	else
+		g_depthForceLoadFailures++;
+#endif
 
 	glGenFramebuffers(1, &target.framebuffer);
 	glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
@@ -1824,7 +1862,7 @@ void CGSH_Hardware::ApplyState()
 	// no longer hides what comes later: the fewer of these breaks, the better.
 	if(target != m_depthSceneTarget) m_depthSceneValid = false;
 	m_depthSceneTarget = target;
-	if(!m_depthSceneValid && depthActive)
+	if(!m_depthSceneValid && depthActive && !target->depthKept)
 	{
 		CPartTimer timer(GPU_PART_DEPTH_CLEAR);
 		glDisable(GL_SCISSOR_TEST);

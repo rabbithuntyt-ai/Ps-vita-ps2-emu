@@ -211,7 +211,10 @@ public:
 	// Copies of the target being drawn made by a draw, not glCopyTexSubImage2D (feedback_draw, on)
 	static inline bool g_feedbackDraw = true;
 	// Alpha index textures (PSMT8H/4HL/4HH) of render targets converted on the GPU (gpu_alpha_clut, on)
-	static inline bool g_gpuAlphaClut = true; //movie pictures uploaded from their buffers (perf.csv gpu_pic_up)
+	static inline bool g_gpuAlphaClut = true;
+	// Vita: depth buffers loaded at each new GPU scene (depth_force_load, on)
+	static inline bool g_depthForceLoad = true;
+	static inline uint32 g_depthForceLoadTargets = 0, g_depthForceLoadFailures = 0; //movie pictures uploaded from their buffers (perf.csv gpu_pic_up)
 
 public:
 	// Diagnostics: the picture of the next flip goes to this file (PPM). Same
@@ -262,6 +265,9 @@ private:
 		uint32 staleBegin = 0, staleEnd = 0;
 		// Drawn with depth testing or writes (its depth buffer must be kept).
 		bool depthUsed = false;
+		// Vita: its depth buffer is loaded at each new GPU scene (GXM force load), so
+		// depth survives target switches without the clear in ApplyState.
+		bool depthKept = false;
 		uint32 lastUseFrame = 0;
 		// Pixels rendered by the GPU and not yet written back to GS memory.
 		bool gpuDirty = false;
