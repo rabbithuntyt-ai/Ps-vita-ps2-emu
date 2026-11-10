@@ -203,7 +203,7 @@ private:
 	uint32_t m_tier2Requested = 0;
 
 public:
-	static inline uint32_t g_tier2HotSamples = 8;
+	static inline uint32_t g_tier2HotSamples = 24;
 	static inline uint32_t g_tier2MaxRequests = 4000;
 
 private:

@@ -6,6 +6,7 @@
 #            branches inside (exercises loop register promotion)
 #   --calls: also calls (jal, jalr) to leaf and non-leaf functions (ra saved on the
 #            stack), some returning past their call site (they change ra)
+#   --fpu: also FPU moves, loads/stores, arithmetic, compares and bc1 branches
 #   --more: also lq/sq, mult/multu and the HI/LO moves
 #   --spr: loads and stores in the scratchpad (0x70000000: memory handlers, not RAM)
 #   --likely: also likely branches (beql...: the delay slot runs only when taken),
@@ -23,7 +24,8 @@ loops = '--loops' in sys.argv
 likely = '--likely' in sys.argv
 calls = '--calls' in sys.argv
 spr = '--spr' in sys.argv
-more = '--more' in sys.argv  # lq/sq, mult/multu, mfhi/mflo/mthi/mtlo  # loads and stores in the scratchpad (not RAM: the JIT's slow path)
+more = '--more' in sys.argv
+fpu = '--fpu' in sys.argv  # FPU moves, loads/stores, arithmetic, compares and bc1 branches  # lq/sq, mult/multu, mfhi/mflo/mthi/mtlo  # loads and stores in the scratchpad (not RAM: the JIT's slow path)
 count = int(args[2]) if len(args) > 2 else 3000
 code = []
 
@@ -33,7 +35,23 @@ def reg(): return rng.choice(POOL)
 def dst(): return rng.choice(POOL[:-1])
 A0 = R['a0']
 
+def mmi(group_function, sa, rs, rt, rd): code.append((0x1C << 26) | (rs << 21) | (rt << 16) | (rd << 11) | (sa << 6) | group_function)
 def more_op():
+    if rng.random() < 0.4:
+        k = rng.randrange(12)
+        if k == 0: mmi(0x09, 0x0E, reg(), reg(), dst())          # pcpyld
+        elif k == 1: mmi(0x29, 0x0E, reg(), reg(), dst())        # pcpyud
+        elif k == 2: mmi(0x29, 0x1B, 0, reg(), dst())            # pcpyh
+        elif k == 3: mmi(0x08, 0x12, reg(), reg(), dst())        # pextlw
+        elif k == 4: mmi(0x29, 0x12, reg(), reg(), dst())        # por
+        elif k == 5: mmi(0x09, 0x13, reg(), reg(), dst())        # pxor
+        elif k == 6: mmi(0x09, 0x12, reg(), reg(), dst())        # pand
+        elif k == 7: mmi(0x29, 0x13, reg(), reg(), dst())        # pnor
+        elif k == 8: mmi(0x18, 0, reg(), reg(), rng.choice([0, dst()]))  # mult1
+        elif k == 9: mmi(0x19, 0, reg(), reg(), rng.choice([0, dst()]))  # multu1
+        elif k == 10: mmi(0x10, 0, 0, 0, dst())                  # mfhi1
+        else: mmi(0x12, 0, 0, 0, dst())                          # mflo1
+        return
     k = rng.randrange(8)
     if k == 0: I(0x1E, A0, dst(), rng.randrange(64) * 16)             # lq
     elif k == 1: I(0x1F, A0, reg(), rng.randrange(64) * 16)           # sq
@@ -44,7 +62,41 @@ def more_op():
     elif k == 6: Rr(0x11, reg(), 0, 0)                                # mthi
     else: Rr(0x13, reg(), 0, 0)                                       # mtlo
 
+def fpr(): return rng.randrange(8)
+def fpu_op():
+    # Values come from integers (cvt.s.w): no NaN or denormals, which hosts treat differently
+    k = rng.randrange(14)
+    fd, fs, ft = fpr(), fpr(), fpr()
+    def cop1s(fn, fd, fs, ft): code.append((0x11 << 26) | (0x10 << 21) | (ft << 16) | (fs << 11) | (fd << 6) | fn)
+    if k == 0:
+        code.append((0x11 << 26) | (0x04 << 21) | (reg() << 16) | (fs << 11))            # mtc1
+        code.append((0x11 << 26) | (0x14 << 21) | (fs << 11) | (fs << 6) | 0x20)          # cvt.s.w fs, fs
+    elif k == 1: code.append((0x11 << 26) | (0x00 << 21) | (dst() << 16) | (fs << 11))  # mfc1
+    elif k == 2: cop1s(rng.choice([0x00, 0x01, 0x02]), fd, fs, ft)                       # add/sub/mul
+    elif k == 3: cop1s(rng.choice([0x18, 0x19, 0x1A]), 0, fs, ft)                        # adda/suba/mula
+    elif k == 4: cop1s(rng.choice([0x1C, 0x1D, 0x1E, 0x1F]), fd, fs, ft)                 # madd/msub/madda/msuba
+    elif k == 5: cop1s(rng.choice([0x05, 0x06, 0x07]), fd, fs, 0)                        # abs/mov/neg
+    elif k == 6: cop1s(0x04, fd, 0, ft)                                                  # sqrt
+    elif k == 7: cop1s(rng.choice([0x32, 0x34, 0x36]), 0, fs, ft)                        # c.eq/c.lt/c.le
+    elif k == 8: I(0x39, A0, fs, 0x400 + rng.randrange(16) * 4)                          # swc1 (own area)
+    elif k == 9: I(0x31, A0, fd, 0x400 + rng.randrange(16) * 4)                          # lwc1
+    elif k == 10: code.append((0x11 << 26) | (0x02 << 21) | (dst() << 16) | (31 << 11))  # cfc1 rt, fcsr
+    elif k == 11: cop1s(0x30, 0, fs, ft)                                                 # c.f
+    else:
+        # bc1t/bc1f(l) over a few instructions
+        skip = rng.randrange(1, 3)
+        likelyBit = 2 if (likely and rng.random() < 0.3) else 0
+        I(0x11, 0x08, rng.choice([0, 1]) | likelyBit, skip)
+        alu_plain()
+        for j in range(skip): alu_plain()
+
 def alu():
+    if fpu and rng.random() < 0.25:
+        fpu_op()
+        return
+    alu_plain()
+
+def alu_plain():
     if more and rng.random() < 0.2:
         more_op()
         return

@@ -66,7 +66,7 @@ diff --git a/Source/ee/EeExecutor.h b/Source/ee/EeExecutor.h
  
  	//Tier 2 regions (CEeRegionBlock): several blocks of a function compiled as
  	//one, when execution enters code that loops or branches within itself.
-@@ -58,6 +65,16 @@
+@@ -58,6 +65,17 @@
  	}
  
  private:
@@ -76,6 +76,7 @@ diff --git a/Source/ee/EeExecutor.h b/Source/ee/EeExecutor.h
 +
 +	std::shared_ptr<CTier2Block> m_pendingTier2;
 +	std::map<uint32, std::vector<Tier2::RANGE>> m_tier2Ranges; //region start -> guest code it holds
++	std::set<uint32> m_tier2Failed; //requested starts that gave no region (not tried again)
 +	std::mutex m_tier2RequestMutex;
 +	std::vector<uint32> m_tier2Requests;
 +	std::atomic<bool> m_hasTier2Requests = false;
@@ -94,15 +95,16 @@ diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
  	CGenericMipsExecutor::Reset();
  }
  
-@@ -139,6 +140,7 @@
+@@ -139,6 +140,8 @@
  {
  	SetMemoryProtected(m_ram, PS2::EE_RAM_SIZE, false);
  	m_cachedBlocks.clear();
 +	m_tier2Ranges.clear();
++	m_tier2Failed.clear();
  	m_blockFpRoundingModes.clear();
  	m_idleLoopBlocks.clear();
  	CGenericMipsExecutor::Reset();
-@@ -148,11 +150,102 @@
+@@ -148,11 +151,104 @@
  {
  	uint32 rangeSize = end - start;
  	SetMemoryProtected(m_ram + start, rangeSize, false);
@@ -186,7 +188,9 @@ diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
 +		address &= m_addressMask;
 +		if((address & 3) != 0) continue;
 +		if(m_tier2Ranges.count(address) && HasBlockAt(address)) continue; //already
-+		TryTier2(address, true);
++		if(m_tier2Failed.count(address)) continue;
++		if(m_tier2Ranges.size() >= Tier2::g_settings.maxRegions) break;
++		if(!TryTier2(address, true)) m_tier2Failed.insert(address);
 +	}
 +}
 +
@@ -205,7 +209,7 @@ diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
  	//Inside a region already compiled (entered there after a quota exit, or by a
  	//branch from elsewhere): a block, not another overlapping region (each would
  	//compile the same code again: loop programs spent seconds compiling)
-@@ -202,6 +295,11 @@
+@@ -202,6 +298,11 @@
  	EmuProfile::CScope profileScope(EmuProfile::SECTION_JIT);
  	uint32 blockSize = (end - start) + 4;
  
@@ -233,7 +237,7 @@ diff --git a/Source/ee/Tier2.h b/Source/ee/Tier2.h
 new file mode 100644
 --- /dev/null
 +++ b/Source/ee/Tier2.h
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,115 @@
 +#pragma once
 +
 +// Tier 2 recompiler for EE code (docs/AOT_TRANSLATION.md), next to the JIT.
@@ -278,6 +282,7 @@ new file mode 100644
 +		uint32 maxInstructions = 768;
 +		uint32 maxCallDepth = 3;   //nested inlined calls
 +		uint32 minInstructions = 6; //smaller regions are left to the JIT
++		uint32 maxRegions = 800;    //live regions built on request (hot code); more are refused
 +		//Native code only for regions starting in [nativeLow, nativeHigh) (others interpreted: bisection)
 +		uint32 nativeLow = 0, nativeHigh = 0xFFFFFFFF;
 +		const char* dumpPath = nullptr; //regions in [nativeLow, nativeHigh) appended there when built (IR, guest code)
@@ -302,6 +307,9 @@ new file mode 100644
 +		//function, 0x80 + REGIMM rt, 0xC0 + COPn rs (0xC0 COP0, 0xE0 COP1... by n * 8 + rs / 4)
 +		uint32 stops[256] = {};
 +		uint32 entries[1024] = {}; //the first regions built (start addresses)
++		//MMI instructions that ended a block: function (0-63), or 64 + group * 32 + sa for
++		//MMI0 (function 0x08), MMI1 (0x28), MMI2 (0x09), MMI3 (0x29)
++		uint32 mmiStops[64 + 4 * 32] = {};
 +	};
 +	extern STATS g_stats;
 +	//The stops, most frequent first, as text
@@ -349,10 +357,11 @@ diff --git a/Source/ee/Tier2.cpp b/Source/ee/Tier2.cpp
 new file mode 100644
 --- /dev/null
 +++ b/Source/ee/Tier2.cpp
-@@ -0,0 +1,2622 @@
+@@ -0,0 +1,3264 @@
 +#include "Tier2.h"
 +#include <algorithm>
 +#include <chrono>
++#include <cmath>
 +#include <cstring>
 +#include <functional>
 +#include <map>
@@ -362,6 +371,9 @@ new file mode 100644
 +#include "../MipsJitter.h"
 +#include "../EmuProfile.h"
 +#include "EeBasicBlock.h"
++#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
++#include <xmmintrin.h>
++#endif
 +#if defined(__arm__) && !defined(__aarch64__)
 +#include "Jitter_CodeGen_AArch32.h"
 +#define TIER2_ARM 1
@@ -382,6 +394,21 @@ new file mode 100644
 +		std::sort(stops.rbegin(), stops.rend());
 +		std::vector<uint32> entries(g_stats.entries, g_stats.entries + std::min<uint32>(g_stats.regions, 1024));
 +		std::sort(entries.begin(), entries.end());
++		std::vector<std::pair<uint32, uint32>> mmi;
++		for(uint32 i = 0; i < 64 + 4 * 32; i++)
++		{
++			if(g_stats.mmiStops[i] != 0) mmi.push_back({g_stats.mmiStops[i], i});
++		}
++		std::sort(mmi.rbegin(), mmi.rend());
++		fprintf(file, "mmi:");
++		for(const auto& stop : mmi)
++		{
++			if(stop.second < 64)
++				fprintf(file, " f%02X=%u", stop.second, stop.first);
++			else
++				fprintf(file, " mmi%u.%02X=%u", (stop.second - 64) / 32, (stop.second - 64) % 32, stop.first);
++		}
++		fputc(10, file);
 +		fprintf(file, "regions:");
 +		for(uint32 entry : entries) fprintf(file, " %08X", entry);
 +		fputc(10, file);
@@ -474,7 +501,77 @@ new file mode 100644
 +		OP_MFLO,
 +		OP_MTHI,
 +		OP_MTLO,
++		//FPU (registers stay in the context). lwc1/swc1: fpr in sa, base rs, offset imm;
++		//mtc1/ctc1: gpr rs, fpr (or control register) in sa; mfc1/cfc1: gpr rd, fpr in sa
++		OP_LWC1,
++		OP_SWC1,
++		OP_MTC1,
++		OP_MFC1,
++		OP_CTC1,
++		OP_CFC1,
++		//Arithmetic and compares: function in sa (S format, 0x60: cvt.s.w), registers in
++		//imm (fd | fs << 8 | ft << 16 | condition code << 24)
++		OP_FPU,
++		//128-bit MMI operations on rd, rs, rt (function in sa: MMI_*)
++		OP_MMI,
 +	};
++
++	enum
++	{
++		MMI_PCPYLD,
++		MMI_PCPYUD,
++		MMI_PCPYH,
++		MMI_PEXTLW,
++		MMI_POR,
++		MMI_PXOR,
++		MMI_PAND,
++		MMI_PNOR,
++	};
++
++	//FPU functions (S format)
++	enum
++	{
++		FPU_ADD = 0x00,
++		FPU_SUB = 0x01,
++		FPU_MUL = 0x02,
++		FPU_SQRT = 0x04,
++		FPU_ABS = 0x05,
++		FPU_MOV = 0x06,
++		FPU_NEG = 0x07,
++		FPU_TRUNC_W = 0x0D,
++		FPU_ADDA = 0x18,
++		FPU_SUBA = 0x19,
++		FPU_MULA = 0x1A,
++		FPU_MADD = 0x1C,
++		FPU_MSUB = 0x1D,
++		FPU_MADDA = 0x1E,
++		FPU_MSUBA = 0x1F,
++		FPU_CVT_W = 0x24,
++		FPU_C_F = 0x30,
++		FPU_C_EQ = 0x32,
++		FPU_C_LT = 0x34,
++		FPU_C_LE = 0x36,
++		FPU_C_LT2 = 0x3C,
++		FPU_CVT_S_W = 0x60,
++	};
++
++	//vldr/vstr reach 1020 bytes from fp
++	static_assert(offsetof(CMIPS, m_State.nFCSR) < 1024, "FPU fields out of vldr range");
++
++	const uint32 g_fpuCcMask[8] = {0x00800000, 0x02000000, 0x04000000, 0x08000000, 0x10000000, 0x20000000, 0x40000000, 0x80000000};
++
++	bool IsFpuCompare(uint32 function)
++	{
++		return (function == FPU_C_F) || (function == FPU_C_EQ) || (function == FPU_C_LT) || (function == FPU_C_LE) || (function == FPU_C_LT2);
++	}
++
++	//The JIT's clamp (CCodeGen_*::Emit_Fp_Clamp): integer minimums on the bits, so
++	//NaN and infinity become the largest float of their sign
++	uint32 FpuClamp(uint32 value)
++	{
++		int32 a = std::min<int32>(static_cast<int32>(value), 0x7F7FFFFF);
++		return std::min<uint32>(static_cast<uint32>(a), 0xFF7FFFFF);
++	}
 +
 +	enum COND : uint8
 +	{
@@ -484,6 +581,8 @@ new file mode 100644
 +		COND_GTZ,
 +		COND_LTZ,
 +		COND_GEZ,
++		COND_FCC_F, //bc1f: FCSR & mask == 0 (mask in the block's 'expected')
++		COND_FCC_T, //bc1t
 +	};
 +
 +	enum
@@ -510,10 +609,27 @@ new file mode 100644
 +		return ((op >= OP_SB) && (op <= OP_SD)) || (op == OP_SQ);
 +	}
 +
-+	//The register an instruction writes (0: none)
++	//The GPR an instruction writes (0: none)
 +	uint8 Written(const INST& inst)
 +	{
-+		return IsStore(inst.op) ? 0 : inst.rd;
++		if(IsStore(inst.op)) return 0;
++		switch(inst.op)
++		{
++		case OP_LWC1:
++		case OP_SWC1:
++		case OP_MTC1:
++		case OP_CTC1:
++		case OP_FPU:
++			return 0;
++		default:
++			return inst.rd;
++		}
++	}
++
++	//An FPU instruction writing FCSR (delay slots of bc1 branches)
++	bool WritesFcsr(const INST& inst)
++	{
++		return (inst.op == OP_CTC1) || ((inst.op == OP_FPU) && IsFpuCompare(inst.sa));
 +	}
 +
 +	enum
@@ -766,6 +882,114 @@ new file mode 100644
 +				if(rt == 0) return true; //the JIT doesn't access memory either
 +				return mem(OP_LQ);
 +			case 0x1F: return mem(OP_SQ);
++			case 0x1C: //MMI
++			{
++				uint32 function = opcode & 0x3F;
++				INST inst;
++				inst.rd = rd;
++				inst.rs = rs;
++				inst.rt = rt;
++				switch(function)
++				{
++				case 0x18: //mult1
++				case 0x19: //multu1
++					inst.op = (function == 0x18) ? OP_MULT : OP_MULTU;
++					inst.sa = 1; //HI1/LO1
++					out.push_back(inst);
++					return true;
++				case 0x10: //mfhi1
++				case 0x12: //mflo1
++					if(rd == 0) return true;
++					inst.op = (function == 0x10) ? OP_MFHI : OP_MFLO;
++					inst.sa = 1;
++					out.push_back(inst);
++					return true;
++				default:
++					break;
++				}
++				int mmi = -1;
++				if((function == 0x08) && (sa == 0x12)) mmi = MMI_PEXTLW; //MMI0
++				if((function == 0x09) && (sa == 0x0E)) mmi = MMI_PCPYLD; //MMI2
++				if((function == 0x09) && (sa == 0x12)) mmi = MMI_PAND;
++				if((function == 0x09) && (sa == 0x13)) mmi = MMI_PXOR;
++				if((function == 0x29) && (sa == 0x0E)) mmi = MMI_PCPYUD; //MMI3
++				if((function == 0x29) && (sa == 0x12)) mmi = MMI_POR;
++				if((function == 0x29) && (sa == 0x13)) mmi = MMI_PNOR;
++				if((function == 0x29) && (sa == 0x1B)) mmi = MMI_PCPYH;
++				if(mmi < 0) return false;
++				if(rd == 0) return true; //the JIT does nothing either
++				inst.op = OP_MMI;
++				inst.sa = static_cast<uint8>(mmi);
++				out.push_back(inst);
++				return true;
++			}
++			case 0x31:
++			case 0x39:
++			{
++				INST inst;
++				inst.op = (op == 0x31) ? OP_LWC1 : OP_SWC1;
++				inst.rs = rs;
++				inst.sa = rt; //ft
++				inst.imm = simm;
++				out.push_back(inst);
++				return true;
++			}
++			case 0x11:
++			{
++				uint8 fmt = rs;
++				uint8 ft = rt, fs = rd, fd = sa;
++				uint32 function = opcode & 0x3F;
++				INST inst;
++				switch(fmt)
++				{
++				case 0x00: //mfc1
++				case 0x02: //cfc1
++					if(rt == 0) return true;
++					inst.op = (fmt == 0x00) ? OP_MFC1 : OP_CFC1;
++					inst.rd = rt;
++					inst.sa = fs;
++					out.push_back(inst);
++					return true;
++				case 0x04: //mtc1
++					inst.op = OP_MTC1;
++					inst.rs = rt;
++					inst.sa = fs;
++					out.push_back(inst);
++					return true;
++				case 0x06: //ctc1
++					if(fs != 31) return false;
++					inst.op = OP_CTC1;
++					inst.rs = rt;
++					inst.sa = fs;
++					out.push_back(inst);
++					return true;
++				case 0x10: //S
++					switch(function)
++					{
++					case FPU_ADD: case FPU_SUB: case FPU_MUL: case FPU_SQRT: case FPU_ABS: case FPU_MOV: case FPU_NEG:
++					case FPU_TRUNC_W: case FPU_ADDA: case FPU_SUBA: case FPU_MULA: case FPU_MADD: case FPU_MSUB:
++					case FPU_MADDA: case FPU_MSUBA: case FPU_CVT_W: case FPU_C_F: case FPU_C_EQ: case FPU_C_LT:
++					case FPU_C_LE: case FPU_C_LT2:
++						break;
++					default:
++						return false; //div, rsqrt (division by zero rules), max/min
++					}
++					inst.op = OP_FPU;
++					inst.sa = static_cast<uint8>(function);
++					inst.imm = static_cast<int32>(fd | (fs << 8) | (ft << 16) | (((opcode >> 8) & 7) << 24));
++					out.push_back(inst);
++					return true;
++				case 0x14: //W
++					if(function != 0x20) return false;
++					inst.op = OP_FPU;
++					inst.sa = FPU_CVT_S_W;
++					inst.imm = static_cast<int32>(fd | (fs << 8) | (ft << 16));
++					out.push_back(inst);
++					return true;
++				default:
++					return false;
++				}
++			}
 +			case 0x20: return mem(OP_LB);
 +			case 0x21: return mem(OP_LH);
 +			case 0x23: return mem(OP_LW);
@@ -808,8 +1032,9 @@ new file mode 100644
 +			case 0x16:
 +			case 0x17:
 +				return 1;
++			case 0x11: //COP1: bc1f/bc1t/bc1fl/bc1tl, else not a branch
++				return (((opcode >> 21) & 0x1F) == 0x08) ? 1 : 0;
 +			case 0x10: //COP0 (eret...)
-+			case 0x11: //COP1 (bc1f...)
 +			case 0x12: //COP2
 +				return 2;
 +			default:
@@ -825,6 +1050,13 @@ new file mode 100644
 +			else if(op == 0x01) key = 0x80 | ((opcode >> 16) & 0x1F);
 +			else if((op >= 0x10) && (op <= 0x13)) key = 0xC0 | ((op - 0x10) << 3) | (((opcode >> 21) & 0x1F) >> 2);
 +			g_stats.stops[key & 0xFF]++;
++			if(op == 0x1C)
++			{
++				uint32 function = opcode & 0x3F;
++				uint32 sa = (opcode >> 6) & 0x1F;
++				int group = (function == 0x08) ? 0 : (function == 0x28) ? 1 : (function == 0x09) ? 2 : (function == 0x29) ? 3 : -1;
++				g_stats.mmiStops[(group < 0) ? function : (64 + group * 32 + sa)]++;
++			}
 +		}
 +
 +		void Fill(int index)
@@ -890,9 +1122,18 @@ new file mode 100644
 +					exitAt(pc);
 +					return;
 +				}
++				//bc1 with a delay slot changing FCSR: left to the JIT
++				if(((opcode >> 26) == 0x11) && std::any_of(delayInsts.begin(), delayInsts.end(), WritesFcsr))
++				{
++					exitAt(address);
++					return;
++				}
 +				uint32 cycles = ((address + 4 - pc) / 4) + 1;
 +				uint32 delayWrites = 0;
-+				for(const auto& inst : delayInsts) delayWrites |= (1u << Written(inst));
++				for(const auto& inst : delayInsts)
++				{
++					if(Written(inst) != 0) delayWrites |= (1u << Written(inst));
++				}
 +				Branch(index, address, opcode, insts, delayInsts, delayWrites, stack, cycles);
 +				finish(address + 4);
 +				return;
@@ -993,8 +1234,16 @@ new file mode 100644
 +			COND cond = COND_EQ;
 +			bool likely = false;
 +			uint8 a = rs, b = rt;
++			uint32 fccMask = 0;
 +			switch(op)
 +			{
++			case 0x11: //bc1f, bc1t, bc1fl, bc1tl
++				cond = (rt & 1) ? COND_FCC_T : COND_FCC_F;
++				likely = (rt & 2) != 0;
++				fccMask = g_fpuCcMask[(opcode >> 18) & 7];
++				a = 0;
++				b = 0;
++				break;
 +			case 0x04: cond = COND_EQ; break;
 +			case 0x05: cond = COND_NE; break;
 +			case 0x06: cond = COND_LEZ; b = 0; break;
@@ -1047,6 +1296,7 @@ new file mode 100644
 +				block.cond = cond;
 +				block.rs = a;
 +				block.rt = b;
++				block.expected = fccMask;
 +				block.taken = toDelay;
 +				block.next = notTaken;
 +				return;
@@ -1073,6 +1323,7 @@ new file mode 100644
 +			block.cond = cond;
 +			block.rs = a;
 +			block.rt = b;
++			block.expected = fccMask;
 +			block.taken = taken;
 +			block.next = notTaken;
 +		}
@@ -1198,8 +1449,8 @@ new file mode 100644
 +				uint64 product = (inst.op == OP_MULT) ? static_cast<uint64>(static_cast<int64>(static_cast<int32>(s32)) * static_cast<int32>(t32))
 +				                                      : static_cast<uint64>(s32) * t32;
 +				uint64 lo = Sx(static_cast<uint32>(product)), hi = Sx(static_cast<uint32>(product >> 32));
-+				memcpy(m_context.m_State.nLO, &lo, 8);
-+				memcpy(m_context.m_State.nHI, &hi, 8);
++				memcpy(inst.sa ? m_context.m_State.nLO1 : m_context.m_State.nLO, &lo, 8);
++				memcpy(inst.sa ? m_context.m_State.nHI1 : m_context.m_State.nHI, &hi, 8);
 +				Set(inst.rd, lo);
 +				break;
 +			}
@@ -1207,16 +1458,122 @@ new file mode 100644
 +			case OP_MFLO:
 +			{
 +				uint64 value = 0;
-+				memcpy(&value, (inst.op == OP_MFHI) ? m_context.m_State.nHI : m_context.m_State.nLO, 8);
++				const uint32* source = (inst.op == OP_MFHI) ? (inst.sa ? m_context.m_State.nHI1 : m_context.m_State.nHI)
++				                                            : (inst.sa ? m_context.m_State.nLO1 : m_context.m_State.nLO);
++				memcpy(&value, source, 8);
 +				Set(inst.rd, value);
 +				break;
 +			}
 +			case OP_MTHI: memcpy(m_context.m_State.nHI, &s, 8); break;
 +			case OP_MTLO: memcpy(m_context.m_State.nLO, &s, 8); break;
++			case OP_LWC1: m_context.m_State.nCOP1[inst.sa] = MemoryUtils_GetWordProxy(ctx, address()); break;
++			case OP_SWC1: MemoryUtils_SetWordProxy(ctx, m_context.m_State.nCOP1[inst.sa], address()); break;
++			case OP_MTC1: m_context.m_State.nCOP1[inst.sa] = s32; break;
++			case OP_MFC1: Set(inst.rd, Sx(m_context.m_State.nCOP1[inst.sa])); break;
++			case OP_CFC1: Set(inst.rd, (inst.sa < 16) ? 0x2E30 : Sx(m_context.m_State.nFCSR)); break;
++			case OP_CTC1:
++			{
++				const uint32 mask = 0x0083C078;
++				m_context.m_State.nFCSR = (s32 & mask) | (m_context.m_State.nFCSR & ~mask);
++				break;
++			}
++			case OP_FPU: RunFpu(inst); break;
++			case OP_MMI:
++			{
++				auto& gpr = m_context.m_State.nGPR;
++				uint128 a = gpr[inst.rs], b = gpr[inst.rt], d = {};
++				switch(inst.sa)
++				{
++				case MMI_PCPYLD: d.nD0 = b.nD0; d.nD1 = a.nD0; break;
++				case MMI_PCPYUD: d.nD0 = a.nD1; d.nD1 = b.nD1; break;
++				case MMI_PCPYH:
++					d.nV0 = d.nV1 = (b.nV0 & 0xFFFF) | (b.nV0 << 16);
++					d.nV2 = d.nV3 = (b.nV2 & 0xFFFF) | (b.nV2 << 16);
++					break;
++				case MMI_PEXTLW: d.nV0 = b.nV0; d.nV1 = a.nV0; d.nV2 = b.nV1; d.nV3 = a.nV1; break;
++				case MMI_POR: d.nD0 = a.nD0 | b.nD0; d.nD1 = a.nD1 | b.nD1; break;
++				case MMI_PXOR: d.nD0 = a.nD0 ^ b.nD0; d.nD1 = a.nD1 ^ b.nD1; break;
++				case MMI_PAND: d.nD0 = a.nD0 & b.nD0; d.nD1 = a.nD1 & b.nD1; break;
++				case MMI_PNOR: d.nD0 = ~(a.nD0 | b.nD0); d.nD1 = ~(a.nD1 | b.nD1); break;
++				}
++				gpr[inst.rd] = d;
++				break;
++			}
 +			}
 +		}
 +
 +	private:
++		static float ToFloat(uint32 bits)
++		{
++			float value;
++			memcpy(&value, &bits, 4);
++			return value;
++		}
++
++		static uint32 ToBits(float value)
++		{
++			uint32 bits;
++			memcpy(&bits, &value, 4);
++			return bits;
++		}
++
++		//The JIT's float to int conversion on this host
++		static uint32 TruncateToInt(uint32 bits)
++		{
++#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
++			return static_cast<uint32>(_mm_cvtt_ss2si(_mm_set_ss(ToFloat(bits))));
++#else
++			//vcvt.s32.f32: saturates, NaN gives 0
++			float value = ToFloat(bits);
++			if(value != value) return 0;
++			if(value >= 2147483648.0f) return 0x7FFFFFFF;
++			if(value <= -2147483648.0f) return 0x80000000;
++			return static_cast<uint32>(static_cast<int32>(value));
++#endif
++		}
++
++		void RunFpu(const INST& inst)
++		{
++			auto& state = m_context.m_State;
++			uint32 fd = inst.imm & 0x1F, fs = (inst.imm >> 8) & 0x1F, ft = (inst.imm >> 16) & 0x1F;
++			uint32 mask = g_fpuCcMask[(inst.imm >> 24) & 7];
++			auto clamped = [&](uint32 reg) { return ToFloat(FpuClamp(state.nCOP1[reg])); };
++			auto acc = [&]() { return ToFloat(FpuClamp(state.nCOP1A)); };
++			auto setCc = [&](bool condition) {
++				if(condition)
++					state.nFCSR |= mask;
++				else
++					state.nFCSR &= ~mask;
++			};
++			//Separate statements: one rounding per operation, as the JIT
++			volatile float product = 0;
++			switch(inst.sa)
++			{
++			case FPU_ADD: state.nCOP1[fd] = ToBits(clamped(fs) + clamped(ft)); break;
++			case FPU_SUB: state.nCOP1[fd] = ToBits(clamped(fs) - clamped(ft)); break;
++			case FPU_MUL: state.nCOP1[fd] = ToBits(clamped(fs) * clamped(ft)); break;
++			case FPU_SQRT: state.nCOP1[fd] = ToBits(std::sqrt(ToFloat(FpuClamp(state.nCOP1[ft]) & 0x7FFFFFFF))); break;
++			case FPU_ABS: state.nCOP1[fd] = state.nCOP1[fs] & 0x7FFFFFFF; break;
++			case FPU_MOV: state.nCOP1[fd] = state.nCOP1[fs]; break;
++			case FPU_NEG: state.nCOP1[fd] = state.nCOP1[fs] ^ 0x80000000; break;
++			case FPU_TRUNC_W:
++			case FPU_CVT_W: state.nCOP1[fd] = TruncateToInt(state.nCOP1[fs]); break;
++			case FPU_ADDA: state.nCOP1A = ToBits(clamped(fs) + clamped(ft)); break;
++			case FPU_SUBA: state.nCOP1A = ToBits(clamped(fs) - clamped(ft)); break;
++			case FPU_MULA: state.nCOP1A = ToBits(clamped(fs) * clamped(ft)); break;
++			case FPU_MADD: product = clamped(fs) * clamped(ft); state.nCOP1[fd] = ToBits(acc() + product); break;
++			case FPU_MSUB: product = clamped(fs) * clamped(ft); state.nCOP1[fd] = ToBits(acc() - product); break;
++			case FPU_MADDA: product = clamped(fs) * clamped(ft); state.nCOP1A = ToBits(acc() + product); break;
++			case FPU_MSUBA: product = clamped(fs) * clamped(ft); state.nCOP1A = ToBits(acc() - product); break;
++			case FPU_C_F: setCc(false); break;
++			case FPU_C_EQ: setCc(clamped(fs) == clamped(ft)); break;
++			case FPU_C_LT:
++			case FPU_C_LT2: setCc(clamped(fs) < clamped(ft)); break;
++			case FPU_C_LE: setCc(clamped(fs) <= clamped(ft)); break;
++			case FPU_CVT_S_W: state.nCOP1[fd] = ToBits(static_cast<float>(static_cast<int32>(state.nCOP1[fs]))); break;
++			}
++		}
++
 +		CMIPS& m_context;
 +		uint64& m_temp;
 +	};
@@ -1599,7 +1956,10 @@ new file mode 100644
 +		void EmitQuad(const INST&, STATE&);
 +		void EmitShift64Const(const INST&, STATE&);
 +		void EmitShift64Var(const INST&, STATE&);
-+		Arm::CC EmitCompare(COND, uint8 a, uint8 b, const STATE&);
++		Arm::CC EmitCompare(COND, uint8 a, uint8 b, const STATE&, uint32 fccMask = 0);
++		void EmitFpu(const INST&, STATE&);
++		void EmitMmi(const INST&, STATE&);
++		void EmitLoadClamped(int sreg, int32 offset);
 +		void EmitCall(uintptr_t function);
 +		void EmitEdge(const BLOCK&, const EDGE&, const STATE&, const uint32* written);
 +		void EmitExit(const BLOCK&, const EDGE&, const STATE&, const uint32* written, bool checked);
@@ -1691,6 +2051,8 @@ new file mode 100644
 +		case OP_COND:
 +		case OP_MULT:
 +		case OP_MULTU:
++		case OP_MFC1:
++		case OP_CFC1:
 +			return HI_SX;
 +		case OP_AND:
 +		case OP_OR:
@@ -2027,6 +2389,265 @@ new file mode 100644
 +		});
 +	}
 +
++	//MMI: on the registers' 128 bits in the context (allocated ones written there
++	//first, the destination's lower half reloaded after)
++	void CArmCompiler::EmitMmi(const INST& inst, STATE& state)
++	{
++		using namespace Arm;
++		for(uint8 reg : {inst.rs, inst.rt})
++		{
++			if(!IsAllocated(reg)) continue;
++			m_emit.Str(m_alloc[reg], FP, LoOffset(reg));
++			Materialize(reg, state);
++		}
++		auto word = [&](uint8 reg, int i) { return LoOffset(reg) + i * 4; };
++		switch(inst.sa)
++		{
++		case MMI_PCPYLD:
++		case MMI_PCPYUD:
++		case MMI_PEXTLW:
++		{
++			//Destination words from source words (all read first: rd may be rs or rt)
++			uint8 from[4];
++			int index[4];
++			if(inst.sa == MMI_PCPYLD)
++			{
++				uint8 f[4] = {inst.rt, inst.rt, inst.rs, inst.rs};
++				int x[4] = {0, 1, 0, 1};
++				memcpy(from, f, 4);
++				memcpy(index, x, sizeof(x));
++			}
++			else if(inst.sa == MMI_PCPYUD)
++			{
++				uint8 f[4] = {inst.rs, inst.rs, inst.rt, inst.rt};
++				int x[4] = {2, 3, 2, 3};
++				memcpy(from, f, 4);
++				memcpy(index, x, sizeof(x));
++			}
++			else
++			{
++				uint8 f[4] = {inst.rt, inst.rs, inst.rt, inst.rs};
++				int x[4] = {0, 0, 1, 1};
++				memcpy(from, f, 4);
++				memcpy(index, x, sizeof(x));
++			}
++			const int temps[4] = {R0, R1, IP, LR};
++			for(int i = 0; i < 4; i++) m_emit.Ldr(temps[i], FP, word(from[i], index[i]));
++			for(int i = 0; i < 4; i++) m_emit.Str(temps[i], FP, word(inst.rd, i));
++			break;
++		}
++		case MMI_PCPYH:
++			for(int i = 0; i < 4; i += 2)
++			{
++				m_emit.Ldr(R0, FP, word(inst.rt, i));
++				m_emit.Uxth(R0, R0);
++				m_emit.DpReg(ORR, false, R0, R0, R0, LSL, 16);
++				m_emit.Str(R0, FP, word(inst.rd, i));
++				m_emit.Str(R0, FP, word(inst.rd, i + 1));
++			}
++			break;
++		default:
++		{
++			DP op = (inst.sa == MMI_PAND) ? AND : (inst.sa == MMI_PXOR) ? EOR : ORR;
++			for(int i = 0; i < 4; i++)
++			{
++				m_emit.Ldr(R0, FP, word(inst.rs, i));
++				m_emit.Ldr(R1, FP, word(inst.rt, i));
++				m_emit.DpReg(op, false, R0, R0, R1);
++				if(inst.sa == MMI_PNOR) m_emit.DpReg(MVN, false, R0, 0, R0);
++				m_emit.Str(R0, FP, word(inst.rd, i));
++			}
++			break;
++		}
++		}
++		if(IsAllocated(inst.rd)) m_emit.Ldr(m_alloc[inst.rd], FP, LoOffset(inst.rd));
++		state.hi[inst.rd] = HI_MEM;
++	}
++
++	//sreg = the JIT's clamp of the float at [fp + offset] (r0, lr used)
++	void CArmCompiler::EmitLoadClamped(int sreg, int32 offset)
++	{
++		using namespace Arm;
++		m_emit.Ldr(R0, FP, offset);
++		m_emit.LoadConst(LR, 0x7F7FFFFF);
++		m_emit.DpReg(CMP, true, 0, R0, LR);
++		m_emit.Mov(R0, LR, GT);
++		m_emit.LoadConst(LR, 0xFF7FFFFF);
++		m_emit.DpReg(CMP, true, 0, R0, LR);
++		m_emit.Mov(R0, LR, HI);
++		//vmov sN, r0
++		m_emit.Word(0xEE000A10 | ((sreg >> 1) << 16) | (R0 << 12) | ((sreg & 1) << 7));
++	}
++
++	void CArmCompiler::EmitFpu(const INST& inst, STATE& state)
++	{
++		using namespace Arm;
++		auto cop1 = [](uint32 reg) { return static_cast<int32>(offsetof(CMIPS, m_State.nCOP1) + reg * 4); };
++		const int32 acc = static_cast<int32>(offsetof(CMIPS, m_State.nCOP1A));
++		const int32 fcsr = static_cast<int32>(offsetof(CMIPS, m_State.nFCSR));
++		//VFP single precision: Sd = d, split as Vd:D
++		auto vfp3 = [&](uint32 base, int d, int n, int m) {
++			m_emit.Word(base | ((d & 1) << 22) | ((n >> 1) << 16) | ((d >> 1) << 12) | ((n & 1) << 7) | ((m & 1) << 5) | (m >> 1));
++		};
++		auto vfp2 = [&](uint32 base, int d, int m) {
++			m_emit.Word(base | ((d & 1) << 22) | ((d >> 1) << 12) | ((m & 1) << 5) | (m >> 1));
++		};
++		auto vldr = [&](int s, int32 offset) { m_emit.Word(0xED900A00 | ((s & 1) << 22) | (FP << 16) | ((s >> 1) << 12) | (offset / 4)); };
++		auto vstr = [&](int s, int32 offset) { m_emit.Word(0xED800A00 | ((s & 1) << 22) | (FP << 16) | ((s >> 1) << 12) | (offset / 4)); };
++		const uint32 VADD = 0xEE300A00, VSUB = 0xEE300A40, VMUL = 0xEE200A00;
++		const uint32 VSQRT = 0xEEB10AC0, VCMP = 0xEEB40A40, VCVT_S32_F32 = 0xEEBD0AC0, VCVT_F32_S32 = 0xEEB80AC0;
++		switch(inst.op)
++		{
++		case OP_LWC1:
++		case OP_SWC1:
++		{
++			bool load = (inst.op == OP_LWC1);
++			int32 reg = cop1(inst.sa);
++			int base = Lo(inst.rs, IP);
++			m_emit.DpConst(ADD, false, IP, base, static_cast<uint32>(inst.imm), LR);
++			if(!load) m_emit.Ldr(LR, FP, reg);
++			int slow = m_emit.NewLabel();
++			int done = m_emit.NewLabel();
++			m_emit.DpImm(TST, true, 0, IP, 0xFE000000);
++			m_emit.B(slow, NE);
++			m_emit.MemReg(load, false, LR, R10, IP);
++			m_emit.Mark(done);
++			if(load) m_emit.Str(LR, FP, reg);
++			m_cold.push_back([this, load, reg, slow, done]() {
++				m_emit.Mark(slow);
++				m_emit.Str(R2, SP, FRAME_SAVE_R2);
++				m_emit.Str(R3, SP, FRAME_SAVE_R3);
++				if(load)
++				{
++					m_emit.DpReg(MOV, false, R1, 0, IP);
++					EmitCall(reinterpret_cast<uintptr_t>(&MemoryUtils_GetWordProxy));
++					m_emit.Mov(LR, R0);
++				}
++				else
++				{
++					m_emit.Mov(R1, LR);
++					m_emit.DpReg(MOV, false, R2, 0, IP);
++					EmitCall(reinterpret_cast<uintptr_t>(&MemoryUtils_SetWordProxy));
++				}
++				m_emit.B(done);
++			});
++			return;
++		}
++		case OP_MTC1:
++		{
++			int value = Lo(inst.rs, IP);
++			m_emit.Str(value, FP, cop1(inst.sa));
++			return;
++		}
++		case OP_MFC1:
++			m_emit.Ldr(IP, FP, cop1(inst.sa));
++			CommitSx(inst.rd, IP, state);
++			return;
++		case OP_CFC1:
++			if(inst.sa < 16)
++				m_emit.LoadConst(IP, 0x2E30);
++			else
++				m_emit.Ldr(IP, FP, fcsr);
++			CommitSx(inst.rd, IP, state);
++			return;
++		case OP_CTC1:
++		{
++			int value = Lo(inst.rs, IP);
++			m_emit.LoadConst(R1, 0x0083C078);
++			m_emit.DpReg(AND, false, LR, value, R1);
++			m_emit.Ldr(R0, FP, fcsr);
++			m_emit.DpReg(BIC, false, R0, R0, R1);
++			m_emit.DpReg(ORR, false, R0, R0, LR);
++			m_emit.Str(R0, FP, fcsr);
++			return;
++		}
++		default:
++			break;
++		}
++		uint32 fd = inst.imm & 0x1F, fs = (inst.imm >> 8) & 0x1F, ft = (inst.imm >> 16) & 0x1F;
++		uint32 mask = g_fpuCcMask[(inst.imm >> 24) & 7];
++		auto setCc = [&](CC cc) {
++			m_emit.Ldr(IP, FP, fcsr);
++			m_emit.DpImm(BIC, false, IP, IP, mask);
++			m_emit.DpImm(ORR, false, IP, IP, mask, cc);
++			m_emit.Str(IP, FP, fcsr);
++		};
++		switch(inst.sa)
++		{
++		case FPU_ADD:
++		case FPU_SUB:
++		case FPU_MUL:
++		case FPU_ADDA:
++		case FPU_SUBA:
++		case FPU_MULA:
++		{
++			EmitLoadClamped(0, cop1(fs));
++			EmitLoadClamped(1, cop1(ft));
++			uint32 opcode = ((inst.sa == FPU_ADD) || (inst.sa == FPU_ADDA)) ? VADD : ((inst.sa == FPU_SUB) || (inst.sa == FPU_SUBA)) ? VSUB : VMUL;
++			vfp3(opcode, 2, 0, 1);
++			vstr(2, (inst.sa >= FPU_ADDA) ? acc : cop1(fd));
++			return;
++		}
++		case FPU_MADD:
++		case FPU_MSUB:
++		case FPU_MADDA:
++		case FPU_MSUBA:
++		{
++			EmitLoadClamped(0, acc);
++			EmitLoadClamped(1, cop1(fs));
++			EmitLoadClamped(2, cop1(ft));
++			vfp3(VMUL, 1, 1, 2);
++			vfp3(((inst.sa == FPU_MADD) || (inst.sa == FPU_MADDA)) ? VADD : VSUB, 2, 0, 1);
++			vstr(2, ((inst.sa == FPU_MADDA) || (inst.sa == FPU_MSUBA)) ? acc : cop1(fd));
++			return;
++		}
++		case FPU_SQRT:
++			EmitLoadClamped(0, cop1(ft));
++			m_emit.DpImm(BIC, false, R0, R0, 0x80000000);
++			m_emit.Word(0xEE000A10 | (R0 << 12)); //vmov s0, r0 (abs)
++			vfp2(VSQRT, 1, 0);
++			vstr(1, cop1(fd));
++			return;
++		case FPU_ABS:
++		case FPU_NEG:
++		case FPU_MOV:
++			m_emit.Ldr(IP, FP, cop1(fs));
++			if(inst.sa == FPU_ABS) m_emit.DpImm(BIC, false, IP, IP, 0x80000000);
++			if(inst.sa == FPU_NEG) m_emit.DpImm(EOR, false, IP, IP, 0x80000000);
++			m_emit.Str(IP, FP, cop1(fd));
++			return;
++		case FPU_TRUNC_W:
++		case FPU_CVT_W:
++			vldr(0, cop1(fs));
++			vfp2(VCVT_S32_F32, 1, 0);
++			vstr(1, cop1(fd));
++			return;
++		case FPU_CVT_S_W:
++			vldr(0, cop1(fs));
++			vfp2(VCVT_F32_S32, 1, 0);
++			vstr(1, cop1(fd));
++			return;
++		case FPU_C_F:
++			m_emit.Ldr(IP, FP, fcsr);
++			m_emit.DpImm(BIC, false, IP, IP, mask);
++			m_emit.Str(IP, FP, fcsr);
++			return;
++		case FPU_C_EQ:
++		case FPU_C_LT:
++		case FPU_C_LT2:
++		case FPU_C_LE:
++			EmitLoadClamped(0, cop1(fs));
++			EmitLoadClamped(1, cop1(ft));
++			vfp2(VCMP, 0, 1);
++			m_emit.Word(0xEEF1FA10); //vmrs APSR_nzcv, fpscr
++			setCc((inst.sa == FPU_C_EQ) ? EQ : (inst.sa == FPU_C_LE) ? LS : MI);
++			return;
++		default:
++			assert(false);
++			return;
++		}
++	}
++
 +	//lq/sq: 16 bytes between the context's register and memory (through q8)
 +	void CArmCompiler::EmitQuad(const INST& inst, STATE& state)
 +	{
@@ -2196,9 +2817,15 @@ new file mode 100644
 +	}
 +
 +	//Sets the flags for cond(a, b) (64-bit); returns the ARM condition for "true"
-+	Arm::CC CArmCompiler::EmitCompare(COND cond, uint8 a, uint8 b, const STATE& state)
++	Arm::CC CArmCompiler::EmitCompare(COND cond, uint8 a, uint8 b, const STATE& state, uint32 fccMask)
 +	{
 +		using namespace Arm;
++		if((cond == COND_FCC_F) || (cond == COND_FCC_T))
++		{
++			m_emit.Ldr(IP, FP, offsetof(CMIPS, m_State.nFCSR));
++			m_emit.DpImm(TST, true, 0, IP, fccMask);
++			return (cond == COND_FCC_T) ? NE : EQ;
++		}
 +		auto sx = [&](uint8 reg) { return (reg == 0) || (reg == REG_TEMP) || (IsAllocated(reg) && (state.hi[reg] == HI_SX)); };
 +		if((cond == COND_EQ) || (cond == COND_NE))
 +		{
@@ -2261,6 +2888,18 @@ new file mode 100644
 +		case OP_SQ:
 +			EmitQuad(inst, state);
 +			return;
++		case OP_LWC1:
++		case OP_SWC1:
++		case OP_MTC1:
++		case OP_MFC1:
++		case OP_CTC1:
++		case OP_CFC1:
++		case OP_FPU:
++			EmitFpu(inst, state);
++			return;
++		case OP_MMI:
++			EmitMmi(inst, state);
++			return;
 +		case OP_MULT:
 +		case OP_MULTU:
 +		{
@@ -2268,7 +2907,8 @@ new file mode 100644
 +			int b = Lo(inst.rt, LR);
 +			//umull/smull r0 (lo), r1 (hi), a, b
 +			m_emit.Word(((inst.op == OP_MULT) ? 0xE0C00090 : 0xE0800090) | (R1 << 16) | (R0 << 12) | (b << 8) | a);
-+			int32 lo = static_cast<int32>(offsetof(CMIPS, m_State.nLO)), hi = static_cast<int32>(offsetof(CMIPS, m_State.nHI));
++			int32 lo = static_cast<int32>(inst.sa ? offsetof(CMIPS, m_State.nLO1) : offsetof(CMIPS, m_State.nLO));
++			int32 hi = static_cast<int32>(inst.sa ? offsetof(CMIPS, m_State.nHI1) : offsetof(CMIPS, m_State.nHI));
 +			m_emit.Str(R0, FP, lo);
 +			m_emit.DpReg(MOV, false, IP, 0, R0, ASR, 31);
 +			m_emit.Str(IP, FP, lo + 4);
@@ -2281,7 +2921,8 @@ new file mode 100644
 +		case OP_MFHI:
 +		case OP_MFLO:
 +		{
-+			int32 offset = static_cast<int32>((inst.op == OP_MFHI) ? offsetof(CMIPS, m_State.nHI) : offsetof(CMIPS, m_State.nLO));
++			int32 offset = static_cast<int32>((inst.op == OP_MFHI) ? (inst.sa ? offsetof(CMIPS, m_State.nHI1) : offsetof(CMIPS, m_State.nHI))
++			                                                       : (inst.sa ? offsetof(CMIPS, m_State.nLO1) : offsetof(CMIPS, m_State.nLO)));
 +			m_emit.Ldr(IP, FP, offset);
 +			m_emit.Ldr(R0, FP, offset + 4);
 +			Commit64(inst.rd, IP, R0, state);
@@ -2730,7 +3371,7 @@ new file mode 100644
 +				break;
 +			case TERM_BRANCH:
 +			{
-+				CC cc = EmitCompare(block.cond, block.rs, block.rt, state);
++				CC cc = EmitCompare(block.cond, block.rs, block.rt, state, block.expected);
 +				int taken = m_emit.NewLabel();
 +				m_emit.B(taken, cc);
 +				EmitEdge(block, block.next, state, &written);
@@ -2885,8 +3526,9 @@ new file mode 100644
 +	static const char* opNames[] = {"addu", "subu", "sllv", "srlv", "srav", "and", "or", "xor", "nor", "slt", "sltu", "daddu", "dsubu",
 +	                                "dsllv", "dsrlv", "dsrav", "movz", "movn", "sll", "srl", "sra", "dsll", "dsrl", "dsra", "addiu", "daddiu",
 +	                                "slti", "sltiu", "andi", "ori", "xori", "li", "lb", "lbu", "lh", "lhu", "lw", "lwu", "ld", "sb", "sh",
-+	                                "sw", "sd", "cond", "lq", "sq", "mult", "multu", "mfhi", "mflo", "mthi", "mtlo"};
-+	static const char* condNames[] = {"eq", "ne", "lez", "gtz", "ltz", "gez"};
++	                                "sw", "sd", "cond", "lq", "sq", "mult", "multu", "mfhi", "mflo", "mthi", "mtlo",
++	                                "lwc1", "swc1", "mtc1", "mfc1", "ctc1", "cfc1", "fpu", "mmi"};
++	static const char* condNames[] = {"eq", "ne", "lez", "gtz", "ltz", "gez", "fccf", "fcct"};
 +	if(!m_region)
 +	{
 +		fprintf(file, "no region\n");
@@ -2949,7 +3591,15 @@ new file mode 100644
 +		{
 +		case TERM_GOTO: break;
 +		case TERM_BRANCH:
-+			if(CInterpreter::Test(block.cond, interpreter.Get(block.rs), interpreter.Get(block.rt))) edge = &block.taken;
++			if((block.cond == COND_FCC_F) || (block.cond == COND_FCC_T))
++			{
++				bool set = (state.nFCSR & block.expected) != 0;
++				if(set == (block.cond == COND_FCC_T)) edge = &block.taken;
++			}
++			else if(CInterpreter::Test(block.cond, interpreter.Get(block.rs), interpreter.Get(block.rt)))
++			{
++				edge = &block.taken;
++			}
 +			break;
 +		case TERM_GUARD:
 +			if(static_cast<uint32>(interpreter.Get(block.rs)) == block.expected) edge = &block.taken;

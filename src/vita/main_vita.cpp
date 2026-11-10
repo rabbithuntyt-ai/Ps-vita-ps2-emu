@@ -323,6 +323,7 @@ namespace
 		else if(key == "tier2_lo") Tier2::g_settings.nativeLow = static_cast<uint32>(value);
 		else if(key == "tier2_hi") Tier2::g_settings.nativeHigh = static_cast<uint32>(value);
 		else if(key == "tier2_dump") Tier2::g_settings.dumpPath = (value != 0) ? "ux0:data/VitaPS2/tier2ir.txt" : nullptr;
+		else if(key == "tier2_max") Tier2::g_settings.maxRegions = static_cast<uint32>(value);
 		else if(key == "tier2_depth") Tier2::g_settings.maxCallDepth = std::max(0, static_cast<int>(value));
 		else if(key == "iop_spin_us") CPS2VM::g_iopSpinUs = std::max(0, static_cast<int>(value));
 		else if(key == "ee_stay_in_slice") settings.eeStayInSlice = value != 0;

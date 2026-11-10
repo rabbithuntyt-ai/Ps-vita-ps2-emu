@@ -217,6 +217,28 @@ block edges and the upper halves of registers are tracked across the whole regio
   against 11.15 without (-4%); compile time 0.73 against 0.38 ms per frame. Still ending
   blocks: MMI 188, `syscall` 108, `swc1` 84, `mtc1`/`ctc1` 76, `lwc1` 61, `ldl` 41,
   `mfc0` 38, `divu` 36.
+- **FPU and MMI (same day)**: FPU registers stay in the context; `lwc1`/`swc1`,
+  `mtc1`/`mfc1`/`ctc1`/`cfc1`, `add`/`sub`/`mul`/`sqrt`/`abs`/`mov`/`neg`/`cvt.w`/`cvt.s.w`, the
+  accumulator forms (`adda`... `msuba`), `c.f`/`c.eq`/`c.lt`/`c.le` and `bc1f`/`bc1t` (likely too)
+  with the JIT's clamp (integer minimums on the bits: on ARM the same VFP instructions as the
+  AArch32 JIT, on the PC the interpreter mirrors the x86 JIT, `cvttss2si` included). `div`,
+  `rsqrt`, `max`/`min` are left to the JIT (division by zero rules, NEON lanes). MMI: `pcpyld`,
+  `pcpyud`, `pcpyh`, `pextlw`, `por`, `pxor`, `pand`, `pnor` on the context's 128 bits (cached
+  registers written there first); `mult1`/`multu1`, `mfhi1`/`mflo1`. Fuzz options `--fpu`
+  (values from integers: no NaN or denormals, which the PC and the Vita treat differently)
+  and `--more` (MMI). Bug found by them: a delay slot writing no register counted as writing
+  `zero`, so a branch on `zero` (and `bc1`) took the precomputed-condition path, which had no
+  case for `bc1`. 100 programs on the PC, 18 on the Vita with native code.
+- RE4 movie (200 s runs): 690-730 regions, 76000-80000 EE instructions, EE code 10.6-10.8 ms
+  per frame against 11.0-11.1 without (-3%). What still ends blocks: `syscall` 105, COP1 `div`
+  and others 67, `madd` (MMI) 9, `ldl`/`ldr` 37, `divu` 36, COP0 37. JIT compiles: 62 blocks a
+  second during the movie against 11 (each new region drops the JIT blocks around it, and
+  regions kept being added: 8 samples were enough), and one JIT memory flush (tier 2 code is
+  about 6 KB per region). Now: 24 samples, 800 regions at most, failed starts not retried.
+- **Why so little gain** (to do next): every exit, even to a fixed address, goes through the
+  indirect dispatch (a table lookup), where JIT blocks link to each other directly; every entry
+  loads all 7 cached registers; the exit stubs and memory slow paths make the code large.
+  Direct links for static exits and loading registers only where first used are the next steps.
 - **A trap found on the way**: RE4 test runs press buttons at fixed real-time seconds.
   A faster or slower EE moves the game's timeline, so a 115 s run can end before the movie
   starts. "No pictures" then looked like a hang (an address bisection chased it for an
