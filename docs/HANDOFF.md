@@ -110,6 +110,13 @@ state (`load_state=1`), presses start/cross from 8 to 44 s, the movie plays from
 makes the JIT cache cold: run one warm-up (`bench.sh NAMEw`) first. The state file is on the
 Vita (made by `runs/re4/mkstate.sh`: `save_state_at=44` with presses up to 31 s).
 
+**The Vita is shared** with the RE4 gameplay session (worktree C:\Users\troy2\vps2-gp, its own
+app VTPS20001 and data folder ux0:data/VitaPS2gp). Only one app can run: `runs/re4/run.sh`
+takes the lock (`source /c/Users/troy2/vita_lock.sh; vita_lock movie` ... `vita_unlock`, stale
+after 30 min). Scripts that `vitalab quit all` or push an eboot outside run.sh (the `ab*.sh`
+batches, `tools/vita_jit_fuzz.sh`) must take it too, and never quit the Vita's app while the
+lock's owner is "gameplay".
+
 **Unfinished, in this order:**
 
 1. **Test the disc read-ahead fix** (in the working tree, not tested on the Vita). Tier 2 runs
