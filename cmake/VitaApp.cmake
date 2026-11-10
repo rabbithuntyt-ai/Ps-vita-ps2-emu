@@ -5,6 +5,17 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 set(VITA_APP_NAME "VitaPS2")      # VPK file name (scripts and CI artifacts)
 set(VITA_APP_TITLE "VitaStation2") # name on the home screen and LiveArea
 set(VITA_TITLEID  "VTPS20000")
+# A second install next to the main one (another session testing on the same Vita):
+# -DVITAPS2_TITLEID=VTPS20001 -DVITAPS2_DATA_DIR=ux0:data/VitaPS2gp "-DVITAPS2_TITLE=VitaStation2 GP"
+if(VITAPS2_TITLEID)
+	set(VITA_TITLEID "${VITAPS2_TITLEID}")
+endif()
+if(VITAPS2_TITLE)
+	set(VITA_APP_TITLE "${VITAPS2_TITLE}")
+endif()
+if(NOT VITAPS2_DATA_DIR)
+	set(VITAPS2_DATA_DIR "ux0:data/VitaPS2")
+endif()
 set(VITA_VERSION  "00.10")
 
 # ATTRIBUTE2=12 unlocks the extended memory budget the emulator needs.
@@ -25,6 +36,7 @@ add_executable(vitaps2
 )
 target_include_directories(vitaps2 PRIVATE src/vita src/common)
 target_compile_options(vitaps2 PRIVATE -Wall)
+target_compile_definitions(vitaps2 PRIVATE VITAPS2_DATA_DIR="${VITAPS2_DATA_DIR}")
 # vita-elf-create appends the SCE module info and import tables (a few KB,
 # growing with the number of imports) right after the code segment and fails
 # if the data segment starts too close. The SDK linker script skips

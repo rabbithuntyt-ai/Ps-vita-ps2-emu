@@ -196,6 +196,7 @@ int main(int argc, char** argv)
 	uint32_t gsDiagLines = 0;
 	uint64_t hotFrom = ~0ULL; //sample the EE PC from this frame on (--hot-from)
 	std::string ramDumpPath;
+	std::string loadStatePath; //--load-state: a save state (the Vita's too), loaded at frame 120
 	for(int i = 2; i < argc; i++)
 	{
 		if(!std::strcmp(argv[i], "--frames") && (i + 1 < argc)) targetFrames = std::strtoull(argv[++i], nullptr, 10);
@@ -245,6 +246,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--gs-diag") && (i + 1 < argc)) gsDiagLines = std::atoi(argv[++i]);
 		else if(!std::strcmp(argv[i], "--hot-from") && (i + 1 < argc)) hotFrom = std::strtoull(argv[++i], nullptr, 10);
 		else if(!std::strcmp(argv[i], "--dump-ram") && (i + 1 < argc)) ramDumpPath = argv[++i];
+		else if(!std::strcmp(argv[i], "--load-state") && (i + 1 < argc)) loadStatePath = argv[++i];
 	}
 
 	const char* home = std::getenv("HOME");
@@ -370,6 +372,19 @@ int main(int argc, char** argv)
 			if(session.GetFrames().Fetch(serial, pixels, width, height)) presented++;
 			if(std::chrono::steady_clock::now() - start > std::chrono::seconds(timeoutSeconds)) break;
 			pump(5);
+			if(!loadStatePath.empty() && (session.GetVmFrameCount() >= 120))
+			{
+				// The VM loads on its own thread; the GS keeps being pumped meanwhile.
+				auto loading = session.GetVm()->LoadState(fs::path(loadStatePath));
+				while(loading.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) pump(2);
+				bool loaded = loading.get();
+				std::printf("state %s: %s\n", loadStatePath.c_str(), loaded ? "loaded" : "FAILED");
+				std::fflush(stdout);
+#ifdef VITAPS2_HAS_GL
+				if(loaded && hardware) static_cast<CGSH_Hardware*>(session.GetVm()->GetGSHandler())->DiscardGpuCopies();
+#endif
+				loadStatePath.clear();
+			}
 			uint64_t frame = session.GetVmFrameCount();
 			if(frame >= hotFrom) hotPcs[session.GetDebugState().eePc]++;
 			if(shotEvery && (frame >= nextShot))

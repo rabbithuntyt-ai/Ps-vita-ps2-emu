@@ -135,7 +135,7 @@ extern "C" void* vitaps2_jit_alloc(size_t size)
 		            static_cast<unsigned int>(size), static_cast<unsigned int>(g_pool.GetUsedBytes()),
 		            static_cast<unsigned int>(g_pool.GetCapacity()));
 		// stdout goes nowhere on the Vita.
-		if(FILE* file = std::fopen("ux0:data/VitaPS2/crash.txt", "w"))
+		if(FILE* file = std::fopen(VITAPS2_DATA_DIR "/crash.txt", "w"))
 		{
 			std::fprintf(file, "JIT pool exhausted: %u bytes requested, %u/%u used, %u flushes\n", static_cast<unsigned int>(size),
 			             static_cast<unsigned int>(g_pool.GetUsedBytes()), static_cast<unsigned int>(g_pool.GetCapacity()), g_flushes);

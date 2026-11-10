@@ -77,6 +77,13 @@ uint32 CPH_Vita::Poll()
 	m_buttons[CControllerInfo::R3] = (b & SCE_CTRL_R3) || frontR3;
 	m_axes[0] = ApplyDeadzone(pad.lx);
 	m_axes[1] = ApplyDeadzone(pad.ly);
+	if(m_injectedButtons & INJECT_STICKS)
+	{
+		if(m_injectedButtons & INJECT_LSTICK_UP) m_axes[1] = 0x00;
+		if(m_injectedButtons & INJECT_LSTICK_DOWN) m_axes[1] = 0xFF;
+		if(m_injectedButtons & INJECT_LSTICK_LEFT) m_axes[0] = 0x00;
+		if(m_injectedButtons & INJECT_LSTICK_RIGHT) m_axes[0] = 0xFF;
+	}
 	m_axes[2] = ApplyDeadzone(pad.rx);
 	m_axes[3] = ApplyDeadzone(pad.ry);
 	return pad.buttons; //the frontend's own shortcuts only see real buttons

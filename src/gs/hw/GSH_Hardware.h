@@ -102,6 +102,7 @@ public:
 		uint32 targetsShrunk = 0;      //targets cut short for a new one in their unused rows
 		uint32 pointRects = 0;         //point runs uploaded as one rectangle
 		uint32 pointsDrawn = 0;        //points drawn as points
+		uint32 contentTextureHits = 0; //textures found by content (see BindTexture)
 		uint32 redundantStateChanges = 0; //state rewrites that did not break batching //state changes with a blend GL cannot express
 	};
 
@@ -145,8 +146,27 @@ public:
 		GPU_STAGE_DISPLAY,  //flip: display image preparation
 		GPU_STAGE_COUNT
 	};
+	// Finer parts (perf.csv gpu_parts, in this order), timed wherever they happen.
+	enum GPU_PART
+	{
+		GPU_PART_DOWNLOAD_PIXELS, //read-back: glReadPixels
+		GPU_PART_DOWNLOAD_SWIZZLE, //read-back: writing the pixels into GS memory
+		GPU_PART_UPLOAD_SWIZZLE,  //target upload: reading GS memory
+		GPU_PART_UPLOAD_GL,       //target upload: glTexSubImage2D
+		GPU_PART_FEEDBACK_COPY,   //sampling the target being drawn: glCopyTexSubImage2D
+		GPU_PART_TEX_LOOKUP,      //texture cache lookup (TextureCache::Get, page checks)
+		GPU_PART_TEX_DECODE,
+		GPU_PART_TEX_GL,
+		GPU_PART_TARGET_CREATE,   //new render targets (GL objects)
+		GPU_PART_DEPTH_CLEAR,     //depth restores at new GPU scenes
+		GPU_PART_DRAW,            //glDrawArrays
+		GPU_PART_LOCAL_COPY,      //local to local transfers
+		GPU_PART_CONTENT_HITS,    //not a time: textures found by content, in thousandths (count = value)
+		GPU_PART_COUNT
+	};
 	struct GPU_TIMES
 	{
+		uint64 partUs[GPU_PART_COUNT] = {};
 		uint64 pumpUs = 0; //everything done in Pump (the rest is primitive setup)
 		uint64 stageUs[GPU_STAGE_COUNT] = {};
 		uint64 texDecodeUs = 0, texGlUs = 0;         //texture misses: decoding, glTexImage2D
@@ -179,7 +199,9 @@ protected:
 public:
 	// Movie picture texels from the pictures' buffers (OnImageDataSource), on by default
 	static inline bool g_pictureTextures = true;
-	static inline uint32 g_pictureUploadCount = 0; //movie pictures uploaded from their buffers (perf.csv gpu_pic_up)
+	static inline uint32 g_pictureUploadCount = 0;
+	// GL textures shared by textures with the same contents (content_textures, on by default)
+	static inline bool g_contentTextures = true; //movie pictures uploaded from their buffers (perf.csv gpu_pic_up)
 
 public:
 	// Diagnostics: the picture of the next flip goes to this file (PPM). Same
