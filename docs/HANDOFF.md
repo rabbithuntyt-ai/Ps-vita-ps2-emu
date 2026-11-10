@@ -147,9 +147,14 @@ lock's owner is "gameplay".
    often slowed the driver (`spu_irq_edge`, off), so the BIOS dispatch path (stub at 0x200,
    10% of IOP time) has to get cheaper instead.
 
-**On the gameplay branch (claude/re4-gameplay, worktree C:\Users\troy2\vps2-gp), not merged
-here yet** (merge it before touching `Vpu.cpp` or `GSH_Hardware.cpp`; its Play diff is
-`patches/0095-Play-gameplay.patch`, so number this branch's next Play patch 0096 or later):
+**Merged from the gameplay branch (claude/re4-gameplay) on 2026-11-10** (its Play diff is
+`patches/0095-Play-gameplay.patch`; this branch's next Play patch is 0096 or later). Host
+tests 39 of 39. **Not yet run on the Vita**: the merged build is `runs/build/eboot_m1g.bin`
+(it also carries the untested read-ahead fix, item 1 below); test it with
+`runs/re4/ab127.sh` after pointing it at that eboot, holding the Vita lock. `runs/re4/mk86.sh`
+now takes 0095 and 0094 off while it regenerates 0086-0093 and diffs files those later
+patches touch against snapshots (scratchpad orig94, orig95), so it no longer folds them in.
+What came with the merge:
 - Threaded VU1 hang fixed (HLE_MPEG.md open bug 1, Silent Hill 2's movie with threaded VU1,
   RE4's first real-time scene): queued XGKICK packets went into the GIF while PATH2/PATH3 was
   mid-packet; they now wait until the GIF is free (commit 7348ea1). Also: VU1 worker wakeups
