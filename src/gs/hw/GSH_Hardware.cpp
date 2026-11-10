@@ -289,6 +289,8 @@ void CGSH_Hardware::ReleaseImpl()
 	m_fogRamp = 0;
 	if(m_displayUploadTexture) glDeleteTextures(1, &m_displayUploadTexture);
 	if(m_feedbackTexture) glDeleteTextures(1, &m_feedbackTexture);
+	if(m_feedbackFramebuffer) glDeleteFramebuffers(1, &m_feedbackFramebuffer);
+	m_feedbackFramebuffer = 0;
 	m_feedbackTexture = 0;
 	m_feedbackWidth = m_feedbackHeight = 0;
 	m_displayUploadTexture = 0;
@@ -454,6 +456,26 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 	// each one read back first).
 	uint32 start = 0, end = 0;
 	RowsToBytes(*target, 0, target->height, start, end);
+	// Targets of the same pixel size lying inside the new one's memory: their pixels are
+	// copied page by page on the GPU after it is created, instead of going through GS
+	// memory (a read-back, then an upload). Resident Evil 4 draws its blur buffers at
+	// 0x310000, 0x348000 and 0x2D8000 1, 2, 4 and 8 pages wide by turns, every frame.
+	std::vector<std::unique_ptr<TARGET>> relayout;
+	if(g_gpuRelayout)
+	{
+		for(auto it = m_targets.begin(); it != m_targets.end();)
+		{
+			if(CanRelayout(**it, *target, start, end))
+			{
+				relayout.push_back(std::move(*it));
+				it = m_targets.erase(it);
+			}
+			else
+			{
+				++it;
+			}
+		}
+	}
 	for(auto& other : m_targets)
 	{
 		if((other->fbp >= start) || other->depthUsed) continue;
@@ -473,7 +495,169 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 	target->lastUse = ++m_useCounter;
 	m_targets.push_back(std::move(target));
 	m_stateApplied = false;
-	return m_targets.back().get();
+	TARGET* created = m_targets.back().get();
+	for(auto& old : relayout)
+	{
+		RelayoutTarget(*old, *created);
+		DeleteTarget(*old);
+	}
+	return created;
+}
+
+void CGSH_Hardware::DrawCopyQuads(GLuint texture, GLuint framebuffer, uint32 width, uint32 height, const std::vector<BATCH_VERTEX>& quads)
+{
+	glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+	glViewport(0, 0, width, height);
+	glDisable(GL_SCISSOR_TEST);
+	glDisable(GL_DEPTH_TEST);
+	glDepthMask(GL_FALSE);
+	glDisable(GL_BLEND);
+	glDisable(GL_ALPHA_TEST);
+	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+	glActiveTexture(GL_TEXTURE1);
+	glDisable(GL_TEXTURE_2D);
+	glClientActiveTexture(GL_TEXTURE1);
+	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	glClientActiveTexture(GL_TEXTURE0);
+	glActiveTexture(GL_TEXTURE0);
+	glEnable(GL_TEXTURE_2D);
+	glBindTexture(GL_TEXTURE_2D, texture);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+	const GLsizei stride = sizeof(BATCH_VERTEX);
+	glVertexPointer(4, GL_FLOAT, stride, &quads[0].x);
+	glColorPointer(4, GL_UNSIGNED_BYTE, stride, &quads[0].r);
+	glTexCoordPointer(2, GL_FLOAT, stride, &quads[0].s);
+	glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(quads.size()));
+	m_depthSceneValid = false;
+	m_stateApplied = false;
+}
+
+void CGSH_Hardware::CopyRegionOnGpu(GLuint texture, uint32 width, uint32 height, GLuint framebuffer, uint32 x, uint32 y, uint32 w, uint32 h)
+{
+	if((w == 0) || (h == 0)) return;
+	auto vertex = [&](uint32 px, uint32 py) {
+		BATCH_VERTEX v = {};
+		v.x = static_cast<float>(px) / static_cast<float>(width) * 2.0f - 1.0f;
+		v.y = static_cast<float>(py) / static_cast<float>(height) * 2.0f - 1.0f;
+		v.w = 1;
+		v.r = v.g = v.b = v.a = 255;
+		v.s = static_cast<float>(px) / static_cast<float>(width);
+		v.t = static_cast<float>(py) / static_cast<float>(height);
+		return v;
+	};
+	auto tl = vertex(x, y), tr = vertex(x + w, y), bl = vertex(x, y + h), br = vertex(x + w, y + h);
+	std::vector<BATCH_VERTEX> quad = {tl, tr, bl, tr, br, bl};
+	DrawCopyQuads(texture, framebuffer, width, height, quad);
+}
+
+bool CGSH_Hardware::CanRelayout(const TARGET& old, const TARGET& target, uint32 start, uint32 end) const
+{
+	if(PsmClass(old.psm) != PsmClass(target.psm)) return false;
+	if(old.fbp < target.fbp) return false;
+	if(old.staleBegin < old.staleEnd) return false;
+	if(old.validRows == 0) return false;
+	// Everything it holds (its valid rows) must land inside the new target.
+	uint32 oldStart = 0, oldEnd = 0;
+	RowsToBytes(old, 0, old.validRows, oldStart, oldEnd);
+	if((oldStart < start) || (oldEnd > end) || (oldStart >= end)) return false;
+	// Whole pages of 64 pixel columns on both sides (the page width of every color format).
+	if((old.width != old.fbw * 64) || (target.width != target.fbw * 64)) return false;
+	return true;
+}
+
+void CGSH_Hardware::RelayoutTarget(TARGET& old, TARGET& target)
+{
+	CPartTimer timer(GPU_PART_RELAYOUT);
+	GS_SURFACE oldSurface, newSurface;
+	oldSurface.Init(old.psm, old.fbp, old.fbw);
+	newSurface.Init(target.psm, target.fbp, target.fbw);
+	uint32 pageW = 1 << oldSurface.pwShift, pageH = 1 << oldSurface.phShift;
+	uint32 oldPerRow = std::max<uint32>(oldSurface.pagesPerRow, 1), newPerRow = std::max<uint32>(newSurface.pagesPerRow, 1);
+	uint32 firstPage = (old.fbp - target.fbp) / 8192;
+	uint32 pageRows = (old.validRows + pageH - 1) / pageH;
+	uint32 pageCount = pageRows * oldPerRow;
+	// Rows of the new target the copied pages reach: valid after the copy. Rows among them
+	// that the old target does not cover come from GS memory first (no other target holds
+	// them: those were removed or copied).
+	uint32 lastPage = firstPage + pageCount - 1;
+	uint32 rowsReached = std::min(((lastPage / newPerRow) + 1) * pageH, target.height);
+	if(rowsReached > target.validRows)
+	{
+		bool coversAll = ((firstPage % newPerRow) == 0) && ((pageCount % newPerRow) == 0) && ((old.validRows % pageH) == 0) &&
+		                 ((firstPage / newPerRow) * pageH == target.validRows);
+		if(coversAll)
+			target.validRows = rowsReached; //every row is replaced by the copy
+		else
+			EnsureValidRows(target, rowsReached);
+	}
+
+	std::vector<BATCH_VERTEX> quads;
+	quads.reserve(pageCount * 6);
+	int32 dirtyX0 = 0x7FFFFFFF, dirtyY0 = 0x7FFFFFFF, dirtyX1 = 0, dirtyY1 = 0;
+	for(uint32 page = 0; page < pageCount; page++)
+	{
+		uint32 sx = (page % oldPerRow) * pageW, sy = (page / oldPerRow) * pageH;
+		uint32 h = std::min(pageH, old.validRows - sy);
+		uint32 newPage = firstPage + page;
+		uint32 dx = (newPage % newPerRow) * pageW, dy = (newPage / newPerRow) * pageH;
+		if((dy >= target.height) || (dx >= target.width) || (sx >= old.width)) continue;
+		h = std::min(h, target.height - dy);
+		auto vertex = [&](uint32 ox, uint32 oy) {
+			BATCH_VERTEX v = {};
+			v.x = static_cast<float>(dx + ox) / static_cast<float>(target.width) * 2.0f - 1.0f;
+			v.y = static_cast<float>(dy + oy) / static_cast<float>(target.height) * 2.0f - 1.0f;
+			v.z = 0;
+			v.w = 1;
+			v.r = v.g = v.b = v.a = 255;
+			v.s = static_cast<float>(sx + ox) / static_cast<float>(old.width);
+			v.t = static_cast<float>(sy + oy) / static_cast<float>(old.height);
+			return v;
+		};
+		auto tl = vertex(0, 0), tr = vertex(pageW, 0), bl = vertex(0, h), br = vertex(pageW, h);
+		quads.insert(quads.end(), {tl, tr, bl, tr, br, bl});
+		bool dirty = old.gpuDirty && (sy < old.dirtyY1) && (sy + h > old.dirtyY0) && (sx < old.dirtyX1) && (sx + pageW > old.dirtyX0);
+		if(dirty)
+		{
+			dirtyX0 = std::min<int32>(dirtyX0, dx);
+			dirtyY0 = std::min<int32>(dirtyY0, dy);
+			dirtyX1 = std::max<int32>(dirtyX1, dx + pageW);
+			dirtyY1 = std::max<int32>(dirtyY1, dy + h);
+		}
+	}
+	if(quads.empty()) return;
+
+	DrawCopyQuads(old.colorTexture, target.framebuffer, target.width, target.height, quads);
+	m_stats.relayouts++;
+	if(m_diagFile && (m_diagUploads.size() < 60000))
+	{
+		char text[64];
+		std::snprintf(text, sizeof(text), " R%X/%u>%X/%u:%u", old.fbp, old.fbw, target.fbp, target.fbw, pageCount);
+		m_diagUploads += text;
+	}
+
+	target.drawnRows = std::max(target.drawnRows, std::min(rowsReached, target.height));
+	if(dirtyX1 > dirtyX0)
+	{
+		dirtyY1 = std::min<int32>(dirtyY1, target.validRows);
+		if(!target.gpuDirty)
+		{
+			target.gpuDirty = true;
+			target.dirtyX0 = dirtyX0;
+			target.dirtyY0 = dirtyY0;
+			target.dirtyX1 = dirtyX1;
+			target.dirtyY1 = dirtyY1;
+		}
+		else
+		{
+			target.dirtyX0 = std::min<uint32>(target.dirtyX0, dirtyX0);
+			target.dirtyY0 = std::min<uint32>(target.dirtyY0, dirtyY0);
+			target.dirtyX1 = std::max<uint32>(target.dirtyX1, dirtyX1);
+			target.dirtyY1 = std::max<uint32>(target.dirtyY1, dirtyY1);
+		}
+		if(old.alphaDirty) target.alphaDirty = true;
+	}
 }
 
 void CGSH_Hardware::AllocateTargetGl(TARGET& target)
@@ -1077,13 +1261,27 @@ void CGSH_Hardware::BindTexture()
 				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, target->width, target->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 				m_feedbackWidth = target->width;
 				m_feedbackHeight = target->height;
+				if(m_feedbackFramebuffer) glDeleteFramebuffers(1, &m_feedbackFramebuffer);
+				glGenFramebuffers(1, &m_feedbackFramebuffer);
+				glBindFramebuffer(GL_FRAMEBUFFER, m_feedbackFramebuffer);
+				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_feedbackTexture, 0);
 			}
-			glBindTexture(GL_TEXTURE_2D, m_feedbackTexture);
-			glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
 			uint32 copyW = std::min(s.tw, target->width - std::min(offsetX, target->width));
 			uint32 copyH = std::min(s.th, target->height - offsetY);
 			CPartTimer copyTimer(GPU_PART_FEEDBACK_COPY);
-			glCopyTexSubImage2D(GL_TEXTURE_2D, 0, offsetX, offsetY, offsetX, offsetY, copyW, copyH);
+			if(g_feedbackDraw)
+			{
+				// Drawn on the GPU into the copy (glCopyTexSubImage2D waits for the GPU
+				// on the Vita: Resident Evil 4 grades its colours in 16 strips, each one
+				// sampling the frame it draws on).
+				CopyRegionOnGpu(target->colorTexture, target->width, target->height, m_feedbackFramebuffer, offsetX, offsetY, copyW, copyH);
+			}
+			else
+			{
+				glBindTexture(GL_TEXTURE_2D, m_feedbackTexture);
+				glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
+				glCopyTexSubImage2D(GL_TEXTURE_2D, 0, offsetX, offsetY, offsetX, offsetY, copyW, copyH);
+			}
 			m_depthSceneValid = false;
 			texture = m_feedbackTexture;
 		}

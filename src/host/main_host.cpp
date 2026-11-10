@@ -45,6 +45,7 @@
 #include "ControllerInfo.h"
 #include "MpegHle.h"
 #include "ee/Vif.h"
+#include "Vu1Stats.h"
 #include <algorithm>
 #include <atomic>
 #include <map>
@@ -247,6 +248,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--hot-from") && (i + 1 < argc)) hotFrom = std::strtoull(argv[++i], nullptr, 10);
 		else if(!std::strcmp(argv[i], "--dump-ram") && (i + 1 < argc)) ramDumpPath = argv[++i];
 		else if(!std::strcmp(argv[i], "--load-state") && (i + 1 < argc)) loadStatePath = argv[++i];
+		else if(!std::strcmp(argv[i], "--vu1-stats")) EmuProfile::g_vu1Programs.enabled = true; //vu1prog.txt
 	}
 
 	const char* home = std::getenv("HOME");
@@ -430,6 +432,14 @@ int main(int argc, char** argv)
 		}
 		if(statsFile) std::fclose(statsFile);
 		mpegHle.Disable();
+		if(EmuProfile::g_vu1Programs.enabled)
+		{
+			if(std::FILE* file = std::fopen("vu1prog.txt", "w"))
+			{
+				WriteVu1ProgramStats(file);
+				std::fclose(file);
+			}
+		}
 		if(!hotPcs.empty())
 		{
 			// EE PC samples (one per runner loop) by address, most frequent first.
