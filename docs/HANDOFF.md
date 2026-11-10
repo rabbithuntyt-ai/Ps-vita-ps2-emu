@@ -147,6 +147,13 @@ lock's owner is "gameplay".
    often slowed the driver (`spu_irq_edge`, off), so the BIOS dispatch path (stub at 0x200,
    10% of IOP time) has to get cheaper instead.
 
+Smaller items:
+- `Vpu.cpp`: `ExecuteMicroProgram` calls `steady_clock::now()` at every VU program start
+  (several us each on the Vita); the gameplay branch only does it with diagnostics on.
+- An RE4 ISO copy on the PC (made by the gameplay session; use it read-only):
+  `C:\Users\troy2\re4iso\re4.iso`. The PC host runner can now run RE4 (`--tier2` interprets
+  regions there): loading-hang and tier 2 questions can be checked on the PC first.
+
 Tier 2 settings (main_vita.cpp): `tier2` (1 native, 2 interpreted), `tier2_eager`,
 `tier2_hot` (samples, 24), `tier2_max` (800), `tier2_blocks`, `tier2_depth`, `tier2_regs`,
 `tier2_exits` (0 executor, 1 dispatch, 2 linked), `tier2_verify`, `tier2_lo`/`tier2_hi` (native
