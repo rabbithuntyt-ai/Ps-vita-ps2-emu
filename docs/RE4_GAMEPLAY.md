@@ -125,13 +125,16 @@ runner takes `--load-state` (the Vita's states load there too).
 - `re4_vu1_hle=1`: the world program (0x1408 and the 0x00A0/0x00C0 stubs) runs without VU1,
   drawn on the GS thread (CPU transform, exact against the JIT). Picture right on the PC. On the
   Vita the GS thread is then the limit (~930 ms/s; world batches ~196 of it).
-- `gpu_world` (OFF by default, unfinished): world batches through a GLSL vertex shader. The
-  transform matches the CPU path (debug prints), w > 0 for every drawn vertex, no GL error,
-  but the draws produce no fragments on Mesa, even with the debug red override at the start
-  of the fragment shader, no culling and no depth test (`--gpu-world-debug 14`). Next to check:
-  the viewport/framebuffer bound at FlushWorld time (FlushWorld runs inside FlushBatch, which
-  can be called after another target was bound), uniform array upload (uM location 0), and
-  attribute 0 aliasing. Triangles touching the clip volume already go through the CPU clipper.
+- `gpu_world` (off by default; right on the PC, not yet run on the Vita): world batches through
+  a GLSL vertex shader. Three fixes made it draw (2026-11-15): the program divides by w and the
+  GS takes X/Y modulo 4096 pixels (RE4 puts the screen centre at -2048 with a negative w), so
+  the shader divides, wraps and hands GL the position with |w| (GL clipped everything with the
+  negative w); the faces kept are GL's clockwise ones (`glCullFace(GL_FRONT)`); and triangles
+  whose winding is 0 (foliage, no back face test in the program) go in both orders. Against
+  the CPU path (`--vu1-hle`) 0.10-0.15% of the pixels differ by more than 16 over 600 vblanks.
+  Triangles touching the clip volume go through the CPU clipper (about 150 per game frame).
+  Debug bits (`--gpu-world-debug`): 1 no clipper, 2 red, 4 no culling, 8 no depth test,
+  16 prints, 32 w signs, 64 the other faces.
 - Still to do: skinning program (0x0498/0x0000/0x0050 -> 0x01D0) HLE, the depth-of-field/haze
   read-backs (Z as PSMZ24 -> CT16 view of 0x310000 -> PSMT8H), the GS primitive path's cost.
 - Real game frame rate on the Vita in gameplay: ~1-3 per second.

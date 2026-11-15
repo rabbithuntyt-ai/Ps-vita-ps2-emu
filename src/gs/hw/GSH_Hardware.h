@@ -220,7 +220,7 @@ public:
 	// its depth blur; the Z read-back and the blur round trips go away.
 	static inline uint32 g_re4SkipDof = 0;
 	static inline uint64 g_skippedDraws = 0;
-	static inline bool g_gpuWorld = false; //unfinished: draws nothing yet (see docs/RE4_GAMEPLAY.md)
+	static inline bool g_gpuWorld = false; //right on the PC, not yet run on the Vita (docs/RE4_GAMEPLAY.md)
 	static inline uint64 g_gpuWorldBatches = 0, g_gpuWorldDraws = 0, g_gpuWorldFallbacks = 0;
 	static inline uint32 g_gpuWorldDebug = 0; //1: triangles near the clip volume left out
 	static inline uint32 g_depthForceLoadTargets = 0, g_depthForceLoadFailures = 0;

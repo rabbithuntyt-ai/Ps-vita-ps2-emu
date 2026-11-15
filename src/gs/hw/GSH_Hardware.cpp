@@ -1843,9 +1843,17 @@ namespace
 	    "	int s = int(aSlot + 0.5);\n"
 	    "	int m = s * 4;\n"
 	    "	vec4 v = uM[m] * aP.x + uM[m + 1] * aP.y + uM[m + 2] * aP.z + uM[m + 3];\n"
-	    "	float d = v.z / v.w * uZ * 0.5;\n" //Z / ZMax, clamped per vertex like AddVertex (a negative Z is a huge unsigned one)
+	    // The program divides by w itself and sends 12.4 fixed point X and Y, which the GS takes
+	    // modulo 4096 pixels: RE4's projection puts the screen centre at -2048 with a negative w.
+	    // So: divide, wrap, and give GL the position with a positive w (|w| keeps the
+	    // perspective-correct interpolation of the texture numerators).
+	    "	float iw = 1.0 / v.w;\n"
+	    "	vec2 sp = v.xy * iw;\n"
+	    "	sp -= 4096.0 * floor(sp * (1.0 / 4096.0));\n"
+	    "	float d = v.z * iw * uZ * 0.5;\n" //Z / ZMax, clamped per vertex like AddVertex (a negative Z is a huge unsigned one)
 	    "	d = (d < 0.0) ? 1.0 : min(d, 1.0);\n"
-	    "	gl_Position = vec4((v.x + uScreen.z * v.w) * uScreen.x - v.w, (v.y + uScreen.w * v.w) * uScreen.y - v.w, (2.0 * d - 1.0) * v.w, v.w);\n"
+	    "	float W = abs(v.w);\n"
+	    "	gl_Position = vec4(((sp.x + uScreen.z) * uScreen.x - 1.0) * W, ((sp.y + uScreen.w) * uScreen.y - 1.0) * W, (2.0 * d - 1.0) * W, W);\n"
 	    "	vColor = min((aC + uCO[s]) * uCS[s], vec4(255.0)) * (1.0 / 255.0);\n"
 	    "	vTex = vec3(aT.x * (1.0 / 256.0) + uTO[s].x, aT.y * (1.0 / 256.0) + uTO[s].y, aT.z);\n"
 	    "	vFog = uTO[s].z;\n"
@@ -2030,10 +2038,19 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 		if((i >= 2) && (raw[7] == 0) && !clipped)
 		{
 			uint16 a = static_cast<uint16>(base + i - 2), b = static_cast<uint16>(base + i - 1), c = static_cast<uint16>(base + i);
-			bool flip = (static_cast<float>(raw[3]) * batch.vf31.w) < 0;
+			float winding = static_cast<float>(raw[3]) * batch.vf31.w;
+			bool flip = winding < 0;
 			m_worldIndices.push_back(a);
 			m_worldIndices.push_back(flip ? c : b);
 			m_worldIndices.push_back(flip ? b : c);
+			if(winding == 0)
+			{
+				//No back face test in the program (foliage drawn from both sides): both orders,
+				//the GPU drops one
+				m_worldIndices.push_back(a);
+				m_worldIndices.push_back(c);
+				m_worldIndices.push_back(b);
+			}
 			m_batchPrimitives++;
 			if(g_gpuWorldDebug & 32)
 			{
@@ -2146,7 +2163,10 @@ void CGSH_Hardware::FlushWorld()
 	if(!(g_gpuWorldDebug & 4)) glEnable(GL_CULL_FACE); //debug 4: no culling
 	if(g_gpuWorldDebug & 8) glDisable(GL_DEPTH_TEST);  //debug 8: no depth test
 	glFrontFace(GL_CCW);
-	glCullFace(GL_BACK); //PS2 screen Y down, window Y up: the winding is mirrored
+	//The program keeps a triangle when cross(b - a, c - a) * winding <= 0 in screen
+	//coordinates, and the targets are drawn with screen Y as GL Y: that is GL's clockwise
+	//(the order already follows the winding sign), so the CCW faces go.
+	glCullFace((g_gpuWorldDebug & 64) ? GL_BACK : GL_FRONT); //debug 64: the other faces
 	glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(m_worldIndices.size()), GL_UNSIGNED_SHORT, m_worldIndices.data());
 	if(g_gpuWorldDebug & 16)
 	{
