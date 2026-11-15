@@ -351,6 +351,7 @@ namespace
 		else if(key == "depth_force_load") CGSH_Hardware::g_depthForceLoad = value != 0;
 		else if(key == "vu1_spin_us") CVpu::g_workerSpinUs = value; //threaded VU1: poll this long before sleeping
 		else if(key == "vu_stall_check") CVuBasicBlock::g_combinedStallCheck = (value != 0); //one test of pending FMAC writes per block
+		else if(key == "vu_vector_opmul") VUShared::g_vectorOuterProduct = (value != 0); //OPMULA/OPMSUB without scalar lane reads
 		else if(key == "vu_flag_tracking") VUShared::g_flagTracking = (value != 0); //flag reads after flags of the same block: one load
 		else if(key == "gpu_world") CGSH_Hardware::g_gpuWorld = value != 0;
 		else if(key == "gs_shaders") CGSH_Hardware::g_shaderBatches = value != 0; //batches through one GLSL program

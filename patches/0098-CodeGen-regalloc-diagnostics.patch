@@ -1,0 +1,64 @@
+diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
+--- a/src/Jitter_RegAlloc.cpp
++++ b/src/Jitter_RegAlloc.cpp
+@@ -306,11 +306,23 @@
+ 		    }
+ 	    });
+ 
++	//Registers left to temporaries: context vectors live across a whole range take their
++	//register for all of it, and temporaries without one go through the stack
++	static const unsigned int mdKeepFree = []() {
++		const char* value = getenv("JITTER_MD_KEEP_FREE");
++		return value ? static_cast<unsigned int>(atoi(value)) : 0U;
++	}();
++	unsigned int relative128Allocated = 0;
+ 	for(auto& symbolRegAllocPair : sortedSymbols)
+ 	{
+ 		const auto& symbol = symbolRegAllocPair->first;
+ 		auto& symbolRegAlloc = symbolRegAllocPair->second;
+ 
++		if((symbol->m_type == SYM_RELATIVE128) && (mdKeepFree != 0) && (mdCount > mdKeepFree))
++		{
++			if(relative128Allocated >= (mdCount - mdKeepFree)) continue;
++		}
++
+ 		//Find suitable register for this symbol
+ 		auto poolType = SYM_REGISTER;
+ 		auto registerSymbolType = SYM_REGISTER;
+@@ -338,7 +350,26 @@
+ 		{
+ 			symbolRegAlloc.registerType = registerSymbolType;
+ 			symbolRegAlloc.registerId = registerId;
++			if(symbol->m_type == SYM_RELATIVE128) relative128Allocated++;
++		}
++	}
++
++	//Diagnostics (JITTER_REGALLOC_DUMP set): what happened to the 128-bit context symbols
++	static const bool dump = (getenv("JITTER_REGALLOC_DUMP") != nullptr);
++	if(dump)
++	{
++		std::cerr << "range " << allocRange.first << "-" << allocRange.second << ":";
++		for(const auto& symbolRegAllocPair : symbolRegAllocs)
++		{
++			const auto& symbol = symbolRegAllocPair.first;
++			const auto& info = symbolRegAllocPair.second;
++			if(symbol->m_type != SYM_RELATIVE128) continue;
++			std::cerr << " " << std::hex << symbol->m_valueLow << std::dec << "(u" << info.useCount;
++			if(info.aliased) std::cerr << " ALIAS";
++			if(m_codeGen->IsSymbolPinned(symbol.get())) std::cerr << " PIN";
++			std::cerr << " r" << info.registerId << ")";
+ 		}
++		std::cerr << std::endl;
+ 	}
+ }
+ 
+@@ -457,6 +488,9 @@
+ 				    if(symbol->Equals(testedSymbol.get())) return;
+ 				    if(symbol->Aliases(testedSymbol.get()))
+ 				    {
++					    static const bool dump = (getenv("JITTER_REGALLOC_DUMP") != nullptr);
++					    if(dump && (testedSymbol->m_type == SYM_RELATIVE128))
++						    std::cerr << "alias " << std::hex << testedSymbol->m_valueLow << " by type " << std::dec << symbol->m_type << " at " << std::hex << symbol->m_valueLow << std::dec << " op " << statement.op << std::endl;
+ 					    symbolRegAlloc.second.aliased = true;
+ 				    }
+ 			    });

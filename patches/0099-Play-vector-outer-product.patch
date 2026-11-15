@@ -1,0 +1,83 @@
+diff --git a/Source/ee/VUShared.h b/Source/ee/VUShared.h
+--- a/Source/ee/VUShared.h
++++ b/Source/ee/VUShared.h
+@@ -253,6 +253,9 @@
+ 	void EndFlagTracking();
+ 	void NotePipeTimeChange();
+ 	extern bool g_flagTracking;
++	//OPMULA/OPMSUB from lane broadcasts and masked writes instead of scalar lane reads, which
++	//kept both VF registers out of host registers for the whole block (vu_vector_opmul, on)
++	extern bool g_vectorOuterProduct;
+ 
+ 	void CheckFlagPipelineImmediate(const FLAG_PIPEINFO&, CMIPS*, uint32);
+ 	void ResetFlagPipelineImmediate(const FLAG_PIPEINFO&, CMIPS*, uint32);
+diff --git a/Source/ee/VUShared.cpp b/Source/ee/VUShared.cpp
+--- a/Source/ee/VUShared.cpp
++++ b/Source/ee/VUShared.cpp
+@@ -1522,8 +1522,33 @@
+ 	          true, relativePipeTime, compileHints);
+ }
+ 
++namespace
++{
++	//Outer product lanes: result lane i = fs[first] * ft[second]
++	const unsigned int g_outerProductLanes[3][2] = {{VUShared::VECTOR_COMPY, VUShared::VECTOR_COMPZ}, {VUShared::VECTOR_COMPZ, VUShared::VECTOR_COMPX}, {VUShared::VECTOR_COMPX, VUShared::VECTOR_COMPY}};
++
++	//dst.xyz = fs.yzx * ft.zxy, each lane from two broadcasts (VF registers are only read as
++	//128-bit values: the register allocator can keep them in host registers)
++	void PullOuterProduct(CMipsJitter* codeGen, size_t dst, uint8 fs, uint8 ft)
++	{
++		for(unsigned int i = 0; i < 3; i++)
++		{
++			VUShared::PushBcElement(codeGen, VUShared::GetVectorElement(fs, g_outerProductLanes[i][0]));
++			VUShared::PushBcElement(codeGen, VUShared::GetVectorElement(ft, g_outerProductLanes[i][1]));
++			codeGen->MD_MulS();
++			codeGen->MD_PullRel(dst, i == 0, i == 1, i == 2, false);
++		}
++	}
++}
++
+ void VUShared::OPMULA(CMipsJitter* codeGen, uint8 nFs, uint8 nFt)
+ {
++	if(g_vectorOuterProduct)
++	{
++		PullOuterProduct(codeGen, offsetof(CMIPS, m_State.nCOP2A), nFs, nFt);
++		return;
++	}
++
+ 	//ACCx
+ 	codeGen->FP_PushRel32(GetVectorElement(nFs, VECTOR_COMPY));
+ 	codeGen->FP_PushRel32(GetVectorElement(nFt, VECTOR_COMPZ));
+@@ -1549,6 +1574,24 @@
+ 	uint8 tempRegIndex = 32;
+ 	uint32 dest = 0x0E;
+ 
++	if(g_vectorOuterProduct)
++	{
++		//temp.xyz = ACC.xyz - fs.yzx * ft.zxy (a multiply, then a subtract: as the scalar code)
++		size_t temp = offsetof(CMIPS, m_State.nCOP2[tempRegIndex]);
++		PullOuterProduct(codeGen, temp, fs, ft);
++		codeGen->MD_PushRel(offsetof(CMIPS, m_State.nCOP2A));
++		codeGen->MD_PushRel(temp);
++		codeGen->MD_SubS();
++		codeGen->MD_PullRel(temp, true, true, true, false);
++		TestSZFlags(codeGen, dest, temp, relativePipeTime, compileHints);
++		if(fd != 0)
++		{
++			codeGen->MD_PushRel(temp);
++			PullVector(codeGen, dest, offsetof(CMIPS, m_State.nCOP2[fd]));
++		}
++		return;
++	}
++
+ 	//X
+ 	codeGen->FP_PushRel32(GetAccumulatorElement(VECTOR_COMPX));
+ 	codeGen->FP_PushRel32(GetVectorElement(fs, VECTOR_COMPY));
+@@ -1901,6 +1944,7 @@
+ }
+ 
+ bool VUShared::g_flagTracking = true;
++bool VUShared::g_vectorOuterProduct = true;
+ 
+ namespace
+ {
