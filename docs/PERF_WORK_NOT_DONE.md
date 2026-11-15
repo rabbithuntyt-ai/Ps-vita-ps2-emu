@@ -2,6 +2,26 @@
 
 _Written by Fable 5.2 on 2026-11-15 from the repository at f7ed38d. The original PDF is next to this file ([VitaStation2_performance_work_not_yet_done.pdf](VitaStation2_performance_work_not_yet_done.pdf)); this is its text, with the layout kept._
 
+## Progress (updated as items land)
+
+No Vita was connected for this work: every result below is from the PC runner (RE4 gameplay
+state `state_b2`, 900 vblanks, `runs/re4/hostab.sh`). On the PC the GS thread (OSMesa) sets the
+real-time speed, so the per-thread CPU time per game frame is the useful figure.
+
+| Item | State | Setting | PC result |
+|---|---|---|---|
+| P1 asynchronous VU1 | Done (patch 0097), off by default, untested on the Vita | `vu1_async=1` with `threaded_vu1=1` (PC: `--mtvu --vu1-async`) | 393 game frames in 900 vblanks (threaded VU1: 349, no thread: 393). EE thread 65 → 46 ms per game frame, VU1 thread 26 → 19 ms. Pictures correct. 0 VIF1 stalls, 0 PATH3 syncs in gameplay |
+| T1 CI patches | Done: 0093 cut to the hunks no earlier patch has; `--ignore-whitespace` in `cmake/ApplyPatches.cmake` | — | All 97 patches apply to clean submodule copies (`runs/re4/cichk.sh`); CI logs not checked |
+
+P1 as built: `CVif1::ReceiveDMA` copies the DMA data into a queue and returns at once (small
+chunks without a tag are merged, buffers are reused). The VU1 worker runs `ProcessPacket` on it
+and runs each program inline. DIRECT data and MSKPATH3 go into the XGKICK queue, so PATH1 and
+PATH2 stay in order, and the EE thread sends them to the GIF as before. VIF1 register reads and
+writes, VU1 memory access, VIF1 read-backs, save states and vblank wait until the worker is
+quiet (queue empty, or VIF1 stalled on an interrupt or a stopped program). A GIF DMA (PATH3)
+waits for the queue first (`vu1_async_path3_sync`, on). Gameplay sends about 2.7 million
+packets and 1.2 GB per 900 vblanks (3 MB per game frame) through the queue.
+
 ```text
 VitaStation2: performance work not yet done
     Nov 15, 2026        ·   ​@Troy

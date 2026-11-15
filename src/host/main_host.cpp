@@ -269,9 +269,12 @@ int main(int argc, char** argv)
 		}
 		else if(!std::strcmp(argv[i], "--vu1-verify")) CVpu::g_programHook = Vu1Verify::Hook; //vu1verify.txt
 		else if(!std::strcmp(argv[i], "--vu1-hle")) Re4Vu1Hle::Enable(true); //RE4 world program without VU1
+		else if(!std::strcmp(argv[i], "--vu1-async")) CVpu::g_asyncVif1 = true;               //VIF1 work on the VU1 thread (with --mtvu)
+		else if(!std::strcmp(argv[i], "--vu1-async-no-p3sync")) CVpu::g_asyncPath3Sync = false; //PATH3 does not wait for queued VIF1 work
 #ifdef VITAPS2_HAS_GL
 		else if(!std::strcmp(argv[i], "--gpu-world-debug") && (i + 1 < argc)) CGSH_Hardware::g_gpuWorldDebug = std::atoi(argv[++i]);
 		else if(!std::strcmp(argv[i], "--no-gpu-world")) CGSH_Hardware::g_gpuWorld = false;
+		else if(!std::strcmp(argv[i], "--gpu-world")) CGSH_Hardware::g_gpuWorld = true;
 #endif
 	}
 
@@ -577,6 +580,12 @@ int main(int argc, char** argv)
 			std::printf("game frames (GPU renderer): %u, primitives drawn: %u\n", CGSH_Hardware::g_gameFrames,
 			            static_cast<CGSH_Hardware*>(session.GetVm()->GetGSHandler())->GetPrimitiveCount());
 #endif
+		if(CVpu::g_asyncVif1)
+		{
+			auto& a = CVpu::g_asyncStats;
+			std::printf("async VIF1: %llu packets, %.1f MB, %llu stalls, %llu quiet waits (%.0f ms), %llu PATH3 syncs\n", (unsigned long long)a.packets.load(),
+			            a.bytes.load() / 1048576.0, (unsigned long long)a.stalls.load(), (unsigned long long)a.quietWaits.load(), a.quietWaitUs.load() / 1000.0, (unsigned long long)a.path3Syncs.load());
+		}
 		if(Re4Vu1Hle::IsEnabled())
 			std::printf("world batches on the CPU: %llu (%llu vertices, %llu clipped triangles), on the GPU: %llu batches %llu draws %llu fallbacks\n", (unsigned long long)CGSH_Primitives::g_worldBatches,
 			            (unsigned long long)CGSH_Primitives::g_worldVertices, (unsigned long long)CGSH_Primitives::g_worldClipped, (unsigned long long)CGSH_Hardware::g_gpuWorldBatches, (unsigned long long)CGSH_Hardware::g_gpuWorldDraws, (unsigned long long)CGSH_Hardware::g_gpuWorldFallbacks);

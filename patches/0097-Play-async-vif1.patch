@@ -1,0 +1,590 @@
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -19,6 +19,17 @@
+ class CGIF;
+ class CINTC;
+ 
++//Asynchronous VIF1 counters (CVpu::g_asyncStats)
++struct VPU_ASYNC_STATS
++{
++	std::atomic<uint64> packets = 0;
++	std::atomic<uint64> bytes = 0;
++	std::atomic<uint64> stalls = 0;
++	std::atomic<uint64> quietWaits = 0;
++	std::atomic<uint64> quietWaitUs = 0;
++	std::atomic<uint64> path3Syncs = 0;
++};
++
+ class CVpu
+ {
+ public:
+@@ -108,6 +119,38 @@
+ 	//Threaded VU1: the idle worker polls for new work this long before sleeping
+ 	//(a wake from the semaphore takes ~0.5 ms on the Vita, longer than most programs)
+ 	static inline uint32 g_workerSpinUs = 0;
++	//Asynchronous VIF1 (vu1_async, threaded VU1 only): VIF1 DMA data is copied into a queue and
++	//the DMA ends at once; the worker unpacks it and runs the programs (PCSX2's MTVU design).
++	//The EE no longer waits for VU1 except at sync points (VIF1 or VU1 register access, VU1
++	//memory, PATH3, vblank, save states).
++	static inline bool g_asyncVif1 = false;
++	//Asynchronous VIF1: a GIF DMA (PATH3) waits for the queued VIF1 work first, so texture
++	//uploads stay after the draws queued before them (vu1_async_path3_sync, on)
++	static inline bool g_asyncPath3Sync = true;
++	bool IsAsync() const
++	{
++		return m_threaded && g_asyncVif1 && (m_number == 1);
++	}
++	bool IsWorkerThread() const
++	{
++		return m_threaded && (std::this_thread::get_id() == m_workerId);
++	}
++	//EE thread (asynchronous VIF1): queue VIF1 data for the worker
++	void QueueVifData(const uint8* data, uint32 size, bool tagIncluded);
++	//Worker (asynchronous VIF1): GIF work for the EE thread, in order with the XGKICK packets
++	void QueueDirect(const uint8* data, uint32 size);
++	void QueuePath3Mask(bool masked);
++	//True when the worker touches no VIF1 state: nothing queued, or it waits for the EE
++	//(VIF1 stalled on an interrupt or a stopped program). VIF1 state is then the EE's.
++	bool IsAsyncQuiet() const
++	{
++		return (m_asyncQueued.load(std::memory_order_acquire) == 0) || m_asyncStalled.load(std::memory_order_acquire);
++	}
++	//EE thread: waits until IsAsyncQuiet()
++	void WaitAsyncQuiet();
++	//EE thread, after it changed VIF1 state: a stalled worker tries again
++	void ResumeAsync();
++	static inline VPU_ASYNC_STATS g_asyncStats;
+ 	//Diagnostics (VU1, inline execution only): called before a program starts (true) and after
+ 	//it ran (false), with its start address. Used to check program replacements on the PC.
+ 	static inline std::function<void(CVpu&, uint32 address, bool before)> g_programHook;
+@@ -204,14 +247,30 @@
+ 	//EE thread: true once no program runs and none is waiting for the worker
+ 	bool IsWorkerIdle() const
+ 	{
+-		return !m_workPending.load(std::memory_order_acquire) && (m_vuState.load(std::memory_order_acquire) != VU_STATE_RUNNING);
++		return !m_workPending.load(std::memory_order_acquire) && (m_vuState.load(std::memory_order_acquire) != VU_STATE_RUNNING) && IsAsyncQuiet();
+ 	}
++	//Worker: runs queued VIF1 data until the queue is empty or VIF1 stalls (true if it did work)
++	bool ProcessAsyncQueue();
++	struct ASYNC_PACKET
++	{
++		std::vector<uint8> data;
++		bool tagIncluded = false;
++	};
++	std::mutex m_asyncMutex;
++	std::deque<ASYNC_PACKET> m_asyncQueue;
++	std::vector<std::vector<uint8>> m_asyncFree; //finished buffers, reused
++	std::atomic<uint32> m_asyncQueued = 0; //packets queued and not finished
++	std::atomic<bool> m_asyncStalled = false;
++	bool m_asyncInProgress = false; //worker only
++	ASYNC_PACKET m_asyncCurrent;    //worker only
+ 	std::atomic<bool> m_stopWorker = false;
+ 	std::mutex m_kickMutex;
+ 	struct PENDING_KICK
+ 	{
+ 		std::vector<uint8> packet;
+ 		std::shared_ptr<void> custom; //from g_programReplacement
++		uint8 path = 1;               //2: VIF1 DIRECT data (asynchronous VIF1)
++		int8 mask = -1;               //0 or 1: MSKPATH3 (asynchronous VIF1)
+ 	};
+ 	std::deque<PENDING_KICK> m_pendingKicks;
+ 	uint32 m_kickOffset = 0; //EE thread: bytes of the first pending packet already sent
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -166,40 +166,150 @@
+ {
+ 	while(!m_stopWorker)
+ 	{
+-		if(!m_workPending.exchange(false, std::memory_order_acq_rel))
++		bool worked = false;
++		if(m_workPending.exchange(false, std::memory_order_acq_rel))
+ 		{
++			while((m_vuState == VU_STATE_RUNNING) && !m_stopWorker)
++			{
++				ExecuteInternal(5000);
++			}
++			//A program the EE started may be what a stalled VIF1 waits for
++			if(m_asyncInProgress) m_asyncStalled.store(false, std::memory_order_release);
++			worked = true;
++		}
++		if(ProcessAsyncQueue()) worked = true;
++		if(worked) continue;
++		auto hasWork = [this]() {
++			return m_workPending.load(std::memory_order_acquire) || m_stopWorker ||
++			       ((m_asyncQueued.load(std::memory_order_acquire) != 0) && !m_asyncStalled.load(std::memory_order_acquire));
++		};
+ #ifdef __vita__
+-			if(g_workerSpinUs != 0)
++		if(g_workerSpinUs != 0)
++		{
++			bool found = false;
++			SceUInt64 deadline = sceKernelGetSystemTimeWide() + g_workerSpinUs;
++			for(uint32 spins = 1;; spins++)
+ 			{
+-				bool found = false;
+-				SceUInt64 deadline = sceKernelGetSystemTimeWide() + g_workerSpinUs;
+-				for(uint32 spins = 1;; spins++)
++				if(hasWork())
+ 				{
+-					if(m_workPending.load(std::memory_order_acquire) || m_stopWorker)
+-					{
+-						found = true;
+-						break;
+-					}
+-					if(((spins & 255) == 0) && (sceKernelGetSystemTimeWide() >= deadline)) break;
++					found = true;
++					break;
+ 				}
+-				if(found) continue;
++				if(((spins & 255) == 0) && (sceKernelGetSystemTimeWide() >= deadline)) break;
+ 			}
+-#endif
+-			//Timed waits: a lost or early wakeup costs at most a millisecond.
+-#ifdef __vita__
+-			SceUInt timeout = 1000;
+-			sceKernelWaitSema(m_workerSema, 1, &timeout);
++			if(found) continue;
++		}
++		//Timed waits: a lost or early wakeup costs at most a millisecond.
++		SceUInt timeout = 1000;
++		sceKernelWaitSema(m_workerSema, 1, &timeout);
+ #else
+-			std::unique_lock<std::mutex> lock(m_workerMutex);
+-			m_workerCondition.wait_for(lock, std::chrono::milliseconds(1), [this]() { return m_workPending.load() || m_stopWorker.load(); });
++		std::unique_lock<std::mutex> lock(m_workerMutex);
++		m_workerCondition.wait_for(lock, std::chrono::milliseconds(1), hasWork);
+ #endif
+-			continue;
++	}
++}
++
++bool CVpu::ProcessAsyncQueue()
++{
++	bool worked = false;
++	while(!m_stopWorker)
++	{
++		if(m_asyncStalled.load(std::memory_order_acquire)) return worked;
++		if(!m_asyncInProgress)
++		{
++			{
++				std::lock_guard<std::mutex> lock(m_asyncMutex);
++				if(m_asyncQueue.empty()) return worked;
++				m_asyncCurrent = std::move(m_asyncQueue.front());
++				m_asyncQueue.pop_front();
++			}
++			m_asyncInProgress = true;
++			m_vif->BeginAsyncPacket(m_asyncCurrent.data.data(), static_cast<uint32>(m_asyncCurrent.data.size()), m_asyncCurrent.tagIncluded);
+ 		}
+-		while((m_vuState == VU_STATE_RUNNING) && !m_stopWorker)
++		worked = true;
++		if(!m_vif->ContinueAsyncPacket())
+ 		{
+-			ExecuteInternal(5000);
++			//VIF1 stalls (interrupt, or a stopped program): the EE resumes it
++			g_asyncStats.stalls.fetch_add(1, std::memory_order_relaxed);
++			m_asyncStalled.store(true, std::memory_order_release);
++			return worked;
++		}
++		m_asyncInProgress = false;
++		m_asyncCurrent.data.clear();
++		{
++			//The buffer keeps its memory for the next packet
++			std::lock_guard<std::mutex> lock(m_asyncMutex);
++			if(m_asyncFree.size() < 64) m_asyncFree.push_back(std::move(m_asyncCurrent.data));
++		}
++		m_asyncQueued.fetch_sub(1, std::memory_order_acq_rel);
++	}
++	return worked;
++}
++
++void CVpu::QueueVifData(const uint8* data, uint32 size, bool tagIncluded)
++{
++	g_asyncStats.bytes.fetch_add(size, std::memory_order_relaxed);
++	{
++		std::lock_guard<std::mutex> lock(m_asyncMutex);
++		//Games send VIF1 data in small DMA chunks (Resident Evil 4: about 260 bytes): data
++		//without a tag goes after the last packet the worker has not taken yet. The stream
++		//reads it the same way as two transfers.
++		if(!tagIncluded && !m_asyncQueue.empty() && (m_asyncQueue.back().data.size() < 0x10000))
++		{
++			auto& last = m_asyncQueue.back().data;
++			last.insert(last.end(), data, data + size);
++			return;
++		}
++		ASYNC_PACKET packet;
++		if(!m_asyncFree.empty())
++		{
++			packet.data = std::move(m_asyncFree.back());
++			m_asyncFree.pop_back();
+ 		}
++		packet.data.assign(data, data + size);
++		packet.tagIncluded = tagIncluded;
++		m_asyncQueue.push_back(std::move(packet));
++	}
++	g_asyncStats.packets.fetch_add(1, std::memory_order_relaxed);
++	m_asyncQueued.fetch_add(1, std::memory_order_acq_rel);
++	WakeWorker();
++}
++
++void CVpu::QueueDirect(const uint8* data, uint32 size)
++{
++	PENDING_KICK kick;
++	kick.packet.assign(data, data + size);
++	kick.path = 2;
++	std::lock_guard<std::mutex> lock(m_kickMutex);
++	m_pendingKicks.push_back(std::move(kick));
++	m_hasPendingKicks = true;
++}
++
++void CVpu::QueuePath3Mask(bool masked)
++{
++	PENDING_KICK kick;
++	kick.mask = masked ? 1 : 0;
++	std::lock_guard<std::mutex> lock(m_kickMutex);
++	m_pendingKicks.push_back(std::move(kick));
++	m_hasPendingKicks = true;
++}
++
++void CVpu::WaitAsyncQuiet()
++{
++	if(IsAsyncQuiet()) return;
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_VU1);
++	auto start = std::chrono::steady_clock::now();
++	for(uint32 spins = 0; !IsAsyncQuiet(); spins++)
++	{
++		if((spins & 63) == 63) std::this_thread::yield();
+ 	}
++	g_asyncStats.quietWaits.fetch_add(1, std::memory_order_relaxed);
++	g_asyncStats.quietWaitUs.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count(), std::memory_order_relaxed);
++}
++
++void CVpu::ResumeAsync()
++{
++	if(m_asyncStalled.exchange(false, std::memory_order_acq_rel)) WakeWorker();
+ }
+ 
+ void CVpu::Sync()
+@@ -270,6 +380,7 @@
+ void CVpu::FlushPendingXgKicks()
+ {
+ 	if(!m_hasPendingKicks) return;
++	if(IsWorkerThread()) return; //the GIF belongs to the EE thread
+ 	CGsPacketMetadata metadata;
+ 	metadata.pathIndex = 1;
+ 	while(true)
+@@ -279,7 +390,6 @@
+ 		//PATH1 for good (Resident Evil 4 then hung: VIF1 DIRECT waiting, GIF on PATH1).
+ 		//The packets wait; Execute tries again every slice.
+ 		uint32 activePath = m_gif.GetActivePath();
+-		if((activePath != 0) && (activePath != 1)) return;
+ 		PENDING_KICK* kick = nullptr;
+ 		{
+ 			std::lock_guard<std::mutex> lock(m_kickMutex);
+@@ -290,6 +400,29 @@
+ 			}
+ 			kick = &m_pendingKicks.front(); //a deque: the worker's pushes leave it in place
+ 		}
++		if(kick->mask >= 0)
++		{
++			m_gif.SetPath3Masked(kick->mask != 0);
++			std::lock_guard<std::mutex> lock(m_kickMutex);
++			m_pendingKicks.pop_front();
++			continue;
++		}
++		if((activePath != 0) && (activePath != kick->path)) return;
++		if(kick->path == 2)
++		{
++			//VIF1 DIRECT data (asynchronous VIF1)
++			CGsPacketMetadata directMetadata(2);
++			uint32 size = static_cast<uint32>(kick->packet.size());
++			if(m_kickOffset < size)
++			{
++				m_kickOffset += m_gif.ProcessMultiplePackets(kick->packet.data(), size, m_kickOffset, size, directMetadata);
++				if(m_kickOffset < size) return; //the GS holds a signal: the rest goes later
++			}
++			m_kickOffset = 0;
++			std::lock_guard<std::mutex> lock(m_kickMutex);
++			m_pendingKicks.pop_front();
++			continue;
++		}
+ 		if(kick->custom)
+ 		{
+ 			if(activePath != 0) return;
+@@ -364,7 +497,9 @@
+ 	}
+ 	{
+ 		std::lock_guard<std::mutex> lock(m_kickMutex);
+-		m_pendingKicks.push_back({std::move(packet), nullptr});
++		PENDING_KICK kick;
++		kick.packet = std::move(packet);
++		m_pendingKicks.push_back(std::move(kick));
+ 		m_hasPendingKicks = true;
+ 	}
+ }
+@@ -509,7 +644,9 @@
+ 			{
+ 				{
+ 					std::lock_guard<std::mutex> lock(m_kickMutex);
+-					m_pendingKicks.push_back({{}, std::move(custom)});
++					PENDING_KICK kick;
++					kick.custom = std::move(custom);
++					m_pendingKicks.push_back(std::move(kick));
+ 					m_hasPendingKicks = true;
+ 				}
+ 				FlushPendingXgKicks();
+@@ -523,6 +660,15 @@
+ 		}
+ 	}
+ 	m_vuState = VU_STATE_RUNNING;
++	if(IsWorkerThread())
++	{
++		//Asynchronous VIF1: the worker started the program, it runs it now
++		while((m_vuState == VU_STATE_RUNNING) && !m_stopWorker)
++		{
++			ExecuteInternal(5000);
++		}
++		return;
++	}
+ 	if(m_threaded)
+ 	{
+ 		m_workPending.store(true, std::memory_order_release);
+diff --git a/Source/ee/Vif.h b/Source/ee/Vif.h
+--- a/Source/ee/Vif.h
++++ b/Source/ee/Vif.h
+@@ -83,6 +83,18 @@
+ 
+ 	bool IsWaitingForProgramEnd() const;
+ 
++	//Asynchronous VIF1 (VU1 worker): process a copy of DMA data. Continue returns true once
++	//all of it was taken, false when VIF1 stalls (the worker tries again when the EE resumes it).
++	void BeginAsyncPacket(uint8* data, uint32 size, bool tagIncluded)
++	{
++		m_stream.SetSourceParams(data, size, tagIncluded);
++	}
++	bool ContinueAsyncPacket()
++	{
++		ProcessPacket(m_stream);
++		return m_stream.GetRemainingDmaTransferSize() == 0;
++	}
++
+ protected:
+ 	enum
+ 	{
+@@ -207,6 +219,7 @@
+ 		inline void Align32();
+ 		void SetDmaParams(uint32, uint32, bool);
+ 		void SetFifoParams(uint8*, uint32);
++		void SetSourceParams(uint8*, uint32, bool);
+ 
+ 		uint8* GetDirectPointer() const;
+ 		void Advance(uint32);
+@@ -318,6 +331,7 @@
+ 	};
+ 
+ 	void ProcessFifoWrite(uint32, uint32);
++	void SetRegisterImpl(uint32, uint32);
+ 
+ 	void ProcessPacket(StreamType&);
+ 	virtual void ExecuteCommand(StreamType&, CODE);
+diff --git a/Source/ee/Vif.cpp b/Source/ee/Vif.cpp
+--- a/Source/ee/Vif.cpp
++++ b/Source/ee/Vif.cpp
+@@ -91,6 +91,8 @@
+ 
+ uint32 CVif::GetRegister(uint32 address)
+ {
++	//Asynchronous VIF1: its state is the worker's until it has nothing to do or stalls
++	if(m_vpu.IsAsync()) m_vpu.WaitAsyncQuiet();
+ 	uint32 result = 0;
+ 	switch(address)
+ 	{
+@@ -190,6 +192,19 @@
+ 
+ void CVif::SetRegister(uint32 address, uint32 value)
+ {
++	if(m_vpu.IsAsync())
++	{
++		m_vpu.WaitAsyncQuiet();
++		SetRegisterImpl(address, value);
++		//A write (FBRST.STC above all) may end the stall the worker waits on
++		m_vpu.ResumeAsync();
++		return;
++	}
++	SetRegisterImpl(address, value);
++}
++
++void CVif::SetRegisterImpl(uint32 address, uint32 value)
++{
+ 	if(
+ 	    (address >= VIF0_FIFO_START && address < VIF0_FIFO_END) ||
+ 	    (address >= VIF1_FIFO_START && address < VIF1_FIFO_END))
+@@ -253,6 +268,8 @@
+ 
+ void CVif::CountTicks(uint32 ticks)
+ {
++	//Asynchronous VIF1: the interrupt waits until the worker leaves VIF1 state alone
++	if(m_vpu.IsAsync() && !m_vpu.IsAsyncQuiet()) return;
+ 	if(m_interruptDelayTicks != 0)
+ 	{
+ 		m_interruptDelayTicks -= ticks;
+@@ -773,8 +790,6 @@
+ {
+ 	if(m_pendingMicroProgram != -1)
+ 	{
+-		assert(!IsWaitingForProgramEnd());
+-		assert(m_vpu.IsVuReady());
+ 		m_vpu.ExecuteMicroProgram(m_pendingMicroProgram);
+ 		m_pendingMicroProgram = -1;
+ 		return true;
+@@ -1025,6 +1040,17 @@
+ 	SyncBuffer();
+ }
+ 
++void CVif::CFifoStream::SetSourceParams(uint8* source, uint32 size, bool tagIncluded)
++{
++	//Like SetDmaParams, from a copy of the data (asynchronous VIF1)
++	m_source = source;
++	m_startAddress = 0;
++	m_nextAddress = 0;
++	m_endAddress = size;
++	m_tagIncluded = tagIncluded;
++	SyncBuffer();
++}
++
+ void CVif::CFifoStream::Align32()
+ {
+ 	unsigned int remainBytes = m_bufferPosition & 0x03;
+diff --git a/Source/ee/Vif1.h b/Source/ee/Vif1.h
+--- a/Source/ee/Vif1.h
++++ b/Source/ee/Vif1.h
+@@ -23,6 +23,7 @@
+ 	void ExecuteCommand(StreamType&, CODE) override;
+ 
+ 	void Cmd_DIRECT(StreamType&, CODE);
++	uint32 SubmitDirect(uint8*, uint32);
+ 	void Cmd_UNPACK(StreamType&, CODE, uint32) override;
+ 
+ 	void PrepareMicroProgram() override;
+diff --git a/Source/ee/Vif1.cpp b/Source/ee/Vif1.cpp
+--- a/Source/ee/Vif1.cpp
++++ b/Source/ee/Vif1.cpp
+@@ -87,10 +87,33 @@
+ 			address &= (PS2::EE_RAM_SIZE - 1);
+ 			assert((address + size) <= PS2::EE_RAM_SIZE);
+ 		}
++		//Asynchronous VIF1: the draws queued before the read-back go first
++		m_vpu.Sync();
+ 		auto gs = m_gif.GetGsHandler();
+ 		gs->ReadImageData(source + address, size);
+ 		return qwc;
+ 	}
++	else if(m_vpu.IsAsync())
++	{
++		//Asynchronous VIF1: the worker processes a copy, the DMA ends now
++		uint32 size = qwc * 0x10;
++		const uint8* source = nullptr;
++		if(address & 0x80000000)
++		{
++			address &= (PS2::EE_SPR_SIZE - 1);
++			size = std::min<uint32>(size, PS2::EE_SPR_SIZE - address);
++			source = m_spr + address;
++		}
++		else
++		{
++			address &= (PS2::EE_RAM_SIZE - 1);
++			size = std::min<uint32>(size, PS2::EE_RAM_SIZE - address);
++			source = m_ram + address;
++		}
++		m_vpu.QueueVifData(source, size, tagIncluded);
++		EmuProfile::g_vif.vif1Qw.fetch_add(qwc, std::memory_order_relaxed);
++		return qwc;
++	}
+ 	else
+ 	{
+ 		return CVif::ReceiveDMA(address, qwc, direction, tagIncluded);
+@@ -113,7 +136,10 @@
+ 		m_BASE = nCommand.nIMM;
+ 		break;
+ 	case CODE_CMD_MSKPATH3:
+-		m_gif.SetPath3Masked((nCommand.nIMM & 0x8000) != 0);
++		if(m_vpu.IsWorkerThread())
++			m_vpu.QueuePath3Mask((nCommand.nIMM & 0x8000) != 0);
++		else
++			m_gif.SetPath3Masked((nCommand.nIMM & 0x8000) != 0);
+ 		break;
+ 	case CODE_CMD_FLUSH:
+ 		if(!m_vpu.IsVuReady())
+@@ -187,8 +213,7 @@
+ 			if(m_directQwordBufferIndex == QWORD_SIZE)
+ 			{
+ 				assert(m_CODE.nIMM != 0);
+-				uint32 processed = m_gif.ProcessMultiplePackets(m_directQwordBuffer,
+-				                                                QWORD_SIZE, 0, QWORD_SIZE, CGsPacketMetadata(2));
++				uint32 processed = SubmitDirect(m_directQwordBuffer, QWORD_SIZE);
+ 				if(processed != 0)
+ 				{
+ 					assert(processed == QWORD_SIZE);
+@@ -204,7 +229,7 @@
+ 			nSize = std::min<uint32>(m_CODE.nIMM * 0x10, nSize & ~0xF);
+ 
+ 			auto packet = stream.GetDirectPointer();
+-			uint32 processed = m_gif.ProcessMultiplePackets(packet, nSize, 0, nSize, CGsPacketMetadata(2));
++			uint32 processed = SubmitDirect(packet, nSize);
+ 			assert(processed <= nSize);
+ 			stream.Advance(processed);
+ 			//Adjust size in case not everything was processed by GIF
+@@ -224,6 +249,17 @@
+ 	}
+ }
+ 
++uint32 CVif1::SubmitDirect(uint8* packet, uint32 size)
++{
++	if(m_vpu.IsWorkerThread())
++	{
++		//Asynchronous VIF1: the EE thread sends it, in order with the XGKICK packets
++		m_vpu.QueueDirect(packet, size);
++		return size;
++	}
++	return m_gif.ProcessMultiplePackets(packet, size, 0, size, CGsPacketMetadata(2));
++}
++
+ void CVif1::Cmd_UNPACK(StreamType& stream, CODE nCommand, uint32 nDstAddr)
+ {
+ 	bool nFlg = (m_CODE.nIMM & 0x8000) != 0;
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -158,6 +158,12 @@
+ 	m_dmac.SetChannelTransferFunction(CDMAC::CHANNEL_ID_GIF,
+ 	                                  [this](uint32 address, uint32 qwc, uint32 direction, bool tagIncluded) {
+ 		                                  //PATH1 packets kicked by a threaded VU1 come first
++		                                  if(m_vpu1->IsAsync() && CVpu::g_asyncPath3Sync && !m_vpu1->IsAsyncQuiet())
++		                                  {
++			                                  //Asynchronous VIF1: the VIF1 work queued before this goes first
++			                                  CVpu::g_asyncStats.path3Syncs.fetch_add(1, std::memory_order_relaxed);
++			                                  m_vpu1->Sync();
++		                                  }
+ 		                                  m_vpu1->FlushPendingXgKicks();
+ 		                                  return m_gif.ReceiveDMA(address, qwc, direction, tagIncluded);
+ 	                                  });
+@@ -341,7 +347,8 @@
+ 	{
+ 		m_dmac.ResumeDMA0();
+ 	}
+-	if(CVpu::g_waitOnVifStall && m_vpu1->IsThreaded() && m_vpu1->IsVuRunning() && m_vpu1->GetVif().IsWaitingForProgramEnd())
++	bool vif1Async = m_vpu1->IsAsync();
++	if(!vif1Async && CVpu::g_waitOnVifStall && m_vpu1->IsThreaded() && m_vpu1->IsVuRunning() && m_vpu1->GetVif().IsWaitingForProgramEnd())
+ 	{
+ 		//VIF1 waits for the program to end: the EE waits too (real time) instead of running on
+ 		//in emulated time, as if the program took no emulated time (as without the thread).
+@@ -349,7 +356,7 @@
+ 		//in 900 vblanks with the thread, 393 without.
+ 		m_vpu1->Sync();
+ 	}
+-	if(m_vpu1->IsVuReady() || (m_vpu1->IsVuRunning() && !m_vpu1->GetVif().IsWaitingForProgramEnd()))
++	if(vif1Async || m_vpu1->IsVuReady() || (m_vpu1->IsVuRunning() && !m_vpu1->GetVif().IsWaitingForProgramEnd()))
+ 	{
+ 		m_dmac.ResumeDMA1();
+ 	}

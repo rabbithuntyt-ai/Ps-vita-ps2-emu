@@ -17,6 +17,8 @@ function(vitaps2_apply_patches)
 		else()
 			set(TARGET_DIR ${PLAY_DIR})
 		endif()
+		# --ignore-whitespace: some patches were made against LF files and the upstream
+		# files have CRLF line ends (patches 0075, 0078, 0080, 0082 and 0086).
 		# Applied patches are recorded in the submodule's git directory (later
 		# patches may touch the same lines, so a reverse check is not reliable
 		# once several are applied).
@@ -33,7 +35,7 @@ function(vitaps2_apply_patches)
 			continue()
 		endif()
 		execute_process(
-			COMMAND ${GIT_EXECUTABLE} apply --reverse --check ${PATCH}
+			COMMAND ${GIT_EXECUTABLE} apply --ignore-whitespace --reverse --check ${PATCH}
 			WORKING_DIRECTORY ${TARGET_DIR}
 			RESULT_VARIABLE ALREADY_APPLIED OUTPUT_QUIET ERROR_QUIET)
 		if(ALREADY_APPLIED EQUAL 0)
@@ -41,7 +43,7 @@ function(vitaps2_apply_patches)
 			continue()
 		endif()
 		execute_process(
-			COMMAND ${GIT_EXECUTABLE} apply --whitespace=nowarn ${PATCH}
+			COMMAND ${GIT_EXECUTABLE} apply --ignore-whitespace --whitespace=nowarn ${PATCH}
 			WORKING_DIRECTORY ${TARGET_DIR}
 			RESULT_VARIABLE RESULT)
 		if(NOT RESULT EQUAL 0)

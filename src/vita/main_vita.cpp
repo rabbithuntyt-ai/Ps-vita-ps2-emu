@@ -355,6 +355,8 @@ namespace
 		else if(key == "gpu_world") CGSH_Hardware::g_gpuWorld = value != 0;
 		else if(key == "vu_no_clamp") { if(value) CVuBasicBlock::g_extraCompileHints |= VUShared::COMPILEHINT_NO_CLAMPING; else CVuBasicBlock::g_extraCompileHints &= ~VUShared::COMPILEHINT_NO_CLAMPING; }
 		else if(key == "vu1_wait_on_stall") CVpu::g_waitOnVifStall = value != 0;
+		else if(key == "vu1_async") CVpu::g_asyncVif1 = value != 0;                //VIF1 work on the VU1 thread (needs threaded_vu1)
+		else if(key == "vu1_async_path3_sync") CVpu::g_asyncPath3Sync = value != 0; //PATH3 waits for queued VIF1 work (on)
 		else if(key == "re4_vu1_hle") Re4Vu1Hle::Enable(value != 0); //RE4: world vertex program without VU1
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
