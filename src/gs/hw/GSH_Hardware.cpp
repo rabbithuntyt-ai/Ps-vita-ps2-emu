@@ -2040,12 +2040,22 @@ void CGSH_Hardware::DrawBatchWithProgram()
 	glDisableClientState(GL_COLOR_ARRAY);
 	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 	const GLsizei stride = sizeof(BATCH_VERTEX);
-	for(GLuint i = 0; i < 4; i++) glEnableVertexAttribArray(i);
-	glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, stride, &m_batch[0].x);
-	glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, &m_batch[0].r);
-	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, &m_batch[0].s);
-	glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, &m_batch[0].fogS);
 	GLsizei count = static_cast<GLsizei>(m_batch.size());
+	// Vertices in the ring buffer: one copy. From client memory vitaGL copies the whole
+	// interleaved array once per attribute at every draw (four copies here).
+	const uint8* base = reinterpret_cast<const uint8*>(m_batch.data());
+	uint32 ringOffset = 0;
+	bool ring = g_vertexRing && UploadToRing(m_batch.data(), static_cast<uint32>(count * stride), ringOffset);
+	if(ring)
+	{
+		glBindBuffer(GL_ARRAY_BUFFER, m_vertexRing[m_ringCurrent]);
+		base = reinterpret_cast<const uint8*>(static_cast<uintptr_t>(ringOffset));
+	}
+	for(GLuint i = 0; i < 4; i++) glEnableVertexAttribArray(i);
+	glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, stride, base + offsetof(BATCH_VERTEX, x));
+	glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, base + offsetof(BATCH_VERTEX, r));
+	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, base + offsetof(BATCH_VERTEX, s));
+	glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, base + offsetof(BATCH_VERTEX, fogS));
 	{
 		CPartTimer timer(GPU_PART_DRAW);
 		glDrawArrays(m_batchMode, 0, count);
@@ -2071,10 +2081,70 @@ void CGSH_Hardware::DrawBatchWithProgram()
 		}
 	}
 	for(GLuint i = 0; i < 4; i++) glDisableVertexAttribArray(i);
+	if(ring) glBindBuffer(GL_ARRAY_BUFFER, 0);
 	glUseProgram(0);
 	glEnableClientState(GL_VERTEX_ARRAY);
 	glEnableClientState(GL_COLOR_ARRAY);
 	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+}
+
+bool CGSH_Hardware::UploadToRing(const void* data, uint32 size, uint32& offset)
+{
+	if(m_ringFailed) return false;
+	if(!m_vertexRing[0])
+	{
+		glGenBuffers(VERTEX_RING_COUNT, m_vertexRing);
+		for(uint32 i = 0; i < VERTEX_RING_COUNT; i++)
+		{
+			glBindBuffer(GL_ARRAY_BUFFER, m_vertexRing[i]);
+			//STATIC: vitaGL's plain GPU memory (DYNAMIC and STREAM can come from its scratch
+			//pool, which lives three frames)
+			glBufferData(GL_ARRAY_BUFFER, VERTEX_RING_SIZE, nullptr, GL_STATIC_DRAW);
+#ifdef __vita__
+			//vitaGL hands out the buffer's memory itself, without any synchronization: mapped
+			//once, written directly
+			m_vertexRingMemory[i] = static_cast<uint8*>(glMapBufferRange(GL_ARRAY_BUFFER, 0, VERTEX_RING_SIZE, GL_MAP_WRITE_BIT));
+			if(!m_vertexRingMemory[i]) m_ringFailed = true;
+#endif
+		}
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
+		if(m_ringFailed)
+		{
+			std::fprintf(stderr, "GSH_Hardware: vertex ring unavailable\n");
+			return false;
+		}
+	}
+	// A buffer per GPU frame, reused VERTEX_RING_COUNT frames later (vitaGL frees objects the
+	// GPU used FRAME_PURGE_FREQ = 4 frames after their last use: the GPU is done by then)
+#ifdef __vita__
+	uint32 frame = vglGetFrameNumber();
+#else
+	uint32 frame = m_frameCounter;
+#endif
+	if(frame != m_ringFrame)
+	{
+		m_ringFrame = frame;
+		m_ringCurrent = (m_ringCurrent + 1) % VERTEX_RING_COUNT;
+		m_ringOffset = 0;
+	}
+	if(m_ringOffset + size > VERTEX_RING_SIZE)
+	{
+		m_stats.ringOverflows++;
+		g_ringOverflows++;
+		return false;
+	}
+	g_ringDraws++;
+	g_ringBytes += size;
+	offset = m_ringOffset;
+#ifdef __vita__
+	std::memcpy(m_vertexRingMemory[m_ringCurrent] + offset, data, size);
+#else
+	glBindBuffer(GL_ARRAY_BUFFER, m_vertexRing[m_ringCurrent]);
+	glBufferSubData(GL_ARRAY_BUFFER, offset, size, data);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+#endif
+	m_ringOffset += (size + 15) & ~15;
+	return true;
 }
 
 bool CGSH_Hardware::BuildWorldProgram()

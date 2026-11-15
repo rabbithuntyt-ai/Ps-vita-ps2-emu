@@ -582,6 +582,9 @@ int main(int argc, char** argv)
 			std::printf("game frames (GPU renderer): %u, primitives drawn: %u\n", CGSH_Hardware::g_gameFrames,
 			            static_cast<CGSH_Hardware*>(session.GetVm()->GetGSHandler())->GetPrimitiveCount());
 #endif
+		if(CGSH_Hardware::g_shaderBatches)
+			std::printf("batch program: %llu draws from the vertex ring (%.1f MB), %llu from client memory (ring full)\n", (unsigned long long)CGSH_Hardware::g_ringDraws,
+			            CGSH_Hardware::g_ringBytes / 1048576.0, (unsigned long long)CGSH_Hardware::g_ringOverflows);
 		if(CGSH_Hardware::g_re4SkipDof) std::printf("draws skipped (re4_skip_dof): %llu\n", (unsigned long long)CGSH_Hardware::g_skippedDraws);
 		if(CVpu::g_asyncVif1)
 		{

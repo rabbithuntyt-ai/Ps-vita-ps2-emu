@@ -85,6 +85,7 @@ public:
 	struct STATS
 	{
 		uint32 drawCalls = 0;
+		uint32 ringOverflows = 0; //batches drawn from client memory: the vertex ring was full
 		uint32 targetDownloads = 0;
 		uint32 depthRestores = 0; //depth set again after a new GPU scene (Vita)
 		uint32 targetUploads = 0;
@@ -222,6 +223,10 @@ public:
 	// Ordinary batches drawn with one GLSL program instead of the fixed-function texture
 	// combiner, fog unit and alpha test (gs_shaders, off until measured on the Vita)
 	static inline bool g_shaderBatches = false;
+	// With gs_shaders: batch vertices in a ring of GPU buffers, one copy instead of vitaGL's
+	// copy per attribute (gs_vertex_ring, on)
+	static inline bool g_vertexRing = true;
+	static inline uint64 g_ringDraws = 0, g_ringOverflows = 0, g_ringBytes = 0;
 	static inline uint64 g_skippedDraws = 0;
 	static inline bool g_gpuWorld = false; //right on the PC, not yet run on the Vita (docs/RE4_GAMEPLAY.md)
 	static inline uint64 g_gpuWorldBatches = 0, g_gpuWorldDraws = 0, g_gpuWorldFallbacks = 0;
@@ -417,6 +422,19 @@ private:
 	bool m_batchProgramFailed = false;
 	bool m_batchShaderActive = false;
 	GLint m_batchLocations[8] = {};
+	// Vertex ring (gs_vertex_ring, with gs_shaders): a buffer per GPU frame
+	enum
+	{
+		VERTEX_RING_COUNT = 4,
+		VERTEX_RING_SIZE = 2 * 1024 * 1024,
+	};
+	bool UploadToRing(const void* data, uint32 size, uint32& offset);
+	GLuint m_vertexRing[VERTEX_RING_COUNT] = {};
+	uint8* m_vertexRingMemory[VERTEX_RING_COUNT] = {};
+	uint32 m_ringCurrent = 0;
+	uint32 m_ringOffset = 0;
+	uint32 m_ringFrame = ~0U;
+	bool m_ringFailed = false;
 	// AddVertex's reciprocals and what they were computed for (target width, height, Z format,
 	// texture width, height)
 	uint32 m_vertexKey[5] = {};
