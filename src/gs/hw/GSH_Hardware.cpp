@@ -1897,6 +1897,184 @@ namespace
 	    "	gl_FragColor = vec4(rgb, a);\n"
 	    "}\n";
 	const char* g_worldUniforms[] = {"uM", "uCO", "uCS", "uTO", "uScreen", "uZ", "uTex", "uTexXf", "uMode", "uFog", "uAlpha"};
+
+	// Ordinary batches (gs_shaders): AddVertex's vertices with the fixed-function texture
+	// combiner, fog unit and alpha test done in one program (vitaGL rebuilds its fixed-function
+	// shader from the GL state at every draw). Same arithmetic as the fixed-function setup:
+	// colors are bytes / 255 (0x80 = 1.0 after the doubling), fog interpolates towards the fog
+	// color by the ramp's value at fogS.
+	const char* g_batchVertexShader =
+	    "attribute vec4 aPosition;\n"
+	    "attribute vec4 aColor;\n"
+	    "attribute vec2 aTex;\n"
+	    "attribute float aFog;\n"
+	    "uniform float uFogOn;\n"
+	    "varying vec4 vColor;\n"
+	    "varying vec2 vTex;\n"
+	    "varying float vFog;\n"
+	    "void main()\n"
+	    "{\n"
+	    "	gl_Position = aPosition;\n"
+	    "	vColor = aColor;\n"
+	    "	vTex = aTex;\n"
+	    "	vFog = (uFogOn > 0.5) ? clamp((aFog * 256.0 - 0.5) * (1.0 / 255.0), 0.0, 1.0) : 1.0;\n"
+	    "}\n";
+	// uMode, uFog (rgb) and uAlpha as in g_worldFragmentShader
+	const char* g_batchFragmentShader =
+	    "uniform sampler2D uTex;\n"
+	    "uniform vec4 uMode;\n"
+	    "uniform vec4 uFog;\n"
+	    "uniform vec4 uAlpha;\n"
+	    "varying vec4 vColor;\n"
+	    "varying vec2 vTex;\n"
+	    "varying float vFog;\n"
+	    "void main()\n"
+	    "{\n"
+	    "	vec4 t = texture2D(uTex, vTex);\n"
+	    "	vec3 rgb = vColor.rgb;\n"
+	    "	if(uMode.x > 1.5) rgb = t.rgb;\n"
+	    "	else if(uMode.x > 0.5) rgb = t.rgb * vColor.rgb * 2.0;\n"
+	    "	float a = vColor.a * 2.0;\n"
+	    "	if(uMode.y > 2.5) a = uMode.w;\n"
+	    "	else if(uMode.y > 1.5) a = t.a * vColor.a * uMode.z;\n"
+	    "	else if(uMode.y > 0.5) a = t.a * uMode.z;\n"
+	    "	rgb = min(rgb, vec3(1.0));\n"
+	    "	a = min(a, 1.0);\n"
+	    "	rgb = mix(uFog.rgb, rgb, vFog);\n"
+	    "	if(uAlpha.x > 0.5)\n"
+	    "	{\n"
+	    "		bool pass = false;\n"
+	    "		if(uAlpha.x < 1.5) pass = false;\n"
+	    "		else if(uAlpha.x < 2.5) pass = a < uAlpha.y;\n"
+	    "		else if(uAlpha.x < 3.5) pass = abs(a - uAlpha.y) < (0.5 / 255.0);\n"
+	    "		else if(uAlpha.x < 4.5) pass = a > uAlpha.y;\n"
+	    "		else pass = abs(a - uAlpha.y) >= (0.5 / 255.0);\n"
+	    "		if(!pass) discard;\n"
+	    "	}\n"
+	    "	gl_FragColor = vec4(rgb, a);\n"
+	    "}\n";
+	const char* g_batchUniforms[] = {"uTex", "uMode", "uFog", "uAlpha", "uFogOn"};
+}
+
+bool CGSH_Hardware::BuildBatchProgram()
+{
+	if(m_batchProgram) return true;
+	if(m_batchProgramFailed) return false;
+	GLuint vs = CompileShader(GL_VERTEX_SHADER, g_batchVertexShader);
+	GLuint fs = CompileShader(GL_FRAGMENT_SHADER, g_batchFragmentShader);
+	if(!vs || !fs)
+	{
+		m_batchProgramFailed = true;
+		return false;
+	}
+	m_batchProgram = glCreateProgram();
+	glAttachShader(m_batchProgram, vs);
+	glAttachShader(m_batchProgram, fs);
+	glBindAttribLocation(m_batchProgram, 0, "aPosition");
+	glBindAttribLocation(m_batchProgram, 1, "aColor");
+	glBindAttribLocation(m_batchProgram, 2, "aTex");
+	glBindAttribLocation(m_batchProgram, 3, "aFog");
+	glLinkProgram(m_batchProgram);
+	GLint ok = 0;
+	glGetProgramiv(m_batchProgram, GL_LINK_STATUS, &ok);
+	if(!ok)
+	{
+		std::fprintf(stderr, "GSH_Hardware: batch program link failed\n");
+		glDeleteProgram(m_batchProgram);
+		m_batchProgram = 0;
+		m_batchProgramFailed = true;
+		return false;
+	}
+	for(unsigned int i = 0; i < sizeof(g_batchUniforms) / sizeof(g_batchUniforms[0]); i++)
+		m_batchLocations[i] = glGetUniformLocation(m_batchProgram, g_batchUniforms[i]);
+	return true;
+}
+
+void CGSH_Hardware::SetBatchUniforms(bool fixAlpha)
+{
+	const auto& s = m_state;
+	bool decal = s.textured && (s.tfx == TEX0_FUNCTION_DECAL);
+	float rgbMode = !s.textured ? 0.0f : decal ? 2.0f : 1.0f;
+	float alphaMode = 0, alphaScale = 1, alphaConstant = 0;
+	if(fixAlpha)
+	{
+		alphaMode = 3;
+		alphaConstant = std::min(static_cast<float>(s.blendFix) / 128.0f, 1.0f);
+	}
+	else if(s.textured && s.tcc && !decal)
+	{
+		alphaMode = 2;
+		alphaScale = m_textureAlphaDoubled ? 2.0f : 4.0f;
+	}
+	else if(s.textured && s.tcc)
+	{
+		alphaMode = 1;
+		alphaScale = m_textureAlphaDoubled ? 1.0f : 2.0f;
+	}
+	glUniform4f(m_batchLocations[1], rgbMode, alphaMode, alphaScale, alphaConstant);
+}
+
+void CGSH_Hardware::DrawBatchWithProgram()
+{
+	const auto& s = m_state;
+	glUseProgram(m_batchProgram);
+	glUniform1i(m_batchLocations[0], 0);
+	SetBatchUniforms(m_fixAlpha);
+	glUniform4f(m_batchLocations[2], static_cast<float>(s.fogColor & 0xFF) / 255.0f, static_cast<float>((s.fogColor >> 8) & 0xFF) / 255.0f,
+	            static_cast<float>((s.fogColor >> 16) & 0xFF) / 255.0f, 0.0f);
+	float test = 0;
+	switch(m_alphaTestFunc)
+	{
+	case GL_NEVER: test = 1; break;
+	case GL_LESS: test = 2; break;
+	case GL_EQUAL: test = 3; break;
+	case GL_GREATER: test = 4; break;
+	case GL_NOTEQUAL: test = 5; break;
+	default: test = 0; break;
+	}
+	if(m_debugFlags & 2) test = 0;
+	glUniform4f(m_batchLocations[3], test, m_alphaTestRef, 0, 0);
+	glUniform1f(m_batchLocations[4], s.fog ? 1.0f : 0.0f);
+
+	glDisableClientState(GL_VERTEX_ARRAY);
+	glDisableClientState(GL_COLOR_ARRAY);
+	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	const GLsizei stride = sizeof(BATCH_VERTEX);
+	for(GLuint i = 0; i < 4; i++) glEnableVertexAttribArray(i);
+	glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, stride, &m_batch[0].x);
+	glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, &m_batch[0].r);
+	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, &m_batch[0].s);
+	glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, &m_batch[0].fogS);
+	GLsizei count = static_cast<GLsizei>(m_batch.size());
+	{
+		CPartTimer timer(GPU_PART_DRAW);
+		glDrawArrays(m_batchMode, 0, count);
+	}
+	if(m_alphaPass)
+	{
+		// As FlushBatch: the source alpha written by a second, alpha-only pass
+		glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+		glDisable(GL_BLEND);
+		SetBatchUniforms(false);
+		if(m_depthWrite)
+		{
+			glDepthFunc(GL_EQUAL);
+			glDepthMask(GL_FALSE);
+		}
+		glDrawArrays(m_batchMode, 0, count);
+		glColorMask(m_colorMask[0], m_colorMask[1], m_colorMask[2], m_colorMask[3]);
+		glEnable(GL_BLEND);
+		if(m_depthWrite)
+		{
+			glDepthFunc(m_depthFunc);
+			glDepthMask(GL_TRUE);
+		}
+	}
+	for(GLuint i = 0; i < 4; i++) glDisableVertexAttribArray(i);
+	glUseProgram(0);
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glEnableClientState(GL_COLOR_ARRAY);
+	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 }
 
 bool CGSH_Hardware::BuildWorldProgram()
@@ -2270,6 +2448,7 @@ void CGSH_Hardware::ApplyState()
 {
 	const auto& s = m_state;
 	m_stateApplied = true;
+	m_batchShaderActive = g_shaderBatches && BuildBatchProgram();
 	m_drawNothing = s.zte && (s.ztst == DEPTH_TEST_NEVER);
 	if(m_drawNothing) return;
 	if(g_re4SkipDof && SkipDrawRule())
@@ -2384,8 +2563,16 @@ void CGSH_Hardware::ApplyState()
 		case ALPHA_TEST_GREATER: func = high ? GL_NEVER : GL_GREATER, ref = upper; break;
 		case ALPHA_TEST_NOTEQUAL: func = (s.aref > 0x80) ? GL_ALWAYS : GL_NOTEQUAL, ref = exact; break;
 		}
-		glEnable(GL_ALPHA_TEST);
-		glAlphaFunc(func, ref);
+		// With the batch program the test is in the fragment shader
+		if(m_batchShaderActive)
+		{
+			glDisable(GL_ALPHA_TEST);
+		}
+		else
+		{
+			glEnable(GL_ALPHA_TEST);
+			glAlphaFunc(func, ref);
+		}
 		m_alphaTestFunc = func;
 		m_alphaTestRef = ref;
 	}
@@ -2494,6 +2681,7 @@ void CGSH_Hardware::ApplyState()
 	}
 
 	//Texture combiner: GS colors have 0x80 = 1.0.
+	if(m_batchShaderActive) return; //the batch program does it (DrawBatchWithProgram)
 	bool textured = s.textured;
 	bool decal = textured && (s.tfx == TEX0_FUNCTION_DECAL);
 	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
@@ -2919,6 +3107,15 @@ void CGSH_Hardware::FlushBatch()
 	FlushWorld();
 	FlushPoints();
 	if(m_batch.empty()) return;
+	if(m_batchShaderActive)
+	{
+		DrawBatchWithProgram();
+		m_batch.clear();
+		m_stats.drawCalls++;
+		if(m_currentTarget) m_currentTarget->drawBatches++;
+		if(m_diagFile && m_currentTarget) m_diagDraws[DiagKey(m_currentTarget->fbp, m_currentTarget->fbw, m_currentTarget->psm)]++;
+		return;
+	}
 	const GLsizei stride = sizeof(BATCH_VERTEX);
 	glVertexPointer(4, GL_FLOAT, stride, &m_batch[0].x);
 	glColorPointer(4, GL_UNSIGNED_BYTE, stride, &m_batch[0].r);

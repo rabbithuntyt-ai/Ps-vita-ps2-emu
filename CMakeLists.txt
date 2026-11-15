@@ -200,6 +200,7 @@ else()
 		target_include_directories(gs_hardware_tests PRIVATE tests)
 		target_link_libraries(gs_hardware_tests PRIVATE vitaps2_common gsh_hardware)
 		add_test(NAME gs_hardware_tests COMMAND gs_hardware_tests)
+		add_test(NAME gs_hardware_tests_shaders COMMAND gs_hardware_tests --shaders)
 
 		add_executable(ui_render_test tests/ui_render_test.cpp)
 		target_link_libraries(ui_render_test PRIVATE vitaps2_ui)

@@ -219,6 +219,9 @@ public:
 	// GSC_ResidentEvil4 rule did (re4_skip_dof, 0 = off, PCSX2 used 176). The game loses
 	// its depth blur; the Z read-back and the blur round trips go away.
 	static inline uint32 g_re4SkipDof = 0;
+	// Ordinary batches drawn with one GLSL program instead of the fixed-function texture
+	// combiner, fog unit and alpha test (gs_shaders, off until measured on the Vita)
+	static inline bool g_shaderBatches = false;
 	static inline uint64 g_skippedDraws = 0;
 	static inline bool g_gpuWorld = false; //right on the PC, not yet run on the Vita (docs/RE4_GAMEPLAY.md)
 	static inline uint64 g_gpuWorldBatches = 0, g_gpuWorldDraws = 0, g_gpuWorldFallbacks = 0;
@@ -406,6 +409,14 @@ private:
 	void ApplyState();
 	bool SkipDrawRule();
 	uint32 m_skipDraws = 0;
+	// Batch program (gs_shaders)
+	bool BuildBatchProgram();
+	void SetBatchUniforms(bool fixAlpha);
+	void DrawBatchWithProgram();
+	GLuint m_batchProgram = 0;
+	bool m_batchProgramFailed = false;
+	bool m_batchShaderActive = false;
+	GLint m_batchLocations[8] = {};
 	// AddVertex's reciprocals and what they were computed for (target width, height, Z format,
 	// texture width, height)
 	uint32 m_vertexKey[5] = {};

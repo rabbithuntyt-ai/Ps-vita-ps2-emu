@@ -759,7 +759,15 @@ namespace
 int main(int argc, char** argv)
 {
 	CEmuSession::SetDataPaths("vitaps2_test_data", ".");
-	const char* dumpDir = (argc > 1) ? argv[1] : nullptr;
+	const char* dumpDir = nullptr;
+	for(int i = 1; i < argc; i++)
+	{
+		//--shaders: the batch program instead of the fixed-function path (gs_shaders)
+		if(!std::strcmp(argv[i], "--shaders"))
+			CGSH_Hardware::g_shaderBatches = true;
+		else
+			dumpDir = argv[i];
+	}
 
 	const int attribs[] = {OSMESA_FORMAT, OSMESA_RGBA, OSMESA_DEPTH_BITS, 24, OSMESA_PROFILE, OSMESA_COMPAT_PROFILE, 0};
 	OSMesaContext context = OSMesaCreateContextAttribs(attribs, nullptr);

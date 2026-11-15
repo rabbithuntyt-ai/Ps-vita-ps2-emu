@@ -270,6 +270,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--vu1-verify")) CVpu::g_programHook = Vu1Verify::Hook; //vu1verify.txt
 		else if(!std::strcmp(argv[i], "--vu1-hle")) Re4Vu1Hle::Enable(true); //RE4 world program without VU1
 		else if(!std::strcmp(argv[i], "--re4-skip-dof") && (i + 1 < argc)) CGSH_Hardware::g_re4SkipDof = std::strtoul(argv[++i], nullptr, 0);
+		else if(!std::strcmp(argv[i], "--gs-shaders")) CGSH_Hardware::g_shaderBatches = true; //batch program (gs_shaders)
 		else if(!std::strcmp(argv[i], "--vu1-async")) CVpu::g_asyncVif1 = true;               //VIF1 work on the VU1 thread (with --mtvu)
 		else if(!std::strcmp(argv[i], "--vu1-async-no-p3sync")) CVpu::g_asyncPath3Sync = false; //PATH3 does not wait for queued VIF1 work
 #ifdef VITAPS2_HAS_GL
