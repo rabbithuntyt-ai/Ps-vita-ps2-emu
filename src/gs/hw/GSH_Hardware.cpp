@@ -2581,13 +2581,31 @@ void CGSH_Hardware::AddVertex(const CSoftwareRasterizer::VERTEX& v)
 {
 	const auto& s = m_state;
 	const TARGET& target = *m_currentTarget;
+	// Reciprocals kept while the target size, Z format and texture size stay (divides are
+	// slow on the Vita's Cortex-A9, a double divide most of all)
+	if((target.width != m_vertexKey[0]) || (target.height != m_vertexKey[1]) || (s.zpsm != m_vertexKey[2]) || (s.tw != m_vertexKey[3]) || (s.th != m_vertexKey[4]))
+	{
+		m_vertexKey[0] = target.width;
+		m_vertexKey[1] = target.height;
+		m_vertexKey[2] = s.zpsm;
+		m_vertexKey[3] = s.tw;
+		m_vertexKey[4] = s.th;
+		auto powerOfTwo = [](uint32 value) { return (value != 0) && ((value & (value - 1)) == 0); };
+		m_vertexScaleX = powerOfTwo(target.width) ? 2.0f / static_cast<float>(target.width) : 0.0f;
+		m_vertexScaleY = powerOfTwo(target.height) ? 2.0f / static_cast<float>(target.height) : 0.0f;
+		m_vertexZMax = ZMaxForPsm(s.zpsm);
+		m_vertexZScale = 2.0 / static_cast<double>(m_vertexZMax);
+		m_vertexInvTw = 1.0f / static_cast<float>(s.tw);
+		m_vertexInvTh = 1.0f / static_cast<float>(s.th);
+	}
 	BATCH_VERTEX out;
-	float px = static_cast<float>(v.x) / 16.0f + 0.5f;
-	float py = static_cast<float>(v.y) / 16.0f + 0.5f;
-	out.x = px / static_cast<float>(target.width) * 2.0f - 1.0f;
-	out.y = py / static_cast<float>(target.height) * 2.0f - 1.0f;
-	double z = static_cast<double>(std::min(v.z, ZMaxForPsm(s.zpsm))) / static_cast<double>(ZMaxForPsm(s.zpsm));
-	out.z = static_cast<float>(z * 2.0 - 1.0);
+	float px = static_cast<float>(v.x) * (1.0f / 16.0f) + 0.5f;
+	float py = static_cast<float>(v.y) * (1.0f / 16.0f) + 0.5f;
+	// A multiply by the reciprocal only where it gives the divide's exact result (power of two
+	// sizes): edges that fall on pixel centres depend on the last bit.
+	out.x = (m_vertexScaleX != 0) ? (px * m_vertexScaleX - 1.0f) : (px / static_cast<float>(target.width) * 2.0f - 1.0f);
+	out.y = (m_vertexScaleY != 0) ? (py * m_vertexScaleY - 1.0f) : (py / static_cast<float>(target.height) * 2.0f - 1.0f);
+	out.z = static_cast<float>(static_cast<double>(std::min(v.z, m_vertexZMax)) * m_vertexZScale - 1.0);
 	out.w = 1.0f;
 	out.r = v.r;
 	out.g = v.g;
@@ -2597,8 +2615,8 @@ void CGSH_Hardware::AddVertex(const CSoftwareRasterizer::VERTEX& v)
 	out.fogT = 0.5f;
 	if(s.fst)
 	{
-		out.s = v.u / static_cast<float>(s.tw) * m_texScaleS + m_texOffsetS;
-		out.t = v.v / static_cast<float>(s.th) * m_texScaleT + m_texOffsetT;
+		out.s = v.u * m_vertexInvTw * m_texScaleS + m_texOffsetS; //TW, TH: powers of two
+		out.t = v.v * m_vertexInvTh * m_texScaleT + m_texOffsetT;
 	}
 	else
 	{

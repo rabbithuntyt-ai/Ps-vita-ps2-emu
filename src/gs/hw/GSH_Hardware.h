@@ -406,6 +406,12 @@ private:
 	void ApplyState();
 	bool SkipDrawRule();
 	uint32 m_skipDraws = 0;
+	// AddVertex's reciprocals and what they were computed for (target width, height, Z format,
+	// texture width, height)
+	uint32 m_vertexKey[5] = {};
+	float m_vertexScaleX = 0, m_vertexScaleY = 0, m_vertexInvTw = 0, m_vertexInvTh = 0;
+	uint32 m_vertexZMax = 1;
+	double m_vertexZScale = 0;
 	void SetupAlphaCombiner(bool fix);
 	void SetupFog();
 	void BindTexture();

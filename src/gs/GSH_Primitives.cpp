@@ -4,6 +4,7 @@
 
 void CGSH_Primitives::WriteRegisterImpl(uint8 registerId, uint64 data)
 {
+	uint64 previous = m_nReg[registerId];
 	CGSHandler::WriteRegisterImpl(registerId, data);
 
 	switch(registerId)
@@ -15,8 +16,23 @@ void CGSH_Primitives::WriteRegisterImpl(uint8 registerId, uint64 data)
 	case GS_REG_HWREG:
 		//Per-vertex data: no effect on rasterizer state.
 		break;
-	default:
+	case GS_REG_TEX0_1:
+	case GS_REG_TEX0_2:
+	case GS_REG_TEX2_1:
+	case GS_REG_TEX2_2:
+	case GS_REG_TEXCLUT:
+	case GS_REG_TEXFLUSH:
+	case GS_REG_BITBLTBUF:
+	case GS_REG_TRXPOS:
+	case GS_REG_TRXREG:
+	case GS_REG_TRXDIR:
+		//Can load a new CLUT or texture (or start a transfer) with the same value
 		m_stateDirty = true;
+		break;
+	default:
+		//Games rewrite registers with the value they already have (a whole register list per
+		//object): that changes nothing, so no new state (a DecodeState and a 52-field compare)
+		if(data != previous) m_stateDirty = true;
 		break;
 	}
 

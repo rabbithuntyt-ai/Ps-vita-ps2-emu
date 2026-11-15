@@ -13,7 +13,15 @@ real-time speed, so the per-thread CPU time per game frame is the useful figure.
 | P1 asynchronous VU1 | Done (patch 0097), off by default, untested on the Vita | `vu1_async=1` with `threaded_vu1=1` (PC: `--mtvu --vu1-async`) | 393 game frames in 900 vblanks (threaded VU1: 349, no thread: 393). EE thread 65 → 46 ms per game frame, VU1 thread 26 → 19 ms. Pictures correct. 0 VIF1 stalls, 0 PATH3 syncs in gameplay |
 | R1 RE4 depth-blur skip | Done, off by default | `re4_skip_dof=176` (PC: `--re4-skip-dof 176`) | Real time for the 900 vblanks 41.6 s -> 24.7 s with `vu1_async` (same 393 game frames); 202 draws skipped per game frame. The background loses its blur; the green line along the top edge goes too |
 | V1 RE4 world on the GPU | First half done: `gpu_world` draws right (retained geometry still to do) | `re4_vu1_hle=1 gpu_world=1` | 0.10-0.15% of pixels differ from the CPU path. All of P1 + R1 + V1 together: 393 game frames in 23.6 s (threaded VU1 alone: 349 in 38.5 s) |
+| Small items 1 and 2 (GS thread) | Done, always on | — | `AddVertex`: reciprocals cached per target size, Z format and texture size (multiplies only where they give the divide's exact result: power of two sizes; the `textured clut` test catches the last-bit difference otherwise). A register write with the value the register already has no longer forces a new state (TEX0/TEX2/TEXCLUT/TEXFLUSH and the transfer registers always do). Gameplay pictures identical |
 | T1 CI patches | Done: 0093 cut to the hunks no earlier patch has; `--ignore-whitespace` in `cmake/ApplyPatches.cmake` | — | All 97 patches apply to clean submodule copies (`runs/re4/cichk.sh`); CI logs not checked |
+
+Not done yet, and why: C2 (COP2 flags) needs the EE profile in gameplay first, which the PC
+runner cannot give (its EE samples land on the idle loops); small item 4 (texture storage
+reuse) needs the Vita GPU's frame timing to know when a texture is free; P2 (GIF parsing on
+the GS thread) moves work onto the GS thread, which is the Vita's wall in gameplay; G1/G3/G4,
+P3, C1, T2/T3 and B6 are Vita-only. Each of P1, R1 and V1 is off by default until it has run
+on the Vita: `vu1_async=1 re4_skip_dof=176 re4_vu1_hle=1 gpu_world=1` (with `threaded_vu1=1`).
 
 P1 as built: `CVif1::ReceiveDMA` copies the DMA data into a queue and returns at once (small
 chunks without a tag are merged, buffers are reused). The VU1 worker runs `ProcessPacket` on it
