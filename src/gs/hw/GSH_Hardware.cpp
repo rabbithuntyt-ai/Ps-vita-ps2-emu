@@ -2056,9 +2056,16 @@ void CGSH_Hardware::DrawBatchWithProgram()
 	glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, base + offsetof(BATCH_VERTEX, r));
 	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, base + offsetof(BATCH_VERTEX, s));
 	glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, base + offsetof(BATCH_VERTEX, fogS));
+	bool indexed = !m_batchIndices.empty();
+	auto draw = [&]() {
+		if(indexed)
+			glDrawElements(m_batchMode, static_cast<GLsizei>(m_batchIndices.size()), GL_UNSIGNED_SHORT, m_batchIndices.data());
+		else
+			glDrawArrays(m_batchMode, 0, count);
+	};
 	{
 		CPartTimer timer(GPU_PART_DRAW);
-		glDrawArrays(m_batchMode, 0, count);
+		draw();
 	}
 	if(m_alphaPass)
 	{
@@ -2071,7 +2078,7 @@ void CGSH_Hardware::DrawBatchWithProgram()
 			glDepthFunc(GL_EQUAL);
 			glDepthMask(GL_FALSE);
 		}
-		glDrawArrays(m_batchMode, 0, count);
+		draw();
 		glColorMask(m_colorMask[0], m_colorMask[1], m_colorMask[2], m_colorMask[3]);
 		glEnable(GL_BLEND);
 		if(m_depthWrite)
@@ -2974,6 +2981,7 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 		return;
 	}
 
+	size_t firstVertex = m_batch.size();
 	switch(kind)
 	{
 	case CSoftwareRasterizer::PRIMITIVE_POINT:
@@ -3059,10 +3067,14 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 		AddVertex(tr);
 		AddVertex(bl);
 		AddVertex(tr);
-		AddVertex(br);
-		AddVertex(bl);
+			AddVertex(br);
+			AddVertex(bl);
+		}
+		break;
 	}
-	break;
+	if(m_batchShaderActive && (mode == GL_TRIANGLES))
+	{
+		for(size_t i = firstVertex; i < m_batch.size(); i++) m_batchIndices.push_back(static_cast<uint16>(i));
 	}
 	if(m_currentTarget)
 	{
@@ -3078,6 +3090,37 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 		MarkTargetDirty(*m_currentTarget, minX >> 4, minY >> 4, (maxX >> 4) + 2, (maxY >> 4) + 2);
 	}
 	if(m_batch.size() >= 3 * 4096) FlushBatch();
+}
+
+void CGSH_Hardware::OnDrawStripTriangle(const CSoftwareRasterizer::VERTEX* vertices, bool continues)
+{
+	g_stripCalls++;
+	if(continues) g_stripContinues++;
+	g_stripCalls++;
+	if(continues) g_stripContinues++;
+	// The strip goes on in the same batch: one new vertex, three indices
+	if(continues && m_batchShaderActive && m_stateApplied && !m_drawNothing && m_state.gouraud && (m_batchMode == GL_TRIANGLES) &&
+	   (m_batch.size() == m_stripEnd) && (m_batch.size() >= 2) && !m_diagFile)
+	{
+		uint16 first = static_cast<uint16>(m_batch.size() - 2);
+		AddVertex(vertices[2]);
+		m_batchIndices.push_back(first);
+		m_batchIndices.push_back(static_cast<uint16>(first + 1));
+		m_batchIndices.push_back(static_cast<uint16>(first + 2));
+		m_stats.stripShared++;
+		g_stripShared++;
+		if(m_currentTarget)
+		{
+			int32 minX = std::min({vertices[0].x, vertices[1].x, vertices[2].x}), maxX = std::max({vertices[0].x, vertices[1].x, vertices[2].x});
+			int32 minY = std::min({vertices[0].y, vertices[1].y, vertices[2].y}), maxY = std::max({vertices[0].y, vertices[1].y, vertices[2].y});
+			MarkTargetDirty(*m_currentTarget, minX >> 4, minY >> 4, (maxX >> 4) + 2, (maxY >> 4) + 2);
+		}
+		if(m_batch.size() >= 3 * 4096) FlushBatch();
+		m_stripEnd = m_batch.size();
+		return;
+	}
+	OnDraw(CSoftwareRasterizer::PRIMITIVE_TRIANGLE, vertices);
+	m_stripEnd = m_batch.size();
 }
 
 void CGSH_Hardware::AddDirectPoint(const CSoftwareRasterizer::VERTEX& v)
@@ -3181,6 +3224,7 @@ void CGSH_Hardware::FlushBatch()
 	{
 		DrawBatchWithProgram();
 		m_batch.clear();
+		m_batchIndices.clear();
 		m_stats.drawCalls++;
 		if(m_currentTarget) m_currentTarget->drawBatches++;
 		if(m_diagFile && m_currentTarget) m_diagDraws[DiagKey(m_currentTarget->fbp, m_currentTarget->fbw, m_currentTarget->psm)]++;

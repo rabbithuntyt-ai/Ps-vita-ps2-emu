@@ -14,7 +14,12 @@ void CGSH_Primitives::WriteRegisterImpl(uint8 registerId, uint64 data)
 	case GS_REG_UV:
 	case GS_REG_FOG:
 	case GS_REG_HWREG:
-		//Per-vertex data: no effect on rasterizer state.
+	case GS_REG_XYZ2:
+	case GS_REG_XYZ3:
+	case GS_REG_XYZF2:
+	case GS_REG_XYZF3:
+		//Per-vertex data: no effect on rasterizer state. (The kicks were missing here: every
+		//vertex made the next primitive decode and compare the whole state again.)
 		break;
 	case GS_REG_TEX0_1:
 	case GS_REG_TEX0_2:
@@ -32,7 +37,11 @@ void CGSH_Primitives::WriteRegisterImpl(uint8 registerId, uint64 data)
 	default:
 		//Games rewrite registers with the value they already have (a whole register list per
 		//object): that changes nothing, so no new state (a DecodeState and a 52-field compare)
-		if(data != previous) m_stateDirty = true;
+		if(data != previous)
+		{
+			m_stateDirty = true;
+			g_dirtyBy[registerId]++;
+		}
 		break;
 	}
 
@@ -53,6 +62,8 @@ void CGSH_Primitives::WriteRegisterImpl(uint8 registerId, uint64 data)
 
 void CGSH_Primitives::BeginPrimitive(uint64 data)
 {
+	if(m_stripLive) g_stripBreaks[0]++;
+	InvalidateConverted();
 	m_primitiveType = static_cast<uint32>(data & 0x07);
 	switch(m_primitiveType)
 	{
@@ -88,6 +99,7 @@ void CGSH_Primitives::VertexKick(uint8 registerId, uint64 data)
 	bool drawingKick = ((registerId == GS_REG_XYZ2) || (registerId == GS_REG_XYZF2)) && m_drawEnabled && !m_skipDrawing;
 	bool fog = (registerId == GS_REG_XYZF2) || (registerId == GS_REG_XYZF3);
 
+	m_cvtValid[m_vtxCount - 1] = false;
 	auto& vertex = m_vtxBuffer[m_vtxCount - 1];
 	vertex.position = fog ? (data & 0x00FFFFFFFFFFFFFFULL) : data;
 	vertex.rgbaq = m_nReg[GS_REG_RGBAQ];
@@ -115,6 +127,8 @@ void CGSH_Primitives::VertexKick(uint8 registerId, uint64 data)
 			OnStateChanged();
 			m_stateDirty = false;
 			m_lastPrimitiveMode = primitiveMode;
+			if(m_stripLive) g_stripBreaks[1]++;
+			InvalidateConverted(); //XYOFFSET or the context may have changed
 		}
 		m_primitiveCount++;
 	}
@@ -140,9 +154,32 @@ void CGSH_Primitives::VertexKick(uint8 registerId, uint64 data)
 		m_vtxCount = 3;
 		break;
 	case PRIM_TRIANGLESTRIP:
-		if(drawingKick) { CSoftwareRasterizer::VERTEX v[3] = {ConvertVertex(m_vtxBuffer[2]), ConvertVertex(m_vtxBuffer[1]), ConvertVertex(m_vtxBuffer[0])}; OnDraw(CSoftwareRasterizer::PRIMITIVE_TRIANGLE, v); }
+		if(drawingKick)
+		{
+			for(int i = 0; i < 3; i++)
+			{
+				if(!m_cvtValid[i])
+				{
+					m_cvtBuffer[i] = ConvertVertex(m_vtxBuffer[i]);
+					m_cvtValid[i] = true;
+				}
+			}
+			CSoftwareRasterizer::VERTEX v[3] = {m_cvtBuffer[2], m_cvtBuffer[1], m_cvtBuffer[0]};
+			OnDrawStripTriangle(v, m_stripLive);
+			m_stripLive = true;
+		}
+		else
+		{
+			if(m_stripLive) g_stripBreaks[2]++;
+			m_stripLive = false;
+		}
 		m_vtxBuffer[2] = m_vtxBuffer[1];
 		m_vtxBuffer[1] = m_vtxBuffer[0];
+		m_cvtBuffer[2] = m_cvtBuffer[1];
+		m_cvtBuffer[1] = m_cvtBuffer[0];
+		m_cvtValid[2] = m_cvtValid[1];
+		m_cvtValid[1] = m_cvtValid[0];
+		m_cvtValid[0] = false;
 		m_vtxCount = 1;
 		break;
 	case PRIM_TRIANGLEFAN:

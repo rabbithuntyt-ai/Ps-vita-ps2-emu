@@ -35,6 +35,8 @@ public:
 	// triangles crossing the clip volume are clipped here (the program's clipping routine).
 	virtual void DrawWorldBatch(const Re4Vu1::WORLD_BATCH&);
 	static inline uint64 g_worldBatches = 0, g_worldVertices = 0, g_worldClipped = 0;
+	static inline uint64 g_stripBreaks[3] = {}; //diagnostics: new PRIM, state change, kick without drawing
+	static inline uint64 g_dirtyBy[256] = {};   //diagnostics: register writes that changed the state
 	static inline uint64 g_worldUs = 0;           //time in DrawWorldBatch (with g_clockUs)
 	static inline uint64 (*g_clockUs)() = nullptr; //a cheap clock, set by the renderer
 
@@ -45,6 +47,12 @@ protected:
 	virtual void OnStateChanged() = 0;
 	// Vertices are in drawing order (oldest first).
 	virtual void OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND, const CSoftwareRasterizer::VERTEX*) = 0;
+	// A triangle strip's triangle. 'continues': its first two vertices are the previous call's
+	// last two (same strip, no state change or kick without drawing in between).
+	virtual void OnDrawStripTriangle(const CSoftwareRasterizer::VERTEX* vertices, bool continues)
+	{
+		OnDraw(CSoftwareRasterizer::PRIMITIVE_TRIANGLE, vertices);
+	}
 
 	// Drawing state for the current primitive, decoded from GS registers.
 	CSoftwareRasterizer::STATE DecodeState() const;
@@ -89,6 +97,15 @@ private:
 	CSoftwareRasterizer::VERTEX ConvertVertex(const VERTEX&) const;
 
 	VERTEX m_vtxBuffer[3] = {};
+	// Strips: m_vtxBuffer's vertices converted once (each one is in three triangles)
+	CSoftwareRasterizer::VERTEX m_cvtBuffer[3] = {};
+	bool m_cvtValid[3] = {};
+	bool m_stripLive = false;
+	void InvalidateConverted()
+	{
+		m_cvtValid[0] = m_cvtValid[1] = m_cvtValid[2] = false;
+		m_stripLive = false;
+	}
 	uint32 m_vtxCount = 0;
 	uint32 m_primitiveType = PRIM_INVALID;
 	bool m_pendingPrim = false;

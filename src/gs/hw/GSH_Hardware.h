@@ -85,6 +85,7 @@ public:
 	struct STATS
 	{
 		uint32 drawCalls = 0;
+		uint32 stripShared = 0; //strip triangles that added one vertex (batch program)
 		uint32 ringOverflows = 0; //batches drawn from client memory: the vertex ring was full
 		uint32 targetDownloads = 0;
 		uint32 depthRestores = 0; //depth set again after a new GPU scene (Vita)
@@ -195,6 +196,7 @@ protected:
 
 	void OnStateChanged() override;
 	void OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND, const CSoftwareRasterizer::VERTEX*) override;
+	void OnDrawStripTriangle(const CSoftwareRasterizer::VERTEX*, bool continues) override;
 	// Movie pictures' texels come from the decoder's buffer, not from GS memory (TextureCache)
 	void OnImageDataSource(uint32 dbp, uint32 dbw, uint32 x, uint32 y, uint32 w, uint32 h, const std::shared_ptr<const uint8>& data) override
 	{
@@ -226,7 +228,7 @@ public:
 	// With gs_shaders: batch vertices in a ring of GPU buffers, one copy instead of vitaGL's
 	// copy per attribute (gs_vertex_ring, on)
 	static inline bool g_vertexRing = true;
-	static inline uint64 g_ringDraws = 0, g_ringOverflows = 0, g_ringBytes = 0;
+	static inline uint64 g_ringDraws = 0, g_ringOverflows = 0, g_ringBytes = 0, g_stripShared = 0, g_stripCalls = 0, g_stripContinues = 0, g_triangles = 0;
 	static inline uint64 g_skippedDraws = 0;
 	static inline bool g_gpuWorld = false; //right on the PC, not yet run on the Vita (docs/RE4_GAMEPLAY.md)
 	static inline uint64 g_gpuWorldBatches = 0, g_gpuWorldDraws = 0, g_gpuWorldFallbacks = 0;
@@ -426,7 +428,7 @@ private:
 	enum
 	{
 		VERTEX_RING_COUNT = 4,
-		VERTEX_RING_SIZE = 2 * 1024 * 1024,
+		VERTEX_RING_SIZE = 4 * 1024 * 1024, //RE4 gameplay: about 2.2 MB per game frame
 	};
 	bool UploadToRing(const void* data, uint32 size, uint32& offset);
 	GLuint m_vertexRing[VERTEX_RING_COUNT] = {};
@@ -469,6 +471,9 @@ private:
 	uint32 m_lastDisplayedBatches = 0;
 	GLenum m_batchMode = GL_TRIANGLES;
 	std::vector<BATCH_VERTEX> m_batch;
+	// Batch program, triangle batches: indices into m_batch (strip triangles share vertices)
+	std::vector<uint16> m_batchIndices;
+	size_t m_stripEnd = ~size_t(0); //m_batch's size after the last strip triangle
 
 	// Points that only write their color (no texture, blending, tests, mask or
 	// fog) collect in a pixel buffer; when they fill their bounding rectangle

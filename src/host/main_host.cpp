@@ -585,6 +585,19 @@ int main(int argc, char** argv)
 		if(CGSH_Hardware::g_shaderBatches)
 			std::printf("batch program: %llu draws from the vertex ring (%.1f MB), %llu from client memory (ring full)\n", (unsigned long long)CGSH_Hardware::g_ringDraws,
 			            CGSH_Hardware::g_ringBytes / 1048576.0, (unsigned long long)CGSH_Hardware::g_ringOverflows);
+		if(CGSH_Hardware::g_shaderBatches)
+			std::printf("strip triangles sharing vertices: %llu of %llu (%llu continuing)\n", (unsigned long long)CGSH_Hardware::g_stripShared,
+			            (unsigned long long)CGSH_Hardware::g_stripCalls, (unsigned long long)CGSH_Hardware::g_stripContinues);
+		if(CGSH_Hardware::g_shaderBatches)
+			std::printf("strips broken by: new PRIM %llu, state change %llu, kick without drawing %llu\n", (unsigned long long)CGSH_Primitives::g_stripBreaks[0],
+			            (unsigned long long)CGSH_Primitives::g_stripBreaks[1], (unsigned long long)CGSH_Primitives::g_stripBreaks[2]);
+		if(CGSH_Hardware::g_shaderBatches)
+		{
+			std::printf("state changed by register:");
+			for(unsigned int r = 0; r < 256; r++)
+				if(CGSH_Primitives::g_dirtyBy[r] > 1000) std::printf(" %02X:%llu", r, (unsigned long long)CGSH_Primitives::g_dirtyBy[r]);
+			std::printf("\n");
+		}
 		if(CGSH_Hardware::g_re4SkipDof) std::printf("draws skipped (re4_skip_dof): %llu\n", (unsigned long long)CGSH_Hardware::g_skippedDraws);
 		if(CVpu::g_asyncVif1)
 		{
