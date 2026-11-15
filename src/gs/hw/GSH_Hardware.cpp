@@ -2224,12 +2224,39 @@ CGSH_Hardware::AXIS_REGION CGSH_Hardware::ResolveWrap(uint32 mode, uint32 minVal
 	return region;
 }
 
+bool CGSH_Hardware::SkipDrawRule()
+{
+	//PCSX2 1.2-1.4, GSdx GSC_ResidentEvil4 (GSdx counts in 256-byte blocks: 0x3100 is 0x310000)
+	const auto& s = m_state;
+	if((m_skipDraws == 0) && s.textured && (s.fbp == 0x310000))
+	{
+		if((s.fpsm == CGSHandler::PSMCT32) && (s.tbp == 0x1C0000) && (s.tpsm == CGSHandler::PSMZ24))
+		{
+			//The depth buffer read as a texture into the blur buffer: the depth-of-field passes
+			m_skipDraws = g_re4SkipDof;
+		}
+		else if(((s.tbp == 0x2A0000) || (s.tbp == 0x348000)) && (s.fpsm == s.tpsm) && (s.fbmsk == 0))
+		{
+			m_skipDraws = 1;
+		}
+	}
+	if(m_skipDraws == 0) return false;
+	m_skipDraws--;
+	g_skippedDraws++;
+	return true;
+}
+
 void CGSH_Hardware::ApplyState()
 {
 	const auto& s = m_state;
 	m_stateApplied = true;
 	m_drawNothing = s.zte && (s.ztst == DEPTH_TEST_NEVER);
 	if(m_drawNothing) return;
+	if(g_re4SkipDof && SkipDrawRule())
+	{
+		m_drawNothing = true;
+		return;
+	}
 
 	m_currentTarget = nullptr;
 	TARGET* target = FindTarget(s.fbp, s.fbw, s.fpsm, true, static_cast<uint32>(std::max(s.scay1, 0)) + 1);

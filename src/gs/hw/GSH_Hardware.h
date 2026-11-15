@@ -215,6 +215,11 @@ public:
 	// Vita: depth buffers loaded at each new GPU scene (depth_force_load, on)
 	static inline bool g_depthForceLoad = true;
 	// Resident Evil 4's world batches (Re4Vu1Hle) transformed by a vertex shader (gpu_world, on)
+	// Resident Evil 4: draws left out after the depth-of-field pass starts, as PCSX2's
+	// GSC_ResidentEvil4 rule did (re4_skip_dof, 0 = off, PCSX2 used 176). The game loses
+	// its depth blur; the Z read-back and the blur round trips go away.
+	static inline uint32 g_re4SkipDof = 0;
+	static inline uint64 g_skippedDraws = 0;
 	static inline bool g_gpuWorld = false; //unfinished: draws nothing yet (see docs/RE4_GAMEPLAY.md)
 	static inline uint64 g_gpuWorldBatches = 0, g_gpuWorldDraws = 0, g_gpuWorldFallbacks = 0;
 	static inline uint32 g_gpuWorldDebug = 0; //1: triangles near the clip volume left out
@@ -399,6 +404,8 @@ private:
 
 	void WriteFlipDiagnostics(const DISPLAY_INFO&);
 	void ApplyState();
+	bool SkipDrawRule();
+	uint32 m_skipDraws = 0;
 	void SetupAlphaCombiner(bool fix);
 	void SetupFog();
 	void BindTexture();

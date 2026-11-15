@@ -353,6 +353,7 @@ namespace
 		else if(key == "vu_stall_check") CVuBasicBlock::g_combinedStallCheck = (value != 0); //one test of pending FMAC writes per block
 		else if(key == "vu_flag_tracking") VUShared::g_flagTracking = (value != 0); //flag reads after flags of the same block: one load
 		else if(key == "gpu_world") CGSH_Hardware::g_gpuWorld = value != 0;
+		else if(key == "re4_skip_dof") CGSH_Hardware::g_re4SkipDof = value; //RE4: draws left out after the depth blur starts (176)
 		else if(key == "vu_no_clamp") { if(value) CVuBasicBlock::g_extraCompileHints |= VUShared::COMPILEHINT_NO_CLAMPING; else CVuBasicBlock::g_extraCompileHints &= ~VUShared::COMPILEHINT_NO_CLAMPING; }
 		else if(key == "vu1_wait_on_stall") CVpu::g_waitOnVifStall = value != 0;
 		else if(key == "vu1_async") CVpu::g_asyncVif1 = value != 0;                //VIF1 work on the VU1 thread (needs threaded_vu1)

@@ -11,6 +11,7 @@ real-time speed, so the per-thread CPU time per game frame is the useful figure.
 | Item | State | Setting | PC result |
 |---|---|---|---|
 | P1 asynchronous VU1 | Done (patch 0097), off by default, untested on the Vita | `vu1_async=1` with `threaded_vu1=1` (PC: `--mtvu --vu1-async`) | 393 game frames in 900 vblanks (threaded VU1: 349, no thread: 393). EE thread 65 → 46 ms per game frame, VU1 thread 26 → 19 ms. Pictures correct. 0 VIF1 stalls, 0 PATH3 syncs in gameplay |
+| R1 RE4 depth-blur skip | Done, off by default | `re4_skip_dof=176` (PC: `--re4-skip-dof 176`) | Real time for the 900 vblanks 41.6 s -> 24.7 s with `vu1_async` (same 393 game frames); 202 draws skipped per game frame. The background loses its blur; the green line along the top edge goes too |
 | T1 CI patches | Done: 0093 cut to the hunks no earlier patch has; `--ignore-whitespace` in `cmake/ApplyPatches.cmake` | — | All 97 patches apply to clean submodule copies (`runs/re4/cichk.sh`); CI logs not checked |
 
 P1 as built: `CVif1::ReceiveDMA` copies the DMA data into a queue and returns at once (small
