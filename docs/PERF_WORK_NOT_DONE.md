@@ -4,16 +4,20 @@ _Written by Fable 5.2 on 2026-11-15 from the repository at f7ed38d. The original
 
 ## Progress (updated as items land)
 
-No Vita was connected for this work: every result below is from the PC runner (RE4 gameplay
-state `state_b2`, 900 vblanks, `runs/re4/hostab.sh`). On the PC the GS thread (OSMesa) sets the
-real-time speed, so the per-thread CPU time per game frame is the useful figure.
+The "PC result" column is from the PC runner (RE4 gameplay state `state_b2`, 900 vblanks,
+`runs/re4/hostab.sh`); on the PC the GS thread (OSMesa) sets the real-time speed, so the
+per-thread CPU time per game frame is the useful figure there. Vita results are in the sections
+after the table: "First Vita results" (15-16 Nov) and "Second Vita day" (16 Nov). Current
+state on the Vita: RE4 gameplay 1.5-2.1 game fps with RE4's profile alone (was 0.6-0.8 on
+15 Nov); the goal is a locked 30.
 
 | Item | State | Setting | PC result |
 |---|---|---|---|
-| P1 asynchronous VU1 | Done (patch 0097), off by default, untested on the Vita | `vu1_async=1` with `threaded_vu1=1` (PC: `--mtvu --vu1-async`) | 393 game frames in 900 vblanks (threaded VU1: 349, no thread: 393). EE thread 65 → 46 ms per game frame, VU1 thread 26 → 19 ms. Pictures correct. 0 VIF1 stalls, 0 PATH3 syncs in gameplay |
-| R1 RE4 depth-blur skip | Done, off by default | `re4_skip_dof=176` (PC: `--re4-skip-dof 176`) | Real time for the 900 vblanks 41.6 s -> 24.7 s with `vu1_async` (same 393 game frames); 202 draws skipped per game frame. The background loses its blur; the green line along the top edge goes too |
-| V1 RE4 world on the GPU | First half done: `gpu_world` draws right (retained geometry still to do) | `re4_vu1_hle=1 gpu_world=1` | 0.10-0.15% of pixels differ from the CPU path. All of P1 + R1 + V1 together: 393 game frames in 23.6 s (threaded VU1 alone: 349 in 38.5 s) |
+| P1 asynchronous VU1 | Done (patch 0097); on in RE4's profile since 16 Nov (Vita-tested), off for other games | `vu1_async=1` with `threaded_vu1=1` (PC: `--mtvu --vu1-async`) | 393 game frames in 900 vblanks (threaded VU1: 349, no thread: 393). EE thread 65 → 46 ms per game frame, VU1 thread 26 → 19 ms. Pictures correct. 0 VIF1 stalls, 0 PATH3 syncs in gameplay |
+| R1 RE4 depth-blur skip | Done; on in RE4's profile since 16 Nov | `re4_skip_dof=176` (PC: `--re4-skip-dof 176`) | Real time for the 900 vblanks 41.6 s -> 24.7 s with `vu1_async` (same 393 game frames); 202 draws skipped per game frame. The background loses its blur; the green line along the top edge goes too |
+| V1 RE4 world on the GPU | First half done: `gpu_world` draws right, also on the Vita since the one-batch-per-draw fix (16 Nov); on in RE4's profile (retained geometry still to do) | `re4_vu1_hle=1 gpu_world=1` | 0.10-0.15% of pixels differ from the CPU path. All of P1 + R1 + V1 together: 393 game frames in 23.6 s (threaded VU1 alone: 349 in 38.5 s) |
 | P3 fourth core | Done (16 Nov): the app loads its own kernel module, `src/vita/core3/core3.c` (the fourth-core hook of CapUnlocker only: SceKernelThreadMgr offset 0x114C, patched only after checking for a function prologue), from `ux0:app/<title>/vitaps2_core3.skprx`; it lasts until reboot and is never in the boot config. `ux0:data/VitaPS2/no_core3.txt` turns it off. Audio output and the profiler run on core 3 | perf.csv `core3` column; status in `ux0:data/VitaPS2/core3.txt` and `core3_app.txt` | RE4 gameplay, 120 s: no core 3 150 game frames; mixer and movie copy on core 3 143/143 (slower: core 3 is shared with the system); mixer on core 2, output and profiler on core 3 153/152/153 (the default). A small gain, near noise. Still to try: `iop_thread=1 iop_core=3` in movies |
+| G4 palette textures | Not built: measured first (16 Nov) and not worth it for RE4 | — | In warm RE4 gameplay on the Vita, texture decoding is 2 ms per second of the GPU thread and about 1 texture upload per second: the texture and content caches already hit. G4 would save about 0.2% of the bottleneck thread. It may still matter for games whose CLUTs change often (not measured) |
 | Small items 1 and 2 (GS thread) | Done, always on | — | `AddVertex`: reciprocals cached per target size, Z format and texture size (multiplies only where they give the divide's exact result: power of two sizes; the `textured clut` test catches the last-bit difference otherwise). A register write with the value the register already has no longer forces a new state (TEX0/TEX2/TEXCLUT/TEXFLUSH and the transfer registers always do). Gameplay pictures identical |
 | G1 own shaders (phases 1-3 of 3 started) | Phase 1 and 2 done, phase 3 partly: off by default, untested on the Vita | `gs_shaders=1` (PC: `--gs-shaders`), `gs_vertex_ring` (on) | 1: one GLSL program does the texture combiner, fog and alpha test (no glTexEnv, no fixed-function shader rebuild per draw); GS tests pass both ways. 2: batch vertices in four 4 MB GPU buffers, one copy (vitaGL copied the interleaved array once per attribute per draw); 0 fallbacks in RE4. 3: strip triangles that continue a strip add one vertex and three indices (3.45 of 10.8 million in RE4) and strip vertices are converted once. Found on the way: XYZ2/XYZ3/XYZF2/XYZF3 marked the GS state dirty, so every triangle decoded and compared the whole state (all renderers, all games); fixed. RE4 pictures identical. Not done: raw GS vertex values with the arithmetic in the vertex shader |
 | V2 VU recompiler | Investigated; first step done (patch 0099), the rest needs the new recompiler | `vu_vector_opmul` (on) | RE4's vertex loop (0x12B8-0x13E8): 1,427 ARM instructions for 39 pairs, ~42 of them vector arithmetic; ~330 are context loads/stores and their address adds. Two causes found with a new allocation dump (patch 0098, `JITTER_REGALLOC_DUMP=1`): OPMULA/OPMSUB read VF lanes as scalars, which marks those VF registers aliased (memory only) for the whole block; now done with lane broadcasts and masked writes (bit-identical pictures). Then the real wall: the allocator gives a symbol one register for its whole first-to-last-use interval and has 8 NEON registers (q8-q15; q4/q5 hold scalar floats, q6/q7 the clamp masks). With the VF registers allocatable they take all 8 and temporaries go through the stack: the loop stays at 1,427-1,436 instructions with any ordering (`JITTER_MD_KEEP_FREE=N` keeps N for temporaries). Fixing this needs the new recompiler of V2, not a change to this allocator. Tried next (2026-11-16): live range splitting in the allocator (`JITTER_SPLIT=gap`: a temporary per cluster of accesses, loaded and stored around it) makes the loop longer at every gap (1,455-1,552), because with 8 registers the cluster temporaries go to the stack too. The new recompiler needs its own register assignment and more NEON registers (q4/q5 and q6/q7 are taken by scalar floats and clamp masks), and its ARM code can only run on the Vita or in CI: qemu-user does not run under WSL1 |
@@ -28,8 +32,9 @@ Not done yet, and why: C2 (COP2 flags) needs the EE profile in gameplay first, w
 runner cannot give (its EE samples land on the idle loops); small item 4 (texture storage
 reuse) needs the Vita GPU's frame timing to know when a texture is free; P2 (GIF parsing on
 the GS thread) moves work onto the GS thread, which is the Vita's wall in gameplay; G1/G3/G4,
-P3, C1, T2/T3 and B6 are Vita-only. Each of P1, R1 and V1 is off by default until it has run
-on the Vita: `vu1_async=1 re4_skip_dof=176 re4_vu1_hle=1 gpu_world=1` (with `threaded_vu1=1`).
+P3, C1, T2/T3 and B6 are Vita-only. P1, R1 and V1 have now run on the Vita and are RE4's
+profile defaults (`threaded_vu1=1 vu1_async=1 re4_skip_dof=176 re4_vu1_hle=1 gpu_world=1`);
+other games keep them off until tested.
 
 ### First Vita results (2026-11-16)
 
@@ -71,6 +76,51 @@ cache: the first run after a new build is cold), `threaded_vu1=1` and RE4's prof
   (`gpu_world_soa=1`: same), vertices clamped inside the far plane (same, plus new
   artifacts), more than 64k vertices per draw (704 at most). The PC (Mesa) draws the same
   batches right.
+
+### Second Vita day (2026-11-16)
+
+Same method (`runs/re4/gp.sh`, 120 s from `state_b2`, warm JIT cache). Each perf.csv row now
+ends with `battery_pct,charging,battery_temp_c,arm_mhz,core3`.
+
+| Change | Result on the Vita |
+|---|---|
+| GPU world, one batch per draw (Vita default) | Artifacts gone: 17 of 17 frames clean, 1.6-2.0 game fps |
+| RE4 profile: `threaded_vu1=1 vu1_async=1 re4_skip_dof=176 re4_vu1_hle=1 gpu_world=1` | With no settings passed: 1.5-2.1 game fps, frames clean. A New Game with these settings plays the intro movies and reaches the first real-time scene, where threaded VU1 used to hang on DMA channel 1 (3-4 game fps in that cutscene; checked for its first 30 s) |
+| P3 fourth core, own kernel module | 153 game frames per 120 s against 150 without core 3: small, near noise. The SPU2 mixer is slower on core 3 (143), so it stays on core 2 |
+| IOP thread on core 3 in movies (`iop_thread=1 iop_core=3`) | Running; see below when done |
+| G4 palette textures | Not built: texture decoding is 2 ms/s of the GPU thread (see the G4 row) |
+
+Where the GPU thread's time goes in RE4 gameplay (it is the bottleneck: busy about 95% of the
+time, 948 ms per second in `gpu_pump_ms`; `gpu_parts`, warm run K8, ms per second):
+
+| Part | ms/s | What it is |
+|---|---|---|
+| Target uploads, reading GS memory (`UPLOAD_SWIZZLE`) | 101 | render targets rebuilt from emulated GS memory |
+| Draws (`DRAW`) | 97 | glDrawArrays/Elements |
+| Read-backs (`DOWNLOAD_PIXELS` + `DOWNLOAD_SWIZZLE`) | 85 | glReadPixels and writing the pixels into GS memory |
+| New render targets (`TARGET_CREATE`) | 68 | GL objects created for new targets |
+| Target re-layouts on the GPU (`RELAYOUT`) | 33 | |
+| Texture cache lookups (`TEX_LOOKUP`) | 18 | |
+| Target uploads, GL side (`UPLOAD_GL`) | 10 | |
+| Texture decoding (`TEX_DECODE`) | 2 | what G4 would remove |
+
+Per game frame that is about 2 new render targets, 2 target uploads of about 600k pixels
+from GS memory and 2 read-backs of about 540k pixels: RE4's post-processing round trips
+between the GPU and emulated GS memory. Together about 250-300 ms of every second on the
+bottleneck thread, about 4x the rest of the measured parts after drawing. That makes G5
+(lazy image transfers), G6 (remaining read-backs) and G7 (skip or halve post-processing)
+the next places for gameplay speed, ahead of G4. About 530 ms/s of `gpu_pump_ms` is not in
+any part yet (GS register processing, vertex conversion and so on): a finer split there is
+the other open question.
+
+Testing safety, learned the hard way (details in RE4.md, "Traps when testing"):
+- `vitalab clock` must not be used: `vitalab clock default` (333/111/111/111 MHz from the
+  kernel, with the emulator open) took the Vita fully offline on 15 Nov. Vita Lab also
+  ignores CPU values above 444, so B6's 500 MHz test was never possible through it; it needs
+  PSVshell or LOLIcon by hand. B6 is on hold.
+- Vita Lab's kernel plugin has a rescue listener: 3 UDP datagrams within 3 s on port 1342
+  reboot the Vita (`tools/vita_rescue.py reboot`), for when the command server is stuck but
+  Wi-Fi is up. Tested: back in about 18 s.
 
 P1 as built: `CVif1::ReceiveDMA` copies the DMA data into a queue and returns at once (small
 chunks without a tag are merged, buffers are reused). The VU1 worker runs `ProcessPacket` on it
