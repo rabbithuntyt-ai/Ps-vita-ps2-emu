@@ -22,3 +22,6 @@ for i in $(seq 1 18); do
 done
 vitalab cmd "nosleep on" >/dev/null 2>&1
 MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu-24.04 -u root -- python3 /mnt/c/Users/troy2/Ps-vita-ps2-emu/tools/vita_rescue.py ping
+sleep 2
+vitalab get ux0:data/vitalab_rescue.txt "$ROOT/runs/build/rescue_status.txt" >/dev/null 2>&1
+echo "rescue listener status:"; cat "$ROOT/runs/build/rescue_status.txt"
