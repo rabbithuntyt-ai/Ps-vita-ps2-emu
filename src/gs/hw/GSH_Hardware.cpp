@@ -1872,7 +1872,6 @@ namespace
 	    "varying float vFog;\n"
 	    "void main()\n"
 	    "{\n"
-	    "	if(uMode.x > 2.5) { gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0); return; }\n"
 	    "	vec4 t = texture2D(uTex, vTex.xy / vTex.z * uTexXf.xy + uTexXf.zw);\n"
 	    "	vec3 rgb = vColor.rgb;\n"
 	    "	if(uMode.x > 1.5) rgb = t.rgb;\n"
@@ -1884,16 +1883,18 @@ namespace
 	    "	rgb = min(rgb, vec3(1.0));\n"
 	    "	a = min(a, 1.0);\n"
 	    "	rgb = mix(uFog.rgb, rgb, vFog);\n"
+	    // A float, not a bool: vitaGL's GLSL translation crashed the link on the bool form (Vita)
+	    "	float fail = 0.0;\n"
 	    "	if(uAlpha.x > 0.5)\n"
 	    "	{\n"
-	    "		bool pass = false;\n"
-	    "		if(uAlpha.x < 1.5) pass = false;\n"
-	    "		else if(uAlpha.x < 2.5) pass = a < uAlpha.y;\n"
-	    "		else if(uAlpha.x < 3.5) pass = abs(a - uAlpha.y) < (0.5 / 255.0);\n"
-	    "		else if(uAlpha.x < 4.5) pass = a > uAlpha.y;\n"
-	    "		else pass = abs(a - uAlpha.y) >= (0.5 / 255.0);\n"
-	    "		if(!pass) discard;\n"
+	    "		if(uAlpha.x < 1.5) fail = 1.0;\n"
+	    "		else if(uAlpha.x < 2.5) fail = (a < uAlpha.y) ? 0.0 : 1.0;\n"
+	    "		else if(uAlpha.x < 3.5) fail = (abs(a - uAlpha.y) < (0.5 / 255.0)) ? 0.0 : 1.0;\n"
+	    "		else if(uAlpha.x < 4.5) fail = (a > uAlpha.y) ? 0.0 : 1.0;\n"
+	    "		else fail = (abs(a - uAlpha.y) >= (0.5 / 255.0)) ? 0.0 : 1.0;\n"
 	    "	}\n"
+	    "	if(fail > 0.5) discard;\n"
+	    "	if(uMode.x > 2.5) rgb = vec3(1.0, 0.0, 0.0);\n"
 	    "	gl_FragColor = vec4(rgb, a);\n"
 	    "}\n";
 	const char* g_worldUniforms[] = {"uM", "uCO", "uCS", "uTO", "uScreen", "uZ", "uTex", "uTexXf", "uMode", "uFog", "uAlpha"};
@@ -1941,19 +1942,75 @@ namespace
 	    "	rgb = min(rgb, vec3(1.0));\n"
 	    "	a = min(a, 1.0);\n"
 	    "	rgb = mix(uFog.rgb, rgb, vFog);\n"
+	    // A float, not a bool: vitaGL's GLSL translation crashed the link on the bool form (Vita)
+	    "	float fail = 0.0;\n"
 	    "	if(uAlpha.x > 0.5)\n"
 	    "	{\n"
-	    "		bool pass = false;\n"
-	    "		if(uAlpha.x < 1.5) pass = false;\n"
-	    "		else if(uAlpha.x < 2.5) pass = a < uAlpha.y;\n"
-	    "		else if(uAlpha.x < 3.5) pass = abs(a - uAlpha.y) < (0.5 / 255.0);\n"
-	    "		else if(uAlpha.x < 4.5) pass = a > uAlpha.y;\n"
-	    "		else pass = abs(a - uAlpha.y) >= (0.5 / 255.0);\n"
-	    "		if(!pass) discard;\n"
+	    "		if(uAlpha.x < 1.5) fail = 1.0;\n"
+	    "		else if(uAlpha.x < 2.5) fail = (a < uAlpha.y) ? 0.0 : 1.0;\n"
+	    "		else if(uAlpha.x < 3.5) fail = (abs(a - uAlpha.y) < (0.5 / 255.0)) ? 0.0 : 1.0;\n"
+	    "		else if(uAlpha.x < 4.5) fail = (a > uAlpha.y) ? 0.0 : 1.0;\n"
+	    "		else fail = (abs(a - uAlpha.y) >= (0.5 / 255.0)) ? 0.0 : 1.0;\n"
 	    "	}\n"
+	    "	if(fail > 0.5) discard;\n"
 	    "	gl_FragColor = vec4(rgb, a);\n"
 	    "}\n";
 	const char* g_batchUniforms[] = {"uTex", "uMode", "uFog", "uAlpha", "uFogOn"};
+}
+
+void CGSH_Hardware::RunShaderSelfTest(const char* path)
+{
+	auto note = [path](const char* format, auto... args) {
+		if(FILE* file = std::fopen(path, "a"))
+		{
+			std::fprintf(file, format, args...);
+			std::fclose(file);
+		}
+	};
+	struct VARIANT
+	{
+		const char* name;
+		const char* vs;
+		const char* fs;
+		const char* attributes[4];
+	};
+	static const char* fsColor = "varying vec4 vColor;\nvoid main()\n{\n	gl_FragColor = vColor;\n}\n";
+	static const VARIANT variants[] = {
+	    {"5 batch vertex shader, color fragment", g_batchVertexShader, fsColor, {"aPosition", "aColor", "aTex", "aFog"}},
+	    {"6a texture, rgb mode", g_batchVertexShader, "uniform sampler2D uTex;\nuniform vec4 uMode;\nuniform vec4 uFog;\nuniform vec4 uAlpha;\nvarying vec4 vColor;\nvarying vec2 vTex;\nvarying float vFog;\nvoid main()\n{\n	vec4 t = texture2D(uTex, vTex);\n	vec3 rgb = vColor.rgb;\n	if(uMode.x > 1.5) rgb = t.rgb;\n	else if(uMode.x > 0.5) rgb = t.rgb * vColor.rgb * 2.0;\n	float a = vColor.a;\n	gl_FragColor = vec4(rgb, a);\n}\n", {"aPosition", "aColor", "aTex", "aFog"}},
+	    {"6b + alpha modes, min", g_batchVertexShader, "uniform sampler2D uTex;\nuniform vec4 uMode;\nuniform vec4 uFog;\nuniform vec4 uAlpha;\nvarying vec4 vColor;\nvarying vec2 vTex;\nvarying float vFog;\nvoid main()\n{\n	vec4 t = texture2D(uTex, vTex);\n	vec3 rgb = vColor.rgb;\n	if(uMode.x > 1.5) rgb = t.rgb;\n	else if(uMode.x > 0.5) rgb = t.rgb * vColor.rgb * 2.0;\n	float a = vColor.a * 2.0;\n	if(uMode.y > 2.5) a = uMode.w;\n	else if(uMode.y > 1.5) a = t.a * vColor.a * uMode.z;\n	else if(uMode.y > 0.5) a = t.a * uMode.z;\n	rgb = min(rgb, vec3(1.0));\n	a = min(a, 1.0);\n	gl_FragColor = vec4(rgb, a);\n}\n", {"aPosition", "aColor", "aTex", "aFog"}},
+	    {"6c + fog mix", g_batchVertexShader, "uniform sampler2D uTex;\nuniform vec4 uMode;\nuniform vec4 uFog;\nuniform vec4 uAlpha;\nvarying vec4 vColor;\nvarying vec2 vTex;\nvarying float vFog;\nvoid main()\n{\n	vec4 t = texture2D(uTex, vTex);\n	vec3 rgb = vColor.rgb;\n	if(uMode.x > 1.5) rgb = t.rgb;\n	else if(uMode.x > 0.5) rgb = t.rgb * vColor.rgb * 2.0;\n	float a = vColor.a * 2.0;\n	if(uMode.y > 2.5) a = uMode.w;\n	else if(uMode.y > 1.5) a = t.a * vColor.a * uMode.z;\n	else if(uMode.y > 0.5) a = t.a * uMode.z;\n	rgb = min(rgb, vec3(1.0));\n	a = min(a, 1.0);\n	rgb = mix(uFog.rgb, rgb, vFog);\n	gl_FragColor = vec4(rgb, a);\n}\n", {"aPosition", "aColor", "aTex", "aFog"}},
+	    {"6e + alpha test (float, discard)", g_batchVertexShader, "uniform sampler2D uTex;\nuniform vec4 uMode;\nuniform vec4 uFog;\nuniform vec4 uAlpha;\nvarying vec4 vColor;\nvarying vec2 vTex;\nvarying float vFog;\nvoid main()\n{\n	vec4 t = texture2D(uTex, vTex);\n	vec3 rgb = vColor.rgb;\n	if(uMode.x > 1.5) rgb = t.rgb;\n	else if(uMode.x > 0.5) rgb = t.rgb * vColor.rgb * 2.0;\n	float a = vColor.a * 2.0;\n	if(uMode.y > 2.5) a = uMode.w;\n	else if(uMode.y > 1.5) a = t.a * vColor.a * uMode.z;\n	else if(uMode.y > 0.5) a = t.a * uMode.z;\n	rgb = min(rgb, vec3(1.0));\n	a = min(a, 1.0);\n	rgb = mix(uFog.rgb, rgb, vFog);\n	float fail = 0.0;\n	if(uAlpha.x > 0.5)\n	{\n		if(uAlpha.x < 1.5) fail = 1.0;\n		else if(uAlpha.x < 2.5) fail = (a < uAlpha.y) ? 0.0 : 1.0;\n		else if(uAlpha.x < 3.5) fail = (abs(a - uAlpha.y) < (0.5 / 255.0)) ? 0.0 : 1.0;\n		else if(uAlpha.x < 4.5) fail = (a > uAlpha.y) ? 0.0 : 1.0;\n		else fail = (abs(a - uAlpha.y) >= (0.5 / 255.0)) ? 0.0 : 1.0;\n	}\n	if(fail > 0.5) discard;\n	gl_FragColor = vec4(rgb, a);\n}\n", {"aPosition", "aColor", "aTex", "aFog"}},
+	    {"6f discard only", g_batchVertexShader, "uniform sampler2D uTex;\nuniform vec4 uMode;\nuniform vec4 uFog;\nuniform vec4 uAlpha;\nvarying vec4 vColor;\nvarying vec2 vTex;\nvarying float vFog;\nvoid main()\n{\n	vec4 t = texture2D(uTex, vTex);\n	vec3 rgb = vColor.rgb;\n	if(uMode.x > 1.5) rgb = t.rgb;\n	else if(uMode.x > 0.5) rgb = t.rgb * vColor.rgb * 2.0;\n	float a = vColor.a * 2.0;\n	if(uMode.y > 2.5) a = uMode.w;\n	else if(uMode.y > 1.5) a = t.a * vColor.a * uMode.z;\n	else if(uMode.y > 0.5) a = t.a * uMode.z;\n	rgb = min(rgb, vec3(1.0));\n	a = min(a, 1.0);\n	if(a < uAlpha.y) discard;\n	gl_FragColor = vec4(rgb, a);\n}\n", {"aPosition", "aColor", "aTex", "aFog"}},
+	    {"6 batch program", g_batchVertexShader, g_batchFragmentShader, {"aPosition", "aColor", "aTex", "aFog"}},
+	    {"7 world vertex shader, color fragment", g_worldVertexShader, fsColor, {"aP", "aT", "aC", "aSlot"}},
+	    {"8 world program", g_worldVertexShader, g_worldFragmentShader, {"aP", "aT", "aC", "aSlot"}},
+	};
+	note("shader self test\n");
+	for(const auto& variant : variants)
+	{
+		note("%s: compile\n", variant.name);
+		GLuint vs = CompileShader(GL_VERTEX_SHADER, variant.vs);
+		GLuint fs = CompileShader(GL_FRAGMENT_SHADER, variant.fs);
+		if(!vs || !fs)
+		{
+			note("%s: compile failed (vs %u fs %u)\n", variant.name, vs, fs);
+			continue;
+		}
+		GLuint program = glCreateProgram();
+		glAttachShader(program, vs);
+		glAttachShader(program, fs);
+		for(GLuint i = 0; i < 4; i++)
+		{
+			if(variant.attributes[i]) glBindAttribLocation(program, i, variant.attributes[i]);
+		}
+		note("%s: link\n", variant.name);
+		glLinkProgram(program);
+		GLint ok = 0;
+		glGetProgramiv(program, GL_LINK_STATUS, &ok);
+		note("%s: linked, status %d\n", variant.name, ok);
+	}
+	note("done\n");
 }
 
 bool CGSH_Hardware::BuildBatchProgram()

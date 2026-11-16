@@ -1869,6 +1869,15 @@ int main()
 		return 0;
 	}
 	Theme::Init();
+	//Shader self test (vitaGL's GLSL translation): ux0:data/VitaPS2/shader_test.txt present
+	{
+		SceIoStat stat;
+		if(sceIoGetstat(VITAPS2_DATA_DIR "/shader_test.txt", &stat) >= 0)
+		{
+			sceIoRemove(VITAPS2_DATA_DIR "/shader_test_result.txt");
+			CGSH_Hardware::RunShaderSelfTest(VITAPS2_DATA_DIR "/shader_test_result.txt");
+		}
+	}
 
 	try
 	{

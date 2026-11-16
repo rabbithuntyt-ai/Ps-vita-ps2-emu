@@ -225,6 +225,10 @@ public:
 	// Ordinary batches drawn with one GLSL program instead of the fixed-function texture
 	// combiner, fog unit and alpha test (gs_shaders, off until measured on the Vita)
 	static inline bool g_shaderBatches = false;
+	// Compiles and links a series of shader pairs (simplest first, then the batch and world
+	// programs), writing a line before and after each link to 'path' (closed each time, so a
+	// crash leaves the step it died in). For vitaGL's GLSL translation on the Vita.
+	static void RunShaderSelfTest(const char* path);
 	// With gs_shaders: batch vertices in a ring of GPU buffers, one copy instead of vitaGL's
 	// copy per attribute (gs_vertex_ring, on)
 	static inline bool g_vertexRing = true;
