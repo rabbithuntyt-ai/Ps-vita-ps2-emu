@@ -587,5 +587,24 @@ Autostart keys, all per run:
   profile and slow the game down.
 - `mpeg_dump_mb` slows a run (it writes to the card on the emulation thread). Do not
   measure speed with it on.
+- The Vita can drop off the network in the middle of a script. On 2026-11-15 at about
+  22:49, after 2.5 hours of back-to-back runs at full clocks, it vanished during or just
+  after the first run of the 500 MHz test. That run was a warm-up at the normal clocks:
+  the 500 MHz step was never reached. Later even ping failed, so the whole Vita was down
+  (not only Vita Lab), and the user had to restart it by hand. The cause is unknown;
+  battery, heat or a system hang are the suspects. Since then:
+  - perf.csv ends each row with `battery_pct,charging,battery_temp_c,arm_mhz`. The last
+    row written before a hang shows the power state.
+  - After a reconnect, fetch `ux0:data/VitaPS2/perf.csv` before any run. `run.sh` deletes
+    it, and it holds the partial log of the run that hung.
+  - `runs/re4/vitacheck.sh` (called by `gp.sh`) stops a script when Vita Lab does not
+    answer, or when the last run shows a battery under 30% and not charging, or at 45 °C
+    or more. Before this, one hang turned into 25 minutes of failed calls.
+  - No `vitalab` calls in the background during a run: two clients at once can hang Vita
+    Lab's command server.
+  - Clock changes only with someone at the Vita (`ATTENDED=1 bash clock500.sh`), and
+    clocks go back to default when the script exits.
+  - A stale `perf.csv` in a run folder made a failed run look like a good one. `gp.sh`
+    now deletes it first.
 - Uncommitted, on purpose: the "60 frame" change to `FindTarget` from HLE_MPEG.md item 3
   is still only in the working tree. All numbers here were measured with it in the build.
