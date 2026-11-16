@@ -271,6 +271,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--vu1-hle")) Re4Vu1Hle::Enable(true); //RE4 world program without VU1
 		else if(!std::strcmp(argv[i], "--vu-scalar-opmul")) VUShared::g_vectorOuterProduct = false; //old OPMULA/OPMSUB
 		else if(!std::strcmp(argv[i], "--vu-no-loop-variant")) CVuBasicBlock::g_loopVariant = false;      //no loop copy of self-looping VU blocks
+		else if(!std::strcmp(argv[i], "--vu-no-clamp")) CVuBasicBlock::g_extraCompileHints |= VUShared::COMPILEHINT_NO_CLAMPING; //vu_no_clamp
 		else if(!std::strcmp(argv[i], "--vu1-async")) CVpu::g_asyncVif1 = true;               //VIF1 work on the VU1 thread (with --mtvu)
 		else if(!std::strcmp(argv[i], "--vu1-async-no-p3sync")) CVpu::g_asyncPath3Sync = false; //PATH3 does not wait for queued VIF1 work
 #ifdef VITAPS2_HAS_GL
