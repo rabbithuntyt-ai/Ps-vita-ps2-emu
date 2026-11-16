@@ -49,6 +49,7 @@
 #define VITAPS2_BUILD "dev"
 #endif
 #include "CpuScreen.h"
+#include "Cores.h"
 #include "EmuSession.h"
 #include "EmuProfile.h"
 #include "iop/Iop_SubSystem.h"
@@ -263,9 +264,9 @@ namespace
 		bool iopThread = false; //the IOP on its own thread, beside the EE (ParallelIop.h)
 		uint32_t iopCore = 1;   //its core
 		uint32_t iopPriority = 100; //above the UI/GPU thread (default priority) on its core
-		uint32_t spuCore = 2;       //core of the SPU2 mixer
+		uint32_t spuCore = 3;       //core of the SPU2 mixer (3: core 2 without a core 3 plugin, Cores.h)
 		uint32_t spuPriority = 160; //its priority (above the decoder)
-		uint32_t mpegCopyCore = 2;  //core of the movie copy thread (movie_async_copy)
+		uint32_t mpegCopyCore = 3;  //core of the movie copy thread (movie_async_copy; 3 as spuCore)
 		uint32_t mpegCopyPriority = 191; //its priority (the lowest)
 		bool eeStayInSlice = true; //EE kernel calls handled without leaving the time slice
 		bool threadedSpu = true; //SPU2 audio mixing on the second core
@@ -733,7 +734,7 @@ namespace
 				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop");
 				//The IOP thread's sections (iop_thread)
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",iopt_%s", EmuProfile::GetSectionName(i));
-				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz");
+				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3");
 				std::fprintf(perfFile, "\n");
 			}
 		}
@@ -778,7 +779,7 @@ namespace
 		{
 			// Above the GPU thread on core 1 (it is on the EE's critical path: the EE
 			// waits for it at vblanks and SIF crossings), below the SPU2 mixer on core 2.
-			uint32_t iopCoreMask = 0x10000u << std::min<uint32_t>(settings.iopCore, 2);
+			uint32_t iopCoreMask = VitaCores::Mask(settings.iopCore);
 			int iopPriority = static_cast<int>(settings.iopPriority);
 			CPS2VM::g_iopThreadInit = [iopCoreMask, iopPriority]() {
 				sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), iopCoreMask);
@@ -823,7 +824,7 @@ namespace
 		// mixer waited for a whole picture, and the emulation thread for the mixer
 		// (335 ms per second in Resident Evil 4's intro). Mixing is short, and nothing
 		// here is as urgent: it goes first. (Threads start at 191, the lowest.)
-		uint32_t spuCoreMask = 0x10000u << std::min<uint32_t>(settings.spuCore, 2);
+		uint32_t spuCoreMask = VitaCores::Mask(settings.spuCore);
 		int spuPriority = static_cast<int>(settings.spuPriority);
 		config.spuThreadInit = [spuCoreMask, spuPriority]() {
 			sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), spuCoreMask);
@@ -833,7 +834,7 @@ namespace
 		// and the mixer, or it only samples while they sleep (a decoder at equal
 		// priority kept it off core 2 for a whole picture).
 		config.profilerThreadInit = []() {
-			sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */);
+			sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), VitaCores::Mask(3)); //core 3 when available, else 2
 			sceKernelChangeThreadPriority(sceKernelGetThreadId(), 150);
 		};
 		config.soundFactory = &CSH_Vita::HandlerFactory;
@@ -884,11 +885,11 @@ namespace
 				mpegHle.SetAdxPollIdle(settings.adxIdle);
 				// Native movie decoding (libmpeg 2.2 sceMpegGetPicture), decoder on
 				// core 2 (VU1 has little to do while the EE does not decode).
-				uint32_t mpegCoreMask = 0x10000u << std::min<uint32_t>(settings.mpegCore, 2);
+				uint32_t mpegCoreMask = VitaCores::Mask(settings.mpegCore);
 				mpegHle.Enable(session->GetVm()->m_ee->m_ram, VITAPS2_DATA_DIR "/mpeghle.txt", [mpegCoreMask]() {
 					sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mpegCoreMask);
 					ThreadProfiler::RegisterCurrentThread("MPEG decoder");
-				}, [copyCoreMask = 0x10000u << std::min<uint32_t>(settings.mpegCopyCore, 2), copyPriority = static_cast<int>(settings.mpegCopyPriority)]() {
+				}, [copyCoreMask = VitaCores::Mask(settings.mpegCopyCore), copyPriority = static_cast<int>(settings.mpegCopyPriority)]() {
 					sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), copyCoreMask);
 					sceKernelChangeThreadPriority(sceKernelGetThreadId(), copyPriority);
 					ThreadProfiler::RegisterCurrentThread("MPEG copy");
@@ -1510,8 +1511,8 @@ namespace
 							lastGameFrames = CGSH_Hardware::g_gameFrames;
 							//Power state: the last row written before a Vita drops off the network shows
 							//whether the battery ran out or ran hot (the 2026-11-15 hang, docs/RE4.md)
-							std::fprintf(perfFile, ",%d,%d,%d,%d", scePowerGetBatteryLifePercent(), scePowerIsBatteryCharging() ? 1 : 0,
-							    scePowerGetBatteryTemp() / 100, scePowerGetArmClockFrequency());
+							std::fprintf(perfFile, ",%d,%d,%d,%d,%d", scePowerGetBatteryLifePercent(), scePowerIsBatteryCharging() ? 1 : 0,
+							    scePowerGetBatteryTemp() / 100, scePowerGetArmClockFrequency(), VitaCores::g_core3 ? 1 : 0);
 						}
 						std::fprintf(perfFile, "\n");
 						std::fflush(perfFile);
@@ -1818,6 +1819,8 @@ int main()
 		std::abort();
 	});
 	ThreadProfiler::RegisterCurrentThread("UI/GPU");
+	// Core 3 (with a plugin such as CapUnlocker) for the light threads: audio, profiler, movie copy
+	VitaCores::Detect();
 	// Core 1: keep core 0 free for the EE/IOP thread (the bottleneck).
 	sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x20000 /* SCE_KERNEL_CPU_MASK_USER_1 */);
 

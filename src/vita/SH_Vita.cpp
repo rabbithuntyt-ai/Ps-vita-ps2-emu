@@ -2,6 +2,7 @@
 #include <psp2/audioout.h>
 #include <psp2/kernel/threadmgr.h>
 #include "ThreadProfiler.h"
+#include "Cores.h"
 
 namespace
 {
@@ -62,8 +63,8 @@ uint32_t CSH_Vita::GetUnderruns()
 void CSH_Vita::ThreadProc()
 {
 	ThreadProfiler::RegisterCurrentThread("Audio");
-	// Core 2 (with VU1): core 0 is reserved for the EE/IOP thread.
-	sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000 /* SCE_KERNEL_CPU_MASK_USER_2 */);
+	// Core 3 when available (Cores.h), else core 2 with VU1: core 0 is reserved for the EE/IOP thread.
+	sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), VitaCores::Mask(3));
 	std::vector<int16> grain(GRAIN * 2);
 	while(m_running)
 	{
