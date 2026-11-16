@@ -591,8 +591,13 @@ Autostart keys, all per run:
   22:49, after 2.5 hours of back-to-back runs at full clocks, it vanished during or just
   after the first run of the 500 MHz test. That run was a warm-up at the normal clocks:
   the 500 MHz step was never reached. Later even ping failed, so the whole Vita was down
-  (not only Vita Lab), and the user had to restart it by hand. The cause is unknown;
-  battery, heat or a system hang are the suspects. Since then:
+  (not only Vita Lab), and the user had to restart it by hand. Cause, from the evidence
+  found after the restart (the Vita still had the previous run's eboot and perf.csv, so
+  nothing of the test ever reached it): the test's first command, `vitalab clock
+  default`, the first clock change ever sent to this Vita. It forces 333/111/111/111 MHz
+  from the kernel, with the emulator still open. Do not use `vitalab clock`: the app
+  sets its own clocks at boot, and Vita Lab ignores CPU values above 444 anyway (500 MHz
+  goes through PSVshell or LOLIcon, by hand). Since then:
   - perf.csv ends each row with `battery_pct,charging,battery_temp_c,arm_mhz`. The last
     row written before a hang shows the power state.
   - After a reconnect, fetch `ux0:data/VitaPS2/perf.csv` before any run. `run.sh` deletes
@@ -602,8 +607,7 @@ Autostart keys, all per run:
     or more. Before this, one hang turned into 25 minutes of failed calls.
   - No `vitalab` calls in the background during a run: two clients at once can hang Vita
     Lab's command server.
-  - Clock changes only with someone at the Vita (`ATTENDED=1 bash clock500.sh`), and
-    clocks go back to default when the script exits.
+  - `clock500.sh` no longer changes clocks; it runs the app at its own clocks.
   - A stale `perf.csv` in a run folder made a failed run look like a good one. `gp.sh`
     now deletes it first.
 - Uncommitted, on purpose: the "60 frame" change to `FindTarget` from HLE_MPEG.md item 3
