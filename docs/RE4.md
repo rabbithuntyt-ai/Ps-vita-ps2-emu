@@ -77,8 +77,10 @@ one a number comes from**.
 
 1. **Threaded VU1 hangs.** At the first real-time scene the game waits forever for DMA
    channel 1 (0x251928: `bc0f` loop on `D_PCR`), running at 59 emulated fps with no output
-   and sound playing. Same as open bug 1 in HLE_MPEG.md. `threaded_vu1=0` in the profile
-   for now. The root cause is still open, and it costs a core's worth of speed.
+   and sound playing. Same as open bug 1 in HLE_MPEG.md. Gone by 2026-11-16: a New Game with
+   `threaded_vu1=1 vu1_async=1` plays the movies and reaches the scene (game frames drawn), and
+   the profile now turns threaded VU1, async VU1, the depth blur skip, the world HLE and the
+   GPU world on (1.5-2.1 game fps in gameplay; was 0.6-0.8).
 2. **`MAX_TEXTURES` was 24, and GL textures were dropped after 64 binds.** A scene uses
    65 or more textures per frame and does hundreds of binds: everything was decoded again on
    every frame. Now 512 textures or 48 MB.
@@ -108,7 +110,7 @@ Where it stands:
   - Wrong textures on Leon (patches on hair and jacket).
 - Start from a state: `save_state_at=570` in a New Game run (scripted with `pad_script`)
   saves one just before the first real-time scene; `runs/re4/state_before_gameplay.state`
-  is a copy. `threaded_vu1=0` is needed (see above).
+  is a copy. It was saved with `threaded_vu1=0` (see above).
 
 A state from just before this scene saves 10 minutes per test: `save_state_at=570` during
 a New Game run, then `load_state=1`.
