@@ -8,7 +8,7 @@ diff --git a/Source/ee/VuBasicBlock.h b/Source/ee/VuBasicBlock.h
  #include "../BasicBlock.h"
  
  class CVuBasicBlock : public CBasicBlock
-@@ -12,9 +13,15 @@
+@@ -12,9 +13,18 @@
  
  	//Compile hints added to every VU block (VUShared::COMPILEHINT_*): vu_no_clamp sets
  	//COMPILEHINT_NO_CLAMPING (no float clamping of operands, faster, less exact)
@@ -21,6 +21,9 @@ diff --git a/Source/ee/VuBasicBlock.h b/Source/ee/VuBasicBlock.h
 +	//with the entry stall checks resolved at compile time (the pending writes are the
 +	//block's own last ones, known constants) (vu_loop_variant, on)
 +	static inline bool g_loopVariant = true;
++	//Loops keep their most used VF registers in host registers (vu_loop_vectors): unfinished,
++	//off (the code generator crashed on RE4's loop with it on)
++	static inline bool g_promoteLoopVectors = false;
 +	static inline uint64 g_loopVariants = 0;
  
  protected:
@@ -28,17 +31,19 @@ diff --git a/Source/ee/VuBasicBlock.h b/Source/ee/VuBasicBlock.h
 diff --git a/Source/ee/VuBasicBlock.cpp b/Source/ee/VuBasicBlock.cpp
 --- a/Source/ee/VuBasicBlock.cpp
 +++ b/Source/ee/VuBasicBlock.cpp
-@@ -17,7 +17,8 @@
+@@ -17,7 +17,10 @@
  void CVuBasicBlock::CompileRange(CMipsJitter* jitter)
  {
  	CompileProlog(jitter);
 -	jitter->MarkFirstBlockLabel();
 +	//Without clamping no VU block uses the clamp masks: their registers are free
 +	jitter->SetClampRegistersFree(((m_blockCompileHints | g_extraCompileHints) & VUShared::COMPILEHINT_NO_CLAMPING) != 0);
++	//VF registers may stay in host registers through a loop (nothing else reads them meanwhile)
++	jitter->SetPromoteMdLoops(g_promoteLoopVectors);
  
  	assert((m_begin & 0x07) == 0);
  	assert(((m_end + 4) & 0x07) == 0);
-@@ -45,6 +46,46 @@
+@@ -45,6 +48,46 @@
  
  	ComputeSkipFlagsHints(fmacPipelineInfo.stallDelays, hints);
  	uint32 stickyFlushIndex = ComputeDeferStickyHints(fmacPipelineInfo.stallDelays, hints);
@@ -85,7 +90,7 @@ diff --git a/Source/ee/VuBasicBlock.cpp b/Source/ee/VuBasicBlock.cpp
  	if(stickyFlushIndex != -1)
  	{
  		jitter->PushCst(0);
-@@ -99,6 +140,26 @@
+@@ -99,6 +142,26 @@
  			setStallBits(hiOps.readF1, hiOps.readElemF1);
  			setStallBits(loOps.readF0, loOps.readElemF0);
  			setStallBits(loOps.readF1, loOps.readElemF1);
@@ -112,7 +117,7 @@ diff --git a/Source/ee/VuBasicBlock.cpp b/Source/ee/VuBasicBlock.cpp
  			//Pending writes (slots) are only cleared in the first 3 pairs, never set: one test
  			//at the first pair of all slots against the registers read by the pairs checking
  			//them tells if any of these checks can hit. Each pair's checks (one branch per
-@@ -188,6 +249,7 @@
+@@ -188,6 +251,7 @@
  			{
  				jitter->EndIf();
  			}
@@ -120,7 +125,7 @@ diff --git a/Source/ee/VuBasicBlock.cpp b/Source/ee/VuBasicBlock.cpp
  
  			//Clear writes
  			jitter->MD_PushCstExpandW(0U);
-@@ -520,7 +582,33 @@
+@@ -520,7 +584,33 @@
  	jitter->PushCst(integerTrailingDelayInfo.regIndex);
  	jitter->PullRel(offsetof(CMIPS, m_State.savedNextBlockIntRegIdx));
  
