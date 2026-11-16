@@ -1,0 +1,158 @@
+diff --git a/Source/ee/VuBasicBlock.h b/Source/ee/VuBasicBlock.h
+--- a/Source/ee/VuBasicBlock.h
++++ b/Source/ee/VuBasicBlock.h
+@@ -15,6 +15,11 @@
+ 	static inline uint32 g_extraCompileHints = 0;
+ 	//Block entry FMAC stall checks: one combined test before the per slot checks
+ 	static inline bool g_combinedStallCheck = true;
++	//Blocks looping on themselves (3 pairs or more): a second copy of the code for the loop,
++	//with the entry stall checks resolved at compile time (the pending writes are the
++	//block's own last ones, known constants) (vu_loop_variant, on)
++	static inline bool g_loopVariant = true;
++	static inline uint64 g_loopVariants = 0;
+ 
+ protected:
+ 	void CompileRange(CMipsJitter*) override;
+diff --git a/Source/ee/VuBasicBlock.cpp b/Source/ee/VuBasicBlock.cpp
+--- a/Source/ee/VuBasicBlock.cpp
++++ b/Source/ee/VuBasicBlock.cpp
+@@ -17,7 +17,6 @@
+ void CVuBasicBlock::CompileRange(CMipsJitter* jitter)
+ {
+ 	CompileProlog(jitter);
+-	jitter->MarkFirstBlockLabel();
+ 
+ 	assert((m_begin & 0x07) == 0);
+ 	assert(((m_end + 4) & 0x07) == 0);
+@@ -45,6 +44,46 @@
+ 
+ 	ComputeSkipFlagsHints(fmacPipelineInfo.stallDelays, hints);
+ 	uint32 stickyFlushIndex = ComputeDeferStickyHints(fmacPipelineInfo.stallDelays, hints);
++
++	//Loop copy: a block of 3 pairs or more branching back to its start, linkable (no
++	//conditional branch in the last pair's delay slot)
++	bool loopVariant = false;
++	if(g_loopVariant && (maxInstructions >= 3) && !IsConditionalBranch(m_context.m_pMemoryMap->GetInstruction(m_end - 4)))
++	{
++		uint32 branchInstAddr = m_end - 0xC;
++		uint32 inst = m_context.m_pMemoryMap->GetInstruction(branchInstAddr);
++		if(m_context.m_pArch->IsInstructionBranch(&m_context, branchInstAddr, inst) == MIPS_BRANCH_NORMAL)
++		{
++			uint32 target = m_context.m_pArch->GetInstructionEffectiveAddress(&m_context, branchInstAddr, inst);
++			loopVariant = (target != MIPS_INVALID_PC) && (target == m_begin);
++		}
++	}
++	Jitter::CJitter::LABEL loopLabel = 0;
++	if(loopVariant)
++	{
++		loopLabel = jitter->CreateLabel();
++		jitter->SetFirstBlockLabel(loopLabel);
++	}
++	else
++	{
++		jitter->MarkFirstBlockLabel();
++	}
++	uint32 finalPipeTime = 0;
++
++	//staticSlots: the pending FMAC writes at entry when they are known (loop copy)
++	auto emitBody = [&](const uint128* staticSlots) {
++	uint128 simSlots[3] = {};
++	if(staticSlots)
++	{
++		for(int i = 0; i < 3; i++) simSlots[i] = staticSlots[i];
++	}
++	bool hasPendingXgKick = false;
++	const auto clearPendingXgKick =
++	    [&]() {
++		    assert(hasPendingXgKick);
++		    EmitXgKick(jitter);
++		    hasPendingXgKick = false;
++	    };
+ 	if(stickyFlushIndex != -1)
+ 	{
+ 		jitter->PushCst(0);
+@@ -99,6 +138,26 @@
+ 			setStallBits(hiOps.readF1, hiOps.readElemF1);
+ 			setStallBits(loOps.readF0, loOps.readElemF0);
+ 			setStallBits(loOps.readF1, loOps.readElemF1);
++			if(staticSlots)
++			{
++				//The same checks, decided now: a stall clears its slot and adds a cycle
++				for(int32 i = extraPipeTimeIndex; i < 3; i++)
++				{
++					for(int32 stallIdx = 0; stallIdx < 4; stallIdx++)
++					{
++						if((stallMask.nV[stallIdx] & simSlots[i].nV[stallIdx]) == 0) continue;
++						simSlots[i] = {};
++						jitter->PushRel(offsetof(CMIPS, m_State.pipeTime));
++						jitter->PushCst(1);
++						jitter->Add();
++						jitter->PullRel(offsetof(CMIPS, m_State.pipeTime));
++						VUShared::NotePipeTimeChange();
++					}
++				}
++				simSlots[extraPipeTimeIndex] = {};
++			}
++			else
++			{
+ 			//Pending writes (slots) are only cleared in the first 3 pairs, never set: one test
+ 			//at the first pair of all slots against the registers read by the pairs checking
+ 			//them tells if any of these checks can hit. Each pair's checks (one branch per
+@@ -188,6 +247,7 @@
+ 			{
+ 				jitter->EndIf();
+ 			}
++			}
+ 
+ 			//Clear writes
+ 			jitter->MD_PushCstExpandW(0U);
+@@ -520,7 +580,33 @@
+ 	jitter->PushCst(integerTrailingDelayInfo.regIndex);
+ 	jitter->PullRel(offsetof(CMIPS, m_State.savedNextBlockIntRegIdx));
+ 
++	finalPipeTime = relativePipeTime;
+ 	CompileEpilog(jitter, loopsOnItself && m_isLinkable);
++	};
++
++	emitBody(nullptr);
++	if(loopVariant)
++	{
++		//The pending writes the body leaves (its last pairs' writes still in flight)
++		uint128 endSlots[3] = {};
++		for(int32 extraPipeTime = 0; extraPipeTime < 3; extraPipeTime++)
++		{
++			uint32 pipeTime = finalPipeTime + extraPipeTime;
++			for(int32 stallIdx = 0; stallIdx < 128; stallIdx++)
++			{
++				int regId = stallIdx / 4;
++				int field = stallIdx & 0x3;
++				if(fmacPipelineInfo.regWriteTimes[regId][field] > pipeTime)
++				{
++					endSlots[extraPipeTime].nV[stallIdx / 32] |= (1 << (stallIdx & 0x1F));
++				}
++			}
++		}
++		g_loopVariants++;
++		jitter->MarkLabel(loopLabel);
++		VUShared::BeginFlagTracking();
++		emitBody(endSlots);
++	}
+ }
+ 
+ bool CVuBasicBlock::IsConditionalBranch(uint32 opcodeLo)
+diff --git a/Source/MipsJitter.h b/Source/MipsJitter.h
+--- a/Source/MipsJitter.h
++++ b/Source/MipsJitter.h
+@@ -19,6 +19,12 @@
+ 	LABEL GetLastBlockLabel();
+ 
+ 	void MarkFirstBlockLabel();
++	//The label loops jump to, made by the caller (marked later): a block can be entered
++	//through one copy of its code and loop on another
++	void SetFirstBlockLabel(LABEL label)
++	{
++		m_firstBlockLabel = label;
++	}
+ 	void MarkLastBlockLabel();
+ 
+ 	//Set by the block while it compiles its last branch, a likely one: not taken,

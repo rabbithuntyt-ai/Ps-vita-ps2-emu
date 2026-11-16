@@ -1,7 +1,168 @@
 diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
 --- a/src/Jitter_RegAlloc.cpp
 +++ b/src/Jitter_RegAlloc.cpp
-@@ -306,11 +306,23 @@
+@@ -12,8 +12,151 @@
+ 
+ using namespace Jitter;
+ 
++void CJitter::SplitLiveRanges(BASIC_BLOCK& basicBlock)
++{
++	m_splitRelative128.clear();
++	static const unsigned int envGap = []() {
++		const char* value = getenv("JITTER_SPLIT");
++		return value ? static_cast<unsigned int>(atoi(value)) : 0U;
++	}();
++	const unsigned int gap = (g_splitGap != 0) ? g_splitGap : envGap;
++	if(gap == 0) return;
++
++	struct ACCESS
++	{
++		StatementList::iterator statement;
++		unsigned int index;
++		bool reads;
++		bool writes;
++	};
++	struct SYMBOL_ACCESSES
++	{
++		SymbolPtr symbol;
++		std::vector<ACCESS> accesses;
++		bool unsplittable = false;
++	};
++	std::map<uint32, SYMBOL_ACCESSES> symbols;
++	//Statements no cluster may span: calls (ranges end there) and guest memory ops
++	std::vector<unsigned int> barriers;
++	uint32 nextTemporary = 0;
++
++	unsigned int index = 0;
++	for(auto it = basicBlock.statements.begin(); it != basicBlock.statements.end(); ++it, ++index)
++	{
++		auto& statement = *it;
++		if((statement.op == OP_CALL) || (statement.op == OP_GUESTLOAD) || (statement.op == OP_GUESTSTORE) || (statement.op == OP_PARAM_RET))
++		{
++			barriers.push_back(index);
++		}
++		statement.VisitOperands(
++		    [&](const SymbolRefPtr& symbolRef, bool isDst) {
++			    auto symbol = symbolRef->GetSymbol();
++			    if((symbol->m_type == SYM_TEMPORARY128) || (symbol->m_type == SYM_TEMPORARY)) nextTemporary = std::max(nextTemporary, symbol->m_valueLow + 1);
++			    if(symbol->m_type != SYM_RELATIVE128) return;
++			    auto& entry = symbols[symbol->m_valueLow];
++			    entry.symbol = symbol;
++			    if(entry.accesses.empty() || (entry.accesses.back().index != index))
++			    {
++				    entry.accesses.push_back({it, index, false, false});
++			    }
++			    (isDst ? entry.accesses.back().writes : entry.accesses.back().reads) = true;
++		    });
++	}
++	if(symbols.empty()) return;
++
++	//Anything else touching a symbol's memory (lane accesses, references, other sizes) keeps it whole
++	for(auto& statement : basicBlock.statements)
++	{
++		statement.VisitOperands(
++		    [&](const SymbolRefPtr& symbolRef, bool) {
++			    auto symbol = symbolRef->GetSymbol();
++			    if(symbol->m_type == SYM_RELATIVE128) return;
++			    for(auto& entry : symbols)
++			    {
++				    if(symbol->Aliases(entry.second.symbol.get())) entry.second.unsplittable = true;
++			    }
++		    });
++	}
++
++	nextTemporary = std::max<uint32>(nextTemporary, 0x8000);
++	for(auto& entry : symbols)
++	{
++		auto& info = entry.second;
++		if(info.unsplittable || (info.accesses.size() < 3)) continue;
++		//Clusters: accesses closer than the gap with no barrier between them
++		std::vector<std::pair<size_t, size_t>> clusters;
++		size_t clusterStart = 0;
++		for(size_t i = 1; i <= info.accesses.size(); i++)
++		{
++			bool split = (i == info.accesses.size());
++			if(!split)
++			{
++				unsigned int previous = info.accesses[i - 1].index, current = info.accesses[i].index;
++				split = (current - previous) > gap;
++				for(auto barrier : barriers)
++				{
++					if((barrier > previous) && (barrier < current)) split = true;
++				}
++			}
++			if(split)
++			{
++				clusters.push_back(std::make_pair(clusterStart, i - 1));
++				clusterStart = i;
++			}
++		}
++		if(clusters.size() < 2) continue;
++		//A cluster containing a barrier statement itself (the symbol is a call parameter): keep whole
++		bool barrierAccess = false;
++		for(const auto& access : info.accesses)
++		{
++			if((access.statement->op == OP_CALL) || (access.statement->op == OP_PARAM) || (access.statement->op == OP_PARAM_RET) ||
++			   (access.statement->op == OP_GUESTLOAD) || (access.statement->op == OP_GUESTSTORE))
++				barrierAccess = true;
++		}
++		if(barrierAccess) continue;
++
++		g_splitSymbols++;
++		m_splitRelative128.insert(entry.first);
++		for(const auto& cluster : clusters)
++		{
++			g_splitClusters++;
++			auto temporary = basicBlock.symbolTable.MakeSymbol(SYM_TEMPORARY128, nextTemporary++);
++			const auto& first = info.accesses[cluster.first];
++			int lastWrite = -1;
++			for(size_t i = cluster.first; i <= cluster.second; i++)
++			{
++				auto& access = info.accesses[i];
++				access.statement->VisitOperands(
++				    [&](SymbolRefPtr& symbolRef, bool) {
++					    if(symbolRef->GetSymbol()->Equals(info.symbol.get())) symbolRef = MakeSymbolRef(temporary);
++				    });
++				if(access.writes) lastWrite = static_cast<int>(i);
++			}
++			if(first.reads)
++			{
++				STATEMENT load;
++				load.op = OP_MOV;
++				load.dst = MakeSymbolRef(temporary);
++				load.src1 = MakeSymbolRef(info.symbol);
++				basicBlock.statements.insert(first.statement, load);
++			}
++			if(lastWrite != -1)
++			{
++				STATEMENT store;
++				store.op = OP_MOV;
++				store.dst = MakeSymbolRef(info.symbol);
++				store.src1 = MakeSymbolRef(temporary);
++				auto position = info.accesses[lastWrite].statement;
++				basicBlock.statements.insert(std::next(position), store);
++			}
++		}
++	}
++}
++
+ void CJitter::AllocateRegisters(BASIC_BLOCK& basicBlock)
+ {
++	SplitLiveRanges(basicBlock);
++
+ 	//Statements inserted before the statement at a given index (spills first, then loads,
+ 	//since a register can be handed over from one symbol to another at the same point)
+ 	InsertionMap spillStatements;
+@@ -281,6 +424,8 @@
+ 		if(!isRegisterAllocatable(symbol->m_type)) continue;
+ 		if(symbolRegAlloc.aliased) continue;
+ 		if(m_codeGen->IsSymbolPinned(symbol.get())) continue;
++		//Split symbols live in memory between their clusters' temporaries
++		if((symbol->m_type == SYM_RELATIVE128) && m_splitRelative128.count(symbol->m_valueLow)) continue;
+ 		sortedSymbols.push_back(&symbolRegAllocPair);
+ 	}
+ 	sortedSymbols.sort(
+@@ -306,11 +451,23 @@
  		    }
  	    });
  
@@ -25,7 +186,7 @@ diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
  		//Find suitable register for this symbol
  		auto poolType = SYM_REGISTER;
  		auto registerSymbolType = SYM_REGISTER;
-@@ -338,7 +350,26 @@
+@@ -338,7 +495,26 @@
  		{
  			symbolRegAlloc.registerType = registerSymbolType;
  			symbolRegAlloc.registerId = registerId;
@@ -52,7 +213,7 @@ diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
  	}
  }
  
-@@ -457,6 +488,9 @@
+@@ -457,6 +633,9 @@
  				    if(symbol->Equals(testedSymbol.get())) return;
  				    if(symbol->Aliases(testedSymbol.get()))
  				    {
@@ -62,3 +223,25 @@ diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
  					    symbolRegAlloc.second.aliased = true;
  				    }
  			    });
+diff --git a/include/Jitter.h b/include/Jitter.h
+--- a/include/Jitter.h
++++ b/include/Jitter.h
+@@ -403,6 +403,18 @@
+ 		void PruneSymbols(BASIC_BLOCK&) const;
+ 
+ 		void AllocateRegisters(BASIC_BLOCK&);
++		//Live range splitting (g_splitGap != 0): a 128-bit context symbol accessed in separate
++		//clusters gets a temporary per cluster, loaded and stored around it
++		void SplitLiveRanges(BASIC_BLOCK&);
++		std::set<uint32> m_splitRelative128;
++
++	public:
++		//Statements between two accesses of a 128-bit context symbol beyond which they are
++		//in separate clusters (0: no splitting)
++		static inline unsigned int g_splitGap = 0;
++		static inline uint64 g_splitSymbols = 0, g_splitClusters = 0;
++
++	private:
+ 		static AllocationRangeArray ComputeAllocationRanges(const BASIC_BLOCK&);
+ 		void ComputeLivenessForRange(const BASIC_BLOCK&, const AllocationRange&, SymbolRegAllocInfo&) const;
+ 		//Live intervals (statement indices) held by each register (pool type, index)
