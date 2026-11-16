@@ -2103,10 +2103,20 @@ void CGSH_Hardware::DrawBatchWithProgram()
 	const uint8* base = reinterpret_cast<const uint8*>(m_batch.data());
 	uint32 ringOffset = 0;
 	bool ring = g_vertexRing && UploadToRing(m_batch.data(), static_cast<uint32>(count * stride), ringOffset);
+	//The batch's first vertex in the ring buffer. On the Vita the attribute pointers hold only
+	//the field offsets and the draw starts at this vertex: vitaGL packs attributes from one
+	//buffer into one stream whose attribute offsets are 16 bits (an offset into a 4 MB buffer
+	//wrapped and the GPU read other vertices).
+	GLint baseVertex = 0;
 	if(ring)
 	{
 		glBindBuffer(GL_ARRAY_BUFFER, m_vertexRing[m_ringCurrent]);
+#ifdef __vita__
+		baseVertex = static_cast<GLint>(ringOffset / stride);
+		base = nullptr;
+#else
 		base = reinterpret_cast<const uint8*>(static_cast<uintptr_t>(ringOffset));
+#endif
 	}
 	for(GLuint i = 0; i < 4; i++) glEnableVertexAttribArray(i);
 	glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, stride, base + offsetof(BATCH_VERTEX, x));
@@ -2116,9 +2126,16 @@ void CGSH_Hardware::DrawBatchWithProgram()
 	bool indexed = !m_batchIndices.empty();
 	auto draw = [&]() {
 		if(indexed)
-			glDrawElements(m_batchMode, static_cast<GLsizei>(m_batchIndices.size()), GL_UNSIGNED_SHORT, m_batchIndices.data());
+		{
+			if(baseVertex != 0)
+				glDrawElementsBaseVertex(m_batchMode, static_cast<GLsizei>(m_batchIndices.size()), GL_UNSIGNED_SHORT, m_batchIndices.data(), baseVertex);
+			else
+				glDrawElements(m_batchMode, static_cast<GLsizei>(m_batchIndices.size()), GL_UNSIGNED_SHORT, m_batchIndices.data());
+		}
 		else
-			glDrawArrays(m_batchMode, 0, count);
+		{
+			glDrawArrays(m_batchMode, baseVertex, count);
+		}
 	};
 	{
 		CPartTimer timer(GPU_PART_DRAW);
@@ -2207,7 +2224,9 @@ bool CGSH_Hardware::UploadToRing(const void* data, uint32 size, uint32& offset)
 	glBufferSubData(GL_ARRAY_BUFFER, offset, size, data);
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 #endif
-	m_ringOffset += (size + 15) & ~15;
+	//Whole vertices: the next batch's offset is a vertex index (base vertex on the Vita)
+	m_ringOffset += size;
+	m_ringOffset += (sizeof(BATCH_VERTEX) - (m_ringOffset % sizeof(BATCH_VERTEX))) % sizeof(BATCH_VERTEX);
 	return true;
 }
 

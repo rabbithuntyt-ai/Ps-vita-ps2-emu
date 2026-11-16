@@ -40,9 +40,9 @@ for offset, size in notes:
 print('load segments: %d' % len(loads))
 
 def table(desc):
-    #version, count, entry size, then the entries
+    #version, count, then entries that start with their own size (all the same)
     version, count, size = struct.unpack_from('<3I', desc, 0)
-    return [desc[12 + i * size:12 + (i + 1) * size] for i in range(count)]
+    return [desc[8 + i * size:8 + (i + 1) * size] for i in range(count)]
 
 regs = {}
 modules = []
@@ -51,12 +51,12 @@ for offset, size in notes:
     for name, ntype, desc in notes_in(offset, size):
         if ntype == 0x1003:
             for e in table(desc):
-                uid, = struct.unpack_from('<I', e, 0)
-                threads.append((uid, cstr(e, 4, 32), e))
+                uid, = struct.unpack_from('<I', e, 4)
+                threads.append((uid, cstr(e, 8, 32), e))
         elif ntype == 0x1004:
             for e in table(desc):
-                uid, = struct.unpack_from('<I', e, 0)
-                regs[uid] = struct.unpack_from('<16I', e, 4)
+                uid, = struct.unpack_from('<I', e, 4)
+                regs[uid] = struct.unpack_from('<16I', e, 8)
         elif ntype == 0x1005:
             for e in table(desc):
                 modules.append(e)
@@ -68,7 +68,7 @@ for uid, name, e in threads:
     extra = ''
     if r:
         extra = ' pc %08x lr %08x sp %08x' % (r[15], r[14], r[13])
-    #stop reason: vita-parse-core reads it at 0x74
+    #stop reason at 0x74 (0x30004: undefined instruction, 0x30002/3: aborts)
     stop = words[0x74 // 4] if len(words) > 0x74 // 4 else 0
     print('  %08x %-28s stop 0x%x%s' % (uid, name, stop, extra))
 print('modules:')
