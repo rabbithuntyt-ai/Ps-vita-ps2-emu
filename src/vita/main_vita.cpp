@@ -356,7 +356,7 @@ namespace
 		else if(key == "vu_flag_tracking") VUShared::g_flagTracking = (value != 0); //flag reads after flags of the same block: one load
 		else if(key == "gpu_world") CGSH_Hardware::g_gpuWorld = value != 0;
 		else if(key == "gs_shaders") CGSH_Hardware::g_shaderBatches = value != 0; //batches through one GLSL program
-		else if(key == "gpu_world_slots") CGSH_Hardware::g_gpuWorldSlots = value; //batches per world draw (16)
+		else if(key == "gpu_world_slots") CGSH_Hardware::g_gpuWorldSlots = value; //batches per world draw (1 on the Vita: GSH_Hardware.h)
 		else if(key == "gpu_world_soa") CGSH_Hardware::g_gpuWorldSoa = value != 0; //world vertices one array per attribute (on)
 		else if(key == "gpu_world_guard") CGSH_Hardware::g_gpuWorldGuard = value; //hundredths of a screen beyond the edge (200; 0: off)
 		else if(key == "gpu_world_debug") CGSH_Hardware::g_gpuWorldDebug = value; //4: no culling, 64: the other faces (diagnostics)

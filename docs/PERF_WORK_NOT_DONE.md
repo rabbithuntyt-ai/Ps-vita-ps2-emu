@@ -42,6 +42,7 @@ cache: the first run after a new build is cold), `threaded_vu1=1` and RE4's prof
 | `vu1_async=1` | 115 | 1.0-1.4 | right |
 | `re4_skip_dof=176` | 130 | 1.0-1.3 | right, depth blur gone |
 | `re4_vu1_hle=1 gpu_world=1` | 207 | 1.8-2.0 | mostly right: in some frames a grey patch (missing leaves) or dark streaks |
+| same, `gpu_world_slots=1` (16 Nov, now the Vita default) | 147 in 120 s | 1.6-2.0 | right: 17 of 17 frames clean |
 | `gs_shaders=1` (vertex ring on) | 196 | 1.6-2.0 | as above |
 | `gs_shaders=1 gs_vertex_ring=0` | 210 | 1.8-2.1 | as above |
 
@@ -54,7 +55,12 @@ cache: the first run after a new build is cold), `threaded_vu1=1` and RE4's prof
   fragment shader whose alpha test used a `bool` (SceGxm undefined instruction; found with
   the on-device shader self test, `shader_test.txt`), and vitaGL's packed attribute
   stream has 16-bit offsets (the vertex ring now draws from a base vertex).
-- Open: the GPU world's artifacts on the Vita. Some near-camera ground triangles are never
+- Solved (16 Nov): the GPU world's artifacts below came from several batches per draw. The
+  vertex shader picks its batch's matrix with `uM[slot * 4]`, and with slots above 0 the
+  Vita got it wrong (vitaGL's translation of the dynamic uniform index, most likely; Mesa is
+  right). With `gpu_world_slots=1`, now the Vita default, 17 of 17 frames are clean at the
+  same speed (1.6-2.0 game fps). The earlier notes:
+- Was open: the GPU world's artifacts on the Vita. Some near-camera ground triangles are never
   rasterized (with `gpu_world_debug=2` the world draws red and those areas stay grey),
   sometimes with dark streaks; the CPU path draws them right (`re4_vu1_hle=1` alone is
   clean on the Vita, at 1.3-1.5 game fps with `vu1_async`). Ruled out on the Vita: async VU1
@@ -63,7 +69,7 @@ cache: the first run after a new build is cold), `threaded_vu1=1` and RE4's prof
   to the CPU (`gpu_world_guard=50/200`: same), one vertex array per attribute
   (`gpu_world_soa=1`: same), vertices clamped inside the far plane (same, plus new
   artifacts), more than 64k vertices per draw (704 at most). The PC (Mesa) draws the same
-  batches right. `gpu_world` stays off by default.
+  batches right.
 
 P1 as built: `CVif1::ReceiveDMA` copies the DMA data into a queue and returns at once (small
 chunks without a tag are merged, buffers are reused). The VU1 worker runs `ProcessPacket` on it

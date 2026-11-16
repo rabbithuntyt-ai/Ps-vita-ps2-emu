@@ -237,7 +237,15 @@ public:
 	static inline bool g_gpuWorld = false; //right on the PC, not yet run on the Vita (docs/RE4_GAMEPLAY.md)
 	static inline uint64 g_gpuWorldBatches = 0, g_gpuWorldDraws = 0, g_gpuWorldFallbacks = 0;
 	static inline uint32 g_gpuWorldDebug = 0; //1: triangles near the clip volume left out
-	static inline uint32 g_gpuWorldSlots = 16; //batches per world draw, at most WORLD_SLOTS (gpu_world_slots)
+	//Batches per world draw, at most WORLD_SLOTS (gpu_world_slots). The Vita: 1. The vertex
+	//shader picks its batch's matrix with uM[slot * 4], and with a slot above 0 the Vita drew
+	//some triangles wrong or not at all (grey patches near the camera; vitaGL's translation of
+	//the dynamic uniform index, most likely). One batch per draw is clean there, at the same speed.
+#if defined(__vita__)
+	static inline uint32 g_gpuWorldSlots = 1;
+#else
+	static inline uint32 g_gpuWorldSlots = 16;
+#endif
 	//Triangles with a corner more than this many hundredths of a screen beyond the target's
 	//edge are drawn by the CPU path (gpu_world_guard; 0: off)
 	static inline uint32 g_gpuWorldGuard = 0;
