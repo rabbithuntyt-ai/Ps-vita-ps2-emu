@@ -280,6 +280,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--gpu-world-debug") && (i + 1 < argc)) CGSH_Hardware::g_gpuWorldDebug = std::atoi(argv[++i]);
 		else if(!std::strcmp(argv[i], "--no-gpu-world")) CGSH_Hardware::g_gpuWorld = false;
 		else if(!std::strcmp(argv[i], "--gpu-world")) CGSH_Hardware::g_gpuWorld = true;
+		else if(!std::strcmp(argv[i], "--gpu-world-guard") && (i + 1 < argc)) CGSH_Hardware::g_gpuWorldGuard = std::atoi(argv[++i]);
 #endif
 	}
 
@@ -614,6 +615,7 @@ int main(int argc, char** argv)
 		if(Re4Vu1Hle::IsEnabled())
 			std::printf("world batches on the CPU: %llu (%llu vertices, %llu clipped triangles), on the GPU: %llu batches %llu draws %llu fallbacks\n", (unsigned long long)CGSH_Primitives::g_worldBatches,
 			            (unsigned long long)CGSH_Primitives::g_worldVertices, (unsigned long long)CGSH_Primitives::g_worldClipped, (unsigned long long)CGSH_Hardware::g_gpuWorldBatches, (unsigned long long)CGSH_Hardware::g_gpuWorldDraws, (unsigned long long)CGSH_Hardware::g_gpuWorldFallbacks);
+		if(Re4Vu1Hle::IsEnabled()) std::printf("most world vertices in one draw: %llu, guard band triangles: %llu\n", (unsigned long long)CGSH_Hardware::g_gpuWorldMaxVertices, (unsigned long long)CGSH_Hardware::g_gpuWorldGuarded);
 #endif
 
 		if(width == 0)

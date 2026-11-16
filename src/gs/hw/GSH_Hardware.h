@@ -238,6 +238,12 @@ public:
 	static inline uint64 g_gpuWorldBatches = 0, g_gpuWorldDraws = 0, g_gpuWorldFallbacks = 0;
 	static inline uint32 g_gpuWorldDebug = 0; //1: triangles near the clip volume left out
 	static inline uint32 g_gpuWorldSlots = 16; //batches per world draw, at most WORLD_SLOTS (gpu_world_slots)
+	//Triangles with a corner more than this many hundredths of a screen beyond the target's
+	//edge are drawn by the CPU path (gpu_world_guard; 0: off)
+	static inline uint32 g_gpuWorldGuard = 0;
+	//World vertices in one array per attribute (gpu_world_soa, on)
+	static inline bool g_gpuWorldSoa = false;
+	static inline uint64 g_gpuWorldGuarded = 0, g_gpuWorldMaxVertices = 0;
 	static inline uint32 g_depthForceLoadTargets = 0, g_depthForceLoadFailures = 0;
 	// Pictures the game finished: flips showing another target, or one drawn into since
 	// the previous flip (vblanks with the same picture don't count). perf.csv game_fps.
@@ -348,6 +354,7 @@ private:
 		float slot;
 	};
 	std::vector<WORLD_GPU_VERTEX> m_worldVertices;
+	std::vector<float> m_worldSoa; //gpu_world_soa: one array per attribute
 	std::vector<uint16> m_worldIndices;
 	float m_worldMatrix[WORLD_SLOTS * 16] = {};
 	float m_worldColorOffset[WORLD_SLOTS * 4] = {}, m_worldColorScale[WORLD_SLOTS * 4] = {}, m_worldTexOffset[WORLD_SLOTS * 4] = {};

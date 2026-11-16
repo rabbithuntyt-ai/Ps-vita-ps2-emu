@@ -2331,6 +2331,7 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 	// clipping are the GPU's: each triangle's order follows its winding sign so that GL_FRONT
 	// culling drops what the program's back face test drops.
 	uint32 base = static_cast<uint32>(m_worldVertices.size());
+	g_gpuWorldMaxVertices = std::max<uint64>(g_gpuWorldMaxVertices, base + batch.count);
 	m_worldVertices.resize(base + batch.count);
 	const int32* raw = batch.raw.data();
 	// Clip flags (the clip matrix): triangles touching the clip volume go through the
@@ -2342,6 +2343,21 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 		clip[r] = {batch.clip[r].x * factor, batch.clip[r].y * factor, batch.clip[r].z * factor, batch.clip[r].w * factor};
 	}
 	uint32 flags[3] = {};
+	//Guard band (gpu_world_guard): triangles with a corner more than this many screens beyond the
+	//target's edge go through the CPU path too. On the Vita the GPU dropped large ground
+	//triangles near the camera that Mesa draws (their corners far off screen).
+	float guard = static_cast<float>(g_gpuWorldGuard) / 100.0f;
+	const float* gm = m_worldMatrix + slot * 16;
+	float guardScaleX = 0, guardScaleY = 0, guardOffsetX = 0, guardOffsetY = 0;
+	if(guard > 0)
+	{
+		auto offset = make_convertible<XYOFFSET>(m_nReg[GS_REG_XYOFFSET_1 + m_primitiveMode.nContext]);
+		guardScaleX = 2.0f / static_cast<float>(m_currentTarget->width);
+		guardScaleY = 2.0f / static_cast<float>(m_currentTarget->height);
+		guardOffsetX = 0.5f - offset.nOffsetX / 16.0f;
+		guardOffsetY = 0.5f - offset.nOffsetY / 16.0f;
+	}
+	const uint32 guardFlag = 0x100;
 	for(uint32 i = 0; i < batch.count; i++, raw += 12)
 	{
 		{
@@ -2351,6 +2367,21 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 			flags[0] = flags[1];
 			flags[1] = flags[2];
 			flags[2] = Re4Vu1::ClipFlags(k);
+			if(guard > 0)
+			{
+				//As the vertex shader: v = M p, divide, wrap at 4096, to the target's [-1, 1]
+				float vx = gm[0] * px + gm[4] * py + gm[8] * pz + gm[12];
+				float vy = gm[1] * px + gm[5] * py + gm[9] * pz + gm[13];
+				float vw = gm[3] * px + gm[7] * py + gm[11] * pz + gm[15];
+				if(vw != 0)
+				{
+					float sx = vx / vw, sy = vy / vw;
+					sx -= 4096.0f * std::floor(sx * (1.0f / 4096.0f));
+					sy -= 4096.0f * std::floor(sy * (1.0f / 4096.0f));
+					float nx = (sx + guardOffsetX) * guardScaleX - 1.0f, ny = (sy + guardOffsetY) * guardScaleY - 1.0f;
+					if((std::fabs(nx) > 1.0f + 2.0f * guard) || (std::fabs(ny) > 1.0f + 2.0f * guard)) flags[2] |= guardFlag;
+				}
+			}
 		}
 		auto& out = m_worldVertices[base + i];
 		for(int k = 0; k < 4; k++)
@@ -2361,6 +2392,7 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 		}
 		out.slot = static_cast<float>(slot);
 		bool clipped = (i >= 2) && ((flags[0] | flags[1] | flags[2]) != 0);
+		if(clipped && !((flags[0] | flags[1] | flags[2]) & ~guardFlag)) g_gpuWorldGuarded++;
 		if(clipped && (raw[7] == 0) && !(g_gpuWorldDebug & 1))
 		{
 			Re4Vu1::WORLD_VERTEX last3[3] = {Re4Vu1::ReadWorldVertex(batch, i - 2), Re4Vu1::ReadWorldVertex(batch, i - 1), Re4Vu1::ReadWorldVertex(batch, i)};
@@ -2487,10 +2519,37 @@ void CGSH_Hardware::FlushWorld()
 	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 	const GLsizei stride = sizeof(WORLD_GPU_VERTEX);
 	for(GLuint i = 0; i < 4; i++) glEnableVertexAttribArray(i);
-	glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, stride, &m_worldVertices[0].p);
-	glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride, &m_worldVertices[0].t);
-	glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, &m_worldVertices[0].c);
-	glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, &m_worldVertices[0].slot);
+	if(g_gpuWorldSoa)
+	{
+		//One array per attribute: vitaGL packs interleaved client arrays into one stream with
+		//offsets relative to the program's first attribute (16 bits, in its own order), which
+		//dropped and stretched world triangles on the Vita
+		size_t n = m_worldVertices.size();
+		m_worldSoa.resize(n * 13);
+		float* p = m_worldSoa.data();
+		float* t = p + n * 4;
+		float* c = t + n * 4;
+		float* slot = c + n * 4;
+		for(size_t i = 0; i < n; i++)
+		{
+			const auto& v = m_worldVertices[i];
+			std::memcpy(p + i * 4, v.p, 16);
+			std::memcpy(t + i * 4, v.t, 16);
+			std::memcpy(c + i * 4, v.c, 16);
+			slot[i] = v.slot;
+		}
+		glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 16, p);
+		glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 16, t);
+		glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 16, c);
+		glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, 4, slot);
+	}
+	else
+	{
+		glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, stride, &m_worldVertices[0].p);
+		glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride, &m_worldVertices[0].t);
+		glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, &m_worldVertices[0].c);
+		glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, &m_worldVertices[0].slot);
+	}
 	if(!(g_gpuWorldDebug & 4)) glEnable(GL_CULL_FACE); //debug 4: no culling
 	if(g_gpuWorldDebug & 8) glDisable(GL_DEPTH_TEST);  //debug 8: no depth test
 	glFrontFace(GL_CCW);

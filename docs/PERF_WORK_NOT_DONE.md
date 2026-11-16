@@ -54,8 +54,16 @@ cache: the first run after a new build is cold), `threaded_vu1=1` and RE4's prof
   fragment shader whose alpha test used a `bool` (SceGxm undefined instruction; found with
   the on-device shader self test, `shader_test.txt`), and vitaGL's packed attribute
   stream has 16-bit offsets (the vertex ring now draws from a base vertex).
-- Open: the GPU world's artifacts on the Vita (being narrowed down: `gpu_world_slots`
-  caps the batches per draw).
+- Open: the GPU world's artifacts on the Vita. Some near-camera ground triangles are never
+  rasterized (with `gpu_world_debug=2` the world draws red and those areas stay grey),
+  sometimes with dark streaks; the CPU path draws them right (`re4_vu1_hle=1` alone is
+  clean on the Vita, at 1.3-1.5 game fps with `vu1_async`). Ruled out on the Vita: async VU1
+  (also without it), culling (`gpu_world_debug=4`: same; 64: the ground goes), the depth
+  test (8: same), batches per draw (`gpu_world_slots=4`: worse), corners far off screen sent
+  to the CPU (`gpu_world_guard=50/200`: same), one vertex array per attribute
+  (`gpu_world_soa=1`: same), vertices clamped inside the far plane (same, plus new
+  artifacts), more than 64k vertices per draw (704 at most). The PC (Mesa) draws the same
+  batches right. `gpu_world` stays off by default.
 
 P1 as built: `CVif1::ReceiveDMA` copies the DMA data into a queue and returns at once (small
 chunks without a tag are merged, buffers are reused). The VU1 worker runs `ProcessPacket` on it
