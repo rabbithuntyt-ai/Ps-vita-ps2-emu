@@ -87,7 +87,8 @@ ends with `battery_pct,charging,battery_temp_c,arm_mhz,core3`.
 | GPU world, one batch per draw (Vita default) | Artifacts gone: 17 of 17 frames clean, 1.6-2.0 game fps |
 | RE4 profile: `threaded_vu1=1 vu1_async=1 re4_skip_dof=176 re4_vu1_hle=1 gpu_world=1` | With no settings passed: 1.5-2.1 game fps, frames clean. A New Game with these settings plays the intro movies and reaches the first real-time scene, where threaded VU1 used to hang on DMA channel 1 (3-4 game fps in that cutscene; checked for its first 30 s) |
 | P3 fourth core, own kernel module | 153 game frames per 120 s against 150 without core 3: small, near noise. The SPU2 mixer is slower on core 3 (143), so it stays on core 2 |
-| IOP thread on core 3 in movies (`iop_thread=1 iop_core=3`) | Running; see below when done |
+| IOP thread on core 3 (`iop_thread=1 iop_core=3`) | Movies: RE4's prologue movie, 120-240 s of a New Game, alternating runs: 14.71 and 14.90 pictures/s with the IOP inline, 15.34 and 15.34 on core 3 (+4%; game frames 1833/1829 against 1922/1926). Gameplay: 134 game frames per 120 s against 152-153 (-12%). Stays off: the movies gain less than gameplay loses, and both are far from their targets. A per-scene switch (IOP thread only while a movie plays) could take the movie gain alone |
+
 | G4 palette textures | Not built: texture decoding is 2 ms/s of the GPU thread (see the G4 row) |
 
 Where the GPU thread's time goes in RE4 gameplay (it is the bottleneck: busy about 95% of the
