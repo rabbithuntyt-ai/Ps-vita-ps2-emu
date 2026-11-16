@@ -85,6 +85,13 @@ target_link_libraries(vitaps2
 
 # UNSAFE: the recompiler needs sceKernelAllocMemBlockForVM.
 vita_create_self(eboot.bin vitaps2 UNSAFE)
+
+# Kernel module the app loads at start to use core 3 (src/vita/core3/core3.c, Cores.h)
+add_executable(vitaps2_core3 src/vita/core3/core3.c)
+target_compile_definitions(vitaps2_core3 PRIVATE __VITA_KERNEL__)
+target_link_libraries(vitaps2_core3 taihenForKernel_stub taihenModuleUtils_stub SceIofilemgrForDriver_stub gcc)
+set_target_properties(vitaps2_core3 PROPERTIES LINK_FLAGS "-nostdlib")
+vita_create_self(vitaps2_core3.skprx vitaps2_core3 CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/src/vita/core3/core3.yml)
 vita_create_vpk(${VITA_APP_NAME}.vpk ${VITA_TITLEID} eboot.bin
 	VERSION ${VITA_VERSION}
 	NAME ${VITA_APP_TITLE}
@@ -95,6 +102,7 @@ vita_create_vpk(${VITA_APP_NAME}.vpk ${VITA_TITLEID} eboot.bin
 	FILE ${PLAY_DIR}/GameConfig.xml GameConfig.xml
 	FILE assets/gs_test.elf gs_test.elf
 	FILE assets/game_profiles.ini game_profiles.ini
+	FILE ${CMAKE_CURRENT_BINARY_DIR}/vitaps2_core3.skprx vitaps2_core3.skprx
 	FILE assets/brand/wordmark.a8 brand/wordmark.a8
 	FILE assets/brand/digit.a8 brand/digit.a8
 	FILE assets/brand/glow.a8 brand/glow.a8

@@ -264,9 +264,9 @@ namespace
 		bool iopThread = false; //the IOP on its own thread, beside the EE (ParallelIop.h)
 		uint32_t iopCore = 1;   //its core
 		uint32_t iopPriority = 100; //above the UI/GPU thread (default priority) on its core
-		uint32_t spuCore = 3;       //core of the SPU2 mixer (3: core 2 without a core 3 plugin, Cores.h)
+		uint32_t spuCore = 2;       //core of the SPU2 mixer (core 3 measured slower: 143 game frames against 152, 16 Nov)
 		uint32_t spuPriority = 160; //its priority (above the decoder)
-		uint32_t mpegCopyCore = 3;  //core of the movie copy thread (movie_async_copy; 3 as spuCore)
+		uint32_t mpegCopyCore = 2;  //core of the movie copy thread (movie_async_copy; 3: core 3 when available, Cores.h)
 		uint32_t mpegCopyPriority = 191; //its priority (the lowest)
 		bool eeStayInSlice = true; //EE kernel calls handled without leaving the time slice
 		bool threadedSpu = true; //SPU2 audio mixing on the second core
