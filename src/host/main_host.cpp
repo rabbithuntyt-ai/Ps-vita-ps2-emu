@@ -269,12 +269,12 @@ int main(int argc, char** argv)
 		}
 		else if(!std::strcmp(argv[i], "--vu1-verify")) CVpu::g_programHook = Vu1Verify::Hook; //vu1verify.txt
 		else if(!std::strcmp(argv[i], "--vu1-hle")) Re4Vu1Hle::Enable(true); //RE4 world program without VU1
-		else if(!std::strcmp(argv[i], "--re4-skip-dof") && (i + 1 < argc)) CGSH_Hardware::g_re4SkipDof = std::strtoul(argv[++i], nullptr, 0);
 		else if(!std::strcmp(argv[i], "--vu-scalar-opmul")) VUShared::g_vectorOuterProduct = false; //old OPMULA/OPMSUB
-		else if(!std::strcmp(argv[i], "--gs-shaders")) CGSH_Hardware::g_shaderBatches = true; //batch program (gs_shaders)
 		else if(!std::strcmp(argv[i], "--vu1-async")) CVpu::g_asyncVif1 = true;               //VIF1 work on the VU1 thread (with --mtvu)
 		else if(!std::strcmp(argv[i], "--vu1-async-no-p3sync")) CVpu::g_asyncPath3Sync = false; //PATH3 does not wait for queued VIF1 work
 #ifdef VITAPS2_HAS_GL
+		else if(!std::strcmp(argv[i], "--re4-skip-dof") && (i + 1 < argc)) CGSH_Hardware::g_re4SkipDof = std::strtoul(argv[++i], nullptr, 0);
+		else if(!std::strcmp(argv[i], "--gs-shaders")) CGSH_Hardware::g_shaderBatches = true; //batch program (gs_shaders)
 		else if(!std::strcmp(argv[i], "--gpu-world-debug") && (i + 1 < argc)) CGSH_Hardware::g_gpuWorldDebug = std::atoi(argv[++i]);
 		else if(!std::strcmp(argv[i], "--no-gpu-world")) CGSH_Hardware::g_gpuWorld = false;
 		else if(!std::strcmp(argv[i], "--gpu-world")) CGSH_Hardware::g_gpuWorld = true;
@@ -583,6 +583,7 @@ int main(int argc, char** argv)
 			std::printf("game frames (GPU renderer): %u, primitives drawn: %u\n", CGSH_Hardware::g_gameFrames,
 			            static_cast<CGSH_Hardware*>(session.GetVm()->GetGSHandler())->GetPrimitiveCount());
 #endif
+#ifdef VITAPS2_HAS_GL
 		if(CGSH_Hardware::g_shaderBatches)
 			std::printf("batch program: %llu draws from the vertex ring (%.1f MB), %llu from client memory (ring full)\n", (unsigned long long)CGSH_Hardware::g_ringDraws,
 			            CGSH_Hardware::g_ringBytes / 1048576.0, (unsigned long long)CGSH_Hardware::g_ringOverflows);
@@ -600,15 +601,18 @@ int main(int argc, char** argv)
 			std::printf("\n");
 		}
 		if(CGSH_Hardware::g_re4SkipDof) std::printf("draws skipped (re4_skip_dof): %llu\n", (unsigned long long)CGSH_Hardware::g_skippedDraws);
+#endif
 		if(CVpu::g_asyncVif1)
 		{
 			auto& a = CVpu::g_asyncStats;
 			std::printf("async VIF1: %llu packets, %.1f MB, %llu stalls, %llu quiet waits (%.0f ms), %llu PATH3 syncs\n", (unsigned long long)a.packets.load(),
 			            a.bytes.load() / 1048576.0, (unsigned long long)a.stalls.load(), (unsigned long long)a.quietWaits.load(), a.quietWaitUs.load() / 1000.0, (unsigned long long)a.path3Syncs.load());
 		}
+#ifdef VITAPS2_HAS_GL
 		if(Re4Vu1Hle::IsEnabled())
 			std::printf("world batches on the CPU: %llu (%llu vertices, %llu clipped triangles), on the GPU: %llu batches %llu draws %llu fallbacks\n", (unsigned long long)CGSH_Primitives::g_worldBatches,
 			            (unsigned long long)CGSH_Primitives::g_worldVertices, (unsigned long long)CGSH_Primitives::g_worldClipped, (unsigned long long)CGSH_Hardware::g_gpuWorldBatches, (unsigned long long)CGSH_Hardware::g_gpuWorldDraws, (unsigned long long)CGSH_Hardware::g_gpuWorldFallbacks);
+#endif
 
 		if(width == 0)
 		{
