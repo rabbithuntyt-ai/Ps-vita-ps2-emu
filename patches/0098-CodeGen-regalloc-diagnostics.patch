@@ -438,3 +438,62 @@ diff --git a/src/Jitter_CodeGen_AArch32_Md.cpp b/src/Jitter_CodeGen_AArch32_Md.c
  		return g_registersMd[symbol->m_valueLow];
  	case SYM_RELATIVE128:
  	case SYM_TEMPORARY128:
+@@ -253,7 +253,9 @@
+ 	auto dst = statement.dst->GetSymbol().get();
+ 	auto src1 = statement.src1->GetSymbol().get();
+ 
+-	auto src1Reg = PrepareSymbolRegisterUseMd(src1, CAArch32Assembler::q0);
++	//A load into an allocated register goes straight into it (not through q0 and a vorr)
++	auto dstReg = PrepareSymbolRegisterDefMd(dst, CAArch32Assembler::q0);
++	auto src1Reg = PrepareSymbolRegisterUseMd(src1, dstReg);
+ 	CommitSymbolRegisterMd(dst, src1Reg);
+ }
+ 
+@@ -613,11 +615,11 @@
+ 	auto flagsReg = CAArch32Assembler::q1;
+ 	auto zeroReg = CAArch32Assembler::q2;
+ 
++	//Only bit 31 (sign) and bit 0 (zero) of the accumulator matter (MakeSzAcc): the value
++	//with its bit 0 replaced by the zero test (VSRI) instead of building both bits
+ 	m_assembler.Vceqz_F32(zeroReg, valueReg);
+-	m_assembler.Vshr_U32(zeroReg, zeroReg, 31);
+-	m_assembler.Vshr_U32(flagsReg, valueReg, 31);
+-	m_assembler.Vshl_I32(flagsReg, flagsReg, 31);
+-	m_assembler.Vorr(flagsReg, flagsReg, zeroReg);
++	MoveMdRegister(flagsReg, valueReg);
++	m_assembler.Vsri_32(flagsReg, zeroReg, 31);
+ 	if(dest != 0xF)
+ 	{
+ 		auto maskReg = CAArch32Assembler::q3;
+diff --git a/include/AArch32Assembler.h b/include/AArch32Assembler.h
+--- a/include/AArch32Assembler.h
++++ b/include/AArch32Assembler.h
+@@ -322,6 +322,8 @@
+ 	void Vshl_I32(QUAD_REGISTER, QUAD_REGISTER, uint8);
+ 	void Vshr_U16(QUAD_REGISTER, QUAD_REGISTER, uint8);
+ 	void Vshr_U32(QUAD_REGISTER, QUAD_REGISTER, uint8);
++	//VSRI.32: shift right and insert (the destination keeps its top 'shift' bits)
++	void Vsri_32(QUAD_REGISTER, QUAD_REGISTER, uint8);
+ 	void Vshr_I16(QUAD_REGISTER, QUAD_REGISTER, uint8);
+ 	void Vshr_I32(QUAD_REGISTER, QUAD_REGISTER, uint8);
+ 	void Vabs_F32(SINGLE_REGISTER, SINGLE_REGISTER);
+diff --git a/src/AArch32Assembler.cpp b/src/AArch32Assembler.cpp
+--- a/src/AArch32Assembler.cpp
++++ b/src/AArch32Assembler.cpp
+@@ -1290,6 +1290,16 @@
+ 	WriteWord(opcode);
+ }
+ 
++void CAArch32Assembler::Vsri_32(QUAD_REGISTER qd, QUAD_REGISTER qm, uint8 shiftAmount)
++{
++	//VSHR.U32's encoding with bits 11-8 = 0100
++	uint32 opcode = 0xF3800450;
++	opcode |= (0x40 - (shiftAmount & 0x1F)) << 16;
++	opcode |= FPSIMD_EncodeQd(qd);
++	opcode |= FPSIMD_EncodeQm(qm);
++	WriteWord(opcode);
++}
++
+ void CAArch32Assembler::Vshr_I16(QUAD_REGISTER qd, QUAD_REGISTER qm, uint8 shiftAmount)
+ {
+ 	uint32 opcode = 0xF2800050;
