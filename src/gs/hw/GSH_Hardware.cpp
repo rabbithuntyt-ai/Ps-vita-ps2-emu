@@ -2297,7 +2297,7 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 	}
 	// Triangles of this state waiting in m_batch (clipped ones) are drawn with the world draw
 	// (FlushBatch draws both): same state, so their order does not matter.
-	if(m_worldSlots == WORLD_SLOTS) FlushWorld();
+	if(m_worldSlots >= std::min<uint32>(std::max<uint32>(g_gpuWorldSlots, 1), WORLD_SLOTS)) FlushWorld();
 	g_gpuWorldBatches++;
 	uint32 slot = m_worldSlots++;
 	// Constants: the matrix with the position scale folded in, colour offset and scale

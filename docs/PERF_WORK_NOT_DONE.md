@@ -30,6 +30,33 @@ the GS thread) moves work onto the GS thread, which is the Vita's wall in gamepl
 P3, C1, T2/T3 and B6 are Vita-only. Each of P1, R1 and V1 is off by default until it has run
 on the Vita: `vu1_async=1 re4_skip_dof=176 re4_vu1_hle=1 gpu_world=1` (with `threaded_vu1=1`).
 
+### First Vita results (2026-11-16)
+
+RE4 gameplay from `state_b2` with the scripted walk (`runs/re4/gp.sh`, 150 s runs, warm JIT
+cache: the first run after a new build is cold), `threaded_vu1=1` and RE4's profile
+(`vu_no_clamp=1` now):
+
+| Settings added | Game frames / ~125 s | Steady game fps | Pictures |
+|---|---|---|---|
+| none (build of 15 Nov) | 41 (cold start) | 0.6-0.8 | right |
+| `vu1_async=1` | 115 | 1.0-1.4 | right |
+| `re4_skip_dof=176` | 130 | 1.0-1.3 | right, depth blur gone |
+| `re4_vu1_hle=1 gpu_world=1` | 207 | 1.8-2.0 | mostly right: in some frames a grey patch (missing leaves) or dark streaks |
+| `gs_shaders=1` (vertex ring on) | 196 | 1.6-2.0 | as above |
+| `gs_shaders=1 gs_vertex_ring=0` | 210 | 1.8-2.1 | as above |
+
+- Async VU1 nearly doubles gameplay speed on the hardware; the GPU world adds 60-70% on
+  top. Together: about 2.5x the build of 15 Nov (0.66 game fps then).
+- The depth-blur skip helps little on its own on the Vita (the PC showed -40% time).
+- `gs_shaders` and the vertex ring work but are no faster than vitaGL's fixed function
+  path on the Vita: they stay off.
+- Two Vita-only bugs found and fixed: vitaGL's GLSL translation crashed linking a
+  fragment shader whose alpha test used a `bool` (SceGxm undefined instruction; found with
+  the on-device shader self test, `shader_test.txt`), and vitaGL's packed attribute
+  stream has 16-bit offsets (the vertex ring now draws from a base vertex).
+- Open: the GPU world's artifacts on the Vita (being narrowed down: `gpu_world_slots`
+  caps the batches per draw).
+
 P1 as built: `CVif1::ReceiveDMA` copies the DMA data into a queue and returns at once (small
 chunks without a tag are merged, buffers are reused). The VU1 worker runs `ProcessPacket` on it
 and runs each program inline. DIRECT data and MSKPATH3 go into the XGKICK queue, so PATH1 and

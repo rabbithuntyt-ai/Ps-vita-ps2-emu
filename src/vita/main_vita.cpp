@@ -356,6 +356,7 @@ namespace
 		else if(key == "vu_flag_tracking") VUShared::g_flagTracking = (value != 0); //flag reads after flags of the same block: one load
 		else if(key == "gpu_world") CGSH_Hardware::g_gpuWorld = value != 0;
 		else if(key == "gs_shaders") CGSH_Hardware::g_shaderBatches = value != 0; //batches through one GLSL program
+		else if(key == "gpu_world_slots") CGSH_Hardware::g_gpuWorldSlots = value; //batches per world draw (16)
 		else if(key == "gs_vertex_ring") CGSH_Hardware::g_vertexRing = value != 0; //with gs_shaders: vertices in GPU buffers (on)
 		else if(key == "re4_skip_dof") CGSH_Hardware::g_re4SkipDof = value; //RE4: draws left out after the depth blur starts (176)
 		else if(key == "vu_no_clamp") { if(value) CVuBasicBlock::g_extraCompileHints |= VUShared::COMPILEHINT_NO_CLAMPING; else CVuBasicBlock::g_extraCompileHints &= ~VUShared::COMPILEHINT_NO_CLAMPING; }

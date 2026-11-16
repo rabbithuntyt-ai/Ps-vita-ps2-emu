@@ -237,6 +237,7 @@ public:
 	static inline bool g_gpuWorld = false; //right on the PC, not yet run on the Vita (docs/RE4_GAMEPLAY.md)
 	static inline uint64 g_gpuWorldBatches = 0, g_gpuWorldDraws = 0, g_gpuWorldFallbacks = 0;
 	static inline uint32 g_gpuWorldDebug = 0; //1: triangles near the clip volume left out
+	static inline uint32 g_gpuWorldSlots = 16; //batches per world draw, at most WORLD_SLOTS (gpu_world_slots)
 	static inline uint32 g_depthForceLoadTargets = 0, g_depthForceLoadFailures = 0;
 	// Pictures the game finished: flips showing another target, or one drawn into since
 	// the previous flip (vblanks with the same picture don't count). perf.csv game_fps.
