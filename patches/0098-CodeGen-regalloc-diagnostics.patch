@@ -153,7 +153,15 @@ diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
  	//Statements inserted before the statement at a given index (spills first, then loads,
  	//since a register can be handed over from one symbol to another at the same point)
  	InsertionMap spillStatements;
-@@ -281,6 +424,8 @@
+@@ -220,6 +363,7 @@
+ 
+ 	unsigned int gprCount = m_codeGen->GetAvailableRegisterCount();
+ 	unsigned int mdCount = m_codeGen->GetAvailableMdRegisterCount();
++	unsigned int fpCount = std::min(mdCount, m_codeGen->GetAvailableFp32RegisterCount());
+ 
+ 	auto getInterval =
+ 	    [&](const SymbolPtr&, const SYMBOL_REGALLOCINFO& symbolRegAlloc) {
+@@ -281,6 +425,8 @@
  		if(!isRegisterAllocatable(symbol->m_type)) continue;
  		if(symbolRegAlloc.aliased) continue;
  		if(m_codeGen->IsSymbolPinned(symbol.get())) continue;
@@ -162,7 +170,7 @@ diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
  		sortedSymbols.push_back(&symbolRegAllocPair);
  	}
  	sortedSymbols.sort(
-@@ -306,11 +451,23 @@
+@@ -306,11 +452,23 @@
  		    }
  	    });
  
@@ -186,7 +194,15 @@ diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
  		//Find suitable register for this symbol
  		auto poolType = SYM_REGISTER;
  		auto registerSymbolType = SYM_REGISTER;
-@@ -338,7 +495,26 @@
+@@ -332,13 +490,33 @@
+ 			poolType = SYM_REGISTER128;
+ 			registerSymbolType = SYM_REGISTER128;
+ 		}
+-		int registerId = tryTakeRegister(poolType, (poolType == SYM_REGISTER) ? gprCount : mdCount,
++		bool isFp32 = (symbol->m_type == SYM_FP_RELATIVE32) || (symbol->m_type == SYM_FP_TEMPORARY32);
++		int registerId = tryTakeRegister(poolType, (poolType == SYM_REGISTER) ? gprCount : (isFp32 ? fpCount : mdCount),
+ 		                                 getInterval(symbol, symbolRegAlloc));
+ 		if(registerId != -1)
  		{
  			symbolRegAlloc.registerType = registerSymbolType;
  			symbolRegAlloc.registerId = registerId;
@@ -213,7 +229,7 @@ diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
  	}
  }
  
-@@ -457,6 +633,9 @@
+@@ -457,6 +635,9 @@
  				    if(symbol->Equals(testedSymbol.get())) return;
  				    if(symbol->Aliases(testedSymbol.get()))
  				    {
@@ -226,10 +242,21 @@ diff --git a/src/Jitter_RegAlloc.cpp b/src/Jitter_RegAlloc.cpp
 diff --git a/include/Jitter.h b/include/Jitter.h
 --- a/include/Jitter.h
 +++ b/include/Jitter.h
-@@ -403,6 +403,18 @@
+@@ -403,6 +403,29 @@
  		void PruneSymbols(BASIC_BLOCK&) const;
  
  		void AllocateRegisters(BASIC_BLOCK&);
++		bool m_clampRegistersFree = false;
++
++	public:
++		//The caller guarantees that no function of the chain clamps (VU code without clamping):
++		//a function without clamp operations may use the clamp mask registers
++		void SetClampRegistersFree(bool free)
++		{
++			m_clampRegistersFree = free;
++		}
++
++	private:
 +		//Live range splitting (g_splitGap != 0): a 128-bit context symbol accessed in separate
 +		//clusters gets a temporary per cluster, loaded and stored around it
 +		void SplitLiveRanges(BASIC_BLOCK&);
@@ -245,3 +272,169 @@ diff --git a/include/Jitter.h b/include/Jitter.h
  		static AllocationRangeArray ComputeAllocationRanges(const BASIC_BLOCK&);
  		void ComputeLivenessForRange(const BASIC_BLOCK&, const AllocationRange&, SymbolRegAllocInfo&) const;
  		//Live intervals (statement indices) held by each register (pool type, index)
+diff --git a/src/Jitter.cpp b/src/Jitter.cpp
+--- a/src/Jitter.cpp
++++ b/src/Jitter.cpp
+@@ -32,6 +32,7 @@
+ 	m_blockStarted = true;
+ 	m_nextTemporary = 1;
+ 	m_nextBlockId = 1;
++	m_clampRegistersFree = false;
+ 	m_basicBlocks.clear();
+ 
+ 	StartBlock(m_nextBlockId++);
+diff --git a/src/Jitter_Optimize.cpp b/src/Jitter_Optimize.cpp
+--- a/src/Jitter_Optimize.cpp
++++ b/src/Jitter_Optimize.cpp
+@@ -202,6 +202,20 @@
+ 
+ 	unsigned int stackSize = 0;
+ 
++	//Extra vector registers: the clamp mask registers when nothing in the chain clamps
++	{
++		static const bool disabled = (getenv("JITTER_NO_EXTRA_MD") != nullptr);
++		bool clamps = false;
++		for(const auto& basicBlock : m_basicBlocks)
++		{
++			for(const auto& statement : basicBlock.statements)
++			{
++				if((statement.op == OP_MD_CLAMP_S) || (statement.op == OP_FP_CLAMP_S)) clamps = true;
++			}
++		}
++		m_codeGen->SetExtraMdRegisters((m_clampRegistersFree && !clamps && !disabled) ? 2 : 0);
++	}
++
+ 	//Allocate registers
+ 	for(auto& basicBlock : m_basicBlocks)
+ 	{
+diff --git a/include/Jitter_CodeGen.h b/include/Jitter_CodeGen.h
+--- a/include/Jitter_CodeGen.h
++++ b/include/Jitter_CodeGen.h
+@@ -29,6 +29,16 @@
+ 		virtual void GenerateCode(const StatementList&, unsigned int) = 0;
+ 		virtual unsigned int GetAvailableRegisterCount() const = 0;
+ 		virtual unsigned int GetAvailableMdRegisterCount() const = 0;
++		//Scalar float values allocated in the vector pool: at most this many ids
++		virtual unsigned int GetAvailableFp32RegisterCount() const
++		{
++			return GetAvailableMdRegisterCount();
++		}
++		//Vector registers the function may also use (the clamp mask registers of a function
++		//that does not clamp, when no function of its chain does): set before allocation
++		virtual void SetExtraMdRegisters(unsigned int)
++		{
++		}
+ 		//Whether single precision values may be allocated to MD registers.
+ 		//Symbols the code generator keeps in a register of its own (never allocated).
+ 		virtual bool IsSymbolPinned(const CSymbol*) const
+diff --git a/include/Jitter_CodeGen_AArch32.h b/include/Jitter_CodeGen_AArch32.h
+--- a/include/Jitter_CodeGen_AArch32.h
++++ b/include/Jitter_CodeGen_AArch32.h
+@@ -81,6 +81,8 @@
+ 		void RegisterExternalSymbols(CObjectFile*) const override;
+ 		unsigned int GetAvailableRegisterCount() const override;
+ 		unsigned int GetAvailableMdRegisterCount() const override;
++		unsigned int GetAvailableFp32RegisterCount() const override;
++		void SetExtraMdRegisters(unsigned int) override;
+ 		bool CanAllocateFpInMdRegisters() const override;
+ 		bool CanHold128BitsReturnValueInRegisters() const override;
+ 		bool Has128BitsCallOperands() const override;
+@@ -875,7 +877,8 @@
+ 		static CONSTMATCHER g_fpuConstMatchers[];
+ 		static CONSTMATCHER g_mdConstMatchers[];
+ 		static CAArch32Assembler::REGISTER g_registers[MAX_REGISTERS];
+-		static CAArch32Assembler::QUAD_REGISTER g_registersMd[MAX_MDREGISTERS];
++		//q8-q15, then q6/q7 (the clamp masks' registers, for functions that may use them)
++		static CAArch32Assembler::QUAD_REGISTER g_registersMd[MAX_MDREGISTERS + 2];
+ 		//Single precision values allocated from the MD register pool (same ids)
+ 		static CAArch32Assembler::SINGLE_REGISTER g_registersFp32[MAX_MDREGISTERS];
+ 		static CAArch32Assembler::REGISTER g_md128AddressRegister;
+@@ -912,6 +915,7 @@
+ 		uint32 m_param128SpillBase = 0;
+ 		bool m_saveFpRegisters = false; //d8-d15 (callee saved): allocated FP32 values (d8-d11), clamp masks (d12-d15)
+ 		bool m_usesClampConstants = false;
++		unsigned int m_extraMdRegisters = 0;
+ 		//Range of MD registers (caller saved) used by the function, saved around guest memory handler calls
+ 		int m_mdRegisterFirst = -1;
+ 		int m_mdRegisterLast = -1;
+diff --git a/src/Jitter_CodeGen_AArch32.cpp b/src/Jitter_CodeGen_AArch32.cpp
+--- a/src/Jitter_CodeGen_AArch32.cpp
++++ b/src/Jitter_CodeGen_AArch32.cpp
+@@ -42,7 +42,7 @@
+ //q8-q15 (d16-d31) do not alias the single precision registers used by FPU
+ //code. They are caller saved, which is fine: the register allocator never
+ //keeps values in registers across calls.
+-CAArch32Assembler::QUAD_REGISTER CCodeGen_AArch32::g_registersMd[MAX_MDREGISTERS] =
++CAArch32Assembler::QUAD_REGISTER CCodeGen_AArch32::g_registersMd[MAX_MDREGISTERS + 2] =
+ {
+ 	CAArch32Assembler::q8,
+ 	CAArch32Assembler::q9,
+@@ -52,6 +52,8 @@
+ 	CAArch32Assembler::q13,
+ 	CAArch32Assembler::q14,
+ 	CAArch32Assembler::q15,
++	CAArch32Assembler::q6,
++	CAArch32Assembler::q7,
+ };
+ 
+ CAArch32Assembler::REGISTER CCodeGen_AArch32::g_md128AddressRegister = CAArch32Assembler::r12;
+@@ -552,9 +554,20 @@
+ 
+ unsigned int CCodeGen_AArch32::GetAvailableMdRegisterCount() const
+ {
++	return g_conservativeAllocation ? 0 : (MAX_MDREGISTERS + m_extraMdRegisters);
++}
++
++unsigned int CCodeGen_AArch32::GetAvailableFp32RegisterCount() const
++{
++	//s16-s23 only
+ 	return g_conservativeAllocation ? 0 : MAX_MDREGISTERS;
+ }
+ 
++void CCodeGen_AArch32::SetExtraMdRegisters(unsigned int count)
++{
++	m_extraMdRegisters = std::min<unsigned int>(count, 2);
++}
++
+ bool CCodeGen_AArch32::CanAllocateFpInMdRegisters() const
+ {
+ 	//Allocated FP32 values live in s16-s23, MD values in q8-q15: the same
+@@ -642,6 +655,8 @@
+ 		}
+ 	}
+ 	if(m_usesClampConstants) m_saveFpRegisters = true;
++	//q6/q7 are d12-d15: callee saved
++	if(m_extraMdRegisters != 0) m_saveFpRegisters = true;
+ 	if(m_chained) m_saveFpRegisters = true;
+ 
+ 	m_mdRegisterFirst = -1;
+@@ -653,6 +668,8 @@
+ 			    auto symbol = symbolRef->GetSymbol();
+ 			    if(symbol->m_type != SYM_REGISTER128) return;
+ 			    int index = symbol->m_valueLow;
++			    //Only q8-q15 are caller saved (ids 8 and 9 are q6/q7: callee saved)
++			    if(index >= MAX_MDREGISTERS) return;
+ 			    if((m_mdRegisterFirst == -1) || (index < m_mdRegisterFirst)) m_mdRegisterFirst = index;
+ 			    if((m_mdRegisterLast == -1) || (index > m_mdRegisterLast)) m_mdRegisterLast = index;
+ 		    });
+diff --git a/src/Jitter_CodeGen_AArch32_Md.cpp b/src/Jitter_CodeGen_AArch32_Md.cpp
+--- a/src/Jitter_CodeGen_AArch32_Md.cpp
++++ b/src/Jitter_CodeGen_AArch32_Md.cpp
+@@ -141,7 +141,7 @@
+ 	switch(symbol->m_type)
+ 	{
+ 	case SYM_REGISTER128:
+-		assert(symbol->m_valueLow < MAX_MDREGISTERS);
++		assert(symbol->m_valueLow < MAX_MDREGISTERS + 2);
+ 		return g_registersMd[symbol->m_valueLow];
+ 	case SYM_RELATIVE128:
+ 	case SYM_TEMPORARY128:
+@@ -157,7 +157,7 @@
+ 	switch(symbol->m_type)
+ 	{
+ 	case SYM_REGISTER128:
+-		assert(symbol->m_valueLow < MAX_MDREGISTERS);
++		assert(symbol->m_valueLow < MAX_MDREGISTERS + 2);
+ 		return g_registersMd[symbol->m_valueLow];
+ 	case SYM_RELATIVE128:
+ 	case SYM_TEMPORARY128:

@@ -262,6 +262,10 @@ else()
 	endif()
 	add_subdirectory(${PLAY_DIR}/tools/VuTest ${CMAKE_CURRENT_BINARY_DIR}/VuTest)
 	target_include_directories(VuTest PRIVATE ${PLAY_DIR}/Source/app_shared)
+	# Without clamping (vu_no_clamp, RE4's profile): on ARM the clamp mask registers q6/q7
+	# are then allocated like q8-q15
+	add_test(NAME VuTest_noclamp COMMAND VuTest)
+	set_tests_properties(VuTest_noclamp PROPERTIES ENVIRONMENT VITAPS2_VU_NO_CLAMP=1)
 	if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
 		# The "Safe JIT" mode (no NEON/VFP register allocation) must stay correct.
 		if(TARGET CodeGenTestSuite)
