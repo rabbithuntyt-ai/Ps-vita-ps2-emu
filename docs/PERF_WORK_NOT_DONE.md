@@ -2,6 +2,8 @@
 
 _Written by Fable 5.2 on 2026-11-15 from the repository at f7ed38d. The original PDF is next to this file ([VitaStation2_performance_work_not_yet_done.pdf](VitaStation2_performance_work_not_yet_done.pdf)); this is its text, with the layout kept._
 
+**Read first: [PATH_TO_30FPS.md](PATH_TO_30FPS.md)** (Fable 5.2, 2026-11-16). It reviews the results below and gives the plan to a locked 30: the budget per thread, the gates to measure first, and the work packages in order.
+
 ## Progress (updated as items land)
 
 The "PC result" column is from the PC runner (RE4 gameplay state `state_b2`, 900 vblanks,
