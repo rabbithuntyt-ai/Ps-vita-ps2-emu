@@ -28,6 +28,7 @@ state on the Vita: RE4 gameplay 1.5-2.1 game fps with RE4's profile alone (was 0
 | V2 stage: 10 NEON registers without clamping (patch 0098) | Done; untested on ARM hardware (CI's ARM job runs the new `VuTest_noclamp`) | automatic with `vu_no_clamp=1` (`JITTER_NO_EXTRA_MD=1` turns it off) | With clamping off no VU block uses the clamp masks, so q6/q7 join q8-q15 as allocatable vector registers (callee saved; scalar floats stay limited to s16-s23). RE4's loop copy: 1,128 -> 1,080 ARM instructions (-4%). All of V2 so far on this loop: 1,436 -> 1,080 per iteration (-25%) |
 | V2 stage: ARM vector code generation (patch 0098) | Done; untested on ARM hardware | always on | A 128-bit load into an allocated register goes straight into it (it went through q0 and a `vorr`): 1,080 -> 1,057. Sticky flag accumulation: the value with its bit 0 replaced by the zero test (`VSRI`, new in the assembler) instead of building both bits: 6 -> 3 NEON instructions per FMAC result, 1,057 -> 1,019. RE4's loop copy, all of V2 so far: 1,436 -> 1,019 ARM instructions per iteration (-29%). Not changed: MINI/MAX (the PS2 compares the bits as integers: +0 equals -0 and the exact bits are kept, so NEON's float min/max would differ) |
 | CI | ARM build fixed (457b56a) | — | main_host.cpp used GL renderer classes outside `VITAPS2_HAS_GL`; the ARM Linux CI job failed at Build since 15 Nov (and the world-batch line since the gameplay merge) |
+| E3 native overlays (PATH_TO_30FPS.md) | Mechanism, harness and 7 library overlays done (patch 0110, 17 Nov); off by default: no measurable gain on the Vita | `ee_overlays`, `ov_off`, `ov_stub` (PC: `--overlays`, `--overlay-verify`) | 17,780 calls checked against the recompiler in the RE4 walk, 0 differences; pictures identical. See "E3 native overlays" below |
 | T1 CI patches | Done: 0093 cut to the hunks no earlier patch has; `--ignore-whitespace` in `cmake/ApplyPatches.cmake` | — | All 97 patches apply to clean submodule copies (`runs/re4/cichk.sh`); CI logs not checked |
 
 Not done yet, and why: C2 (COP2 flags) needs the EE profile in gameplay first, which the PC
@@ -188,6 +189,136 @@ writes, VU1 memory access, VIF1 read-backs, save states and vblank wait until th
 quiet (queue empty, or VIF1 stalled on an interrupt or a stopped program). A GIF DMA (PATH3)
 waits for the queue first (`vu1_async_path3_sync`, on). Gameplay sends about 2.7 million
 packets and 1.2 GB per 900 vblanks (3 MB per game frame) through the queue.
+
+### E3 native overlays, and the rest of G2 (2026-11-17, branch `claude/ee-overlays-6f84d4`)
+
+Patch 0110 and `src/common/EeOverlays.*`. Settings: `ee_overlays=1` (off by default),
+`ov_off=names`, `ov_stub=names`; PC runner `--overlays`, `--overlay-off`, `--overlay-stub`,
+`--overlay-verify`, `--overlay-selftest`. perf.csv column `ov_taken`, log `overlays.txt`.
+
+**G2, finished.**
+
+- The "`sceTimerInit`" hot spot (6.1% of EE samples in G0, 7.3% in OV3hotoff) is real work, not a
+  wait loop: libtimer's TIMER1 interrupt handler, an unnamed function at 0x2AA5C8 right after
+  `sceTimerInit`. RE4 calls `sceTimerInit(0)` (at 0x298E5C), so Timer 1 counts the full bus clock
+  with overflow and compare interrupts on: about 2,250 interrupts per emulated second plus
+  alarms. On the Vita that is about 150 interrupts per real second for about 6-7% of EE samples,
+  so each costs on the order of 100 µs (kernel entry and exit, timer register reads, alarm
+  list). Not addressed here. An HLE of the handler, or fewer overflow interrupts, would need
+  its own check of what the game's alarms do.
+- VU0 (COP2 macro) code: 11.8% of EE samples are in blocks with COP2 instructions; COP2 is about
+  6% of the sampled instruction mix, flag-setting VU0 arithmetic about 3.6%. C2 (flags only where
+  read) has at most a few percent of EE time to win.
+- **The larger G2 finding is the emulation thread's split.** EE game code is a small part of that
+  thread on the Vita. Profiler sections, share of the thread's samples:
+
+| Run | EE (game code) | VIF + VIFunpack + VIFdirect | VU1 | GS wait | vm fps |
+|---|---|---|---|---|---|
+| G0, normal | 10.4% | 22.4% | 6.3% | 49.9% | 4.0 |
+| OV3off_a/b, ceiling (`gs_ceiling=1`) | 17.4-18.3% | 51.2-51.7% | 16.4% | ~0 | 7.6-8.0 |
+
+  At the ceiling (3.2 game fps) EE game code is about 18% of 312 ms, about 56 ms per game frame,
+  not the 100-250 ms PATH_TO_30FPS.md estimated. The VIF sections (relaying VIF1/VU1 output, E1)
+  take nearly three times as much. E1, not E3, is the emulation thread's big lever.
+
+**The mechanism.**
+
+- Patch 0110 (Play): `EeOverlay::g_lookup` is asked before a block is partitioned. The block at an
+  overlay's entry calls the native function first. When it took the call (it returns the EE
+  cycles), the block leaves to `ra` through the indirect dispatch; when it declines, the block's
+  own code (the original function) runs.
+- Overlay starts are kept out of tier 2, never shared through the content cache, and their code
+  is write-protected with the block.
+- The second entry kind, a syscall stub over the function's first four words (`addiu v1, zero,
+  0xA0E; syscall; jr ra; nop`), is patched at vblank for the overlays named in `ov_stub` that
+  never decline, checked against the function's code first.
+- Overlays are keyed by the function's code: every word must match, with address immediates
+  masked and read from the code. The library ones therefore serve any game that links the same
+  code.
+
+**The harness** (PC runner, `--overlay-verify`):
+
+- At sampled entries the recompiled original runs with `ra` pointing at a return block in the BIOS
+  area, whose hook then does the check.
+- The original's result is put aside and the state before the call restored. The overlay runs,
+  and RAM, scratchpad and every register are compared (GPRs 128-bit, HI/LO, FPU, VF/VI, ACC,
+  Q/I/P/R).
+- The original's result is kept for the game, and the first differences are logged with the
+  call's inputs.
+- Not compared: the VU0 flag pipelines (MAC, sticky, clip), which overlays do not keep, and the
+  dead stack below the entry `sp`. Calls during which a time slice ended (interrupts, DMA) are
+  counted, not compared.
+- `--overlay-selftest` breaks every checked result. It reported 231 of 231, so the check sees
+  register and memory differences.
+
+**Overlays written (all games):** `PSMTXCopy`, `PSMTXConcat`, `PSMTXTranspose`, `Vu0Sinf`,
+`Vu0Cosf`, `memset`, `fptoui` (with its `__unpack_f`). Each follows the recompiler bit for bit:
+
+- FPU operands clamped as `FP_ClampS` does, in scalar floats with the host's rounding.
+- VU0 macro instructions four lanes at a time on NEON (Vita) or SSE (PC), with the same clamps.
+- Division by zero as `FpUtils`.
+- The 128-bit side effects of `qmtc2`, `pcpyh`, `lq`/`sq` and 64-bit ops, and the final value of
+  every temporary register.
+
+The file is built with `-fno-fast-math -ffp-contract=off -frounding-math`.
+
+**Verification:** RE4 gameplay walk from `state_b2`, 900 vblanks with `--overlay-verify-every 20`.
+17,780 calls checked, **0 differences**; 224 calls not compared (a slice ended inside).
+
+| Overlay | Calls / 900 vblanks | Checked | Differences |
+|---|---|---|---|
+| fptoui | 585,496 | 2,966 | 0 |
+| Vu0Sinf | 341,842 | 2,974 | 0 (flag pipelines differ, by design) |
+| Vu0Cosf | 303,787 | 2,975 | 0 (same) |
+| memset | 213,609 | 2,889 | 0 |
+| PSMTXCopy | 169,574 | 2,991 | 0 |
+| PSMTXConcat | 165,469 | 2,981 | 0 (same) |
+| PSMTXTranspose | 4 | 4 | 0 |
+
+With all overlays on, the 17 pictures of the walk are identical to the run without them. The same
+holds with six overlays entered through syscall stubs (`--overlay-stub`).
+
+**On the Vita (eboot of this branch, `runs/re4/OV1*`, `OV3*`, 120 s warm runs):**
+
+| Runs | Overlays | Game frames | Game fps | Emulation thread CPU | vm fps |
+|---|---|---|---|---|---|
+| OV1off_a/b | off | 138 / 142 | 1.60 / 1.69 | 54.3% / 53.0% | 4.32 / 4.37 |
+| OV1on_a/b | on (7,100 calls/s) | 142 / 141 | 1.70 / 1.65 | 53.4% / 54.1% | 4.26 / 4.30 |
+| OV3off_a/b, ceiling | off | — | — | 96.6% / 96.9% | 7.60 / 7.98 |
+| OV3on_a/b, ceiling | on (10,400-11,000 calls/s) | — | — | 97.0% / 97.0% | 7.54 / 7.76 |
+
+- **No measurable gain.** Without the ceiling the GPU thread is the wall (74-80% CPU), so
+  emulation-thread savings cannot show in game fps. Under the ceiling the emulation thread is the
+  wall, and vm fps is the same within noise.
+- The hot spots say why (OV3hotoff/on, `ee_hot_after=30`, summed by address range because the
+  symbol buckets around the overlay entries misattribute). The overlaid code is 9.4% of EE
+  samples without overlays and 10.5% with them. Only memset fell (1.5% to 0.5%).
+- For these short leaf functions, the native call costs about as much as the recompiled code:
+  - the call out of JIT code and the exit through the indirect dispatch instead of a linked
+    `jr ra`;
+  - most of the recompiled cost of `Vu0Sinf` or `PSMTXConcat` was probably the block
+    transitions, not the arithmetic.
+  - 10% of 18% of the emulation thread is also below what a 120 s run resolves.
+- `ee_overlays` stays off by default. Turning it on does no harm (pictures identical on the PC,
+  same speed on the Vita).
+- Warning for shared Vita use: a series run while another session ran its own `gp.sh` measured
+  that session's eboot (OV2*, discarded). `gp.sh` releases the lock between runs, so push the
+  eboot on every run (`EBOOT=` set for each) and check perf.csv for the build's own column.
+
+**Not done, and what next:**
+
+- RE4's own top functions (`partsWorldCalc__6cModel` 3.3%, `HermiteInterpolation` 3.1%, the
+  collision tests) have no overlays yet. `partsWorldCalc` is a 470-instruction loop over model
+  parts with three inlined sin/cos, unaligned `ldl`/`ldr` and a call to the rotation helper at
+  0x252848. The harness is ready for them.
+- After these results, an overlay only pays when it replaces long runs of code per call:
+  whole loops, or a caller together with its leaves. Even all of EE game code is about 56 ms per
+  game frame at the ceiling.
+- A cheaper entry for leaf overlays (the caller's `jal` compiled as a direct native call that
+  continues in the same block) would remove the per-call transitions that made the library
+  overlays break even.
+- The bigger levers for the emulation thread are E1 (the VIF sections, about 51% of it at the
+  ceiling) and the timer interrupt (6-7% of EE samples).
 
 ```text
 VitaStation2: performance work not yet done

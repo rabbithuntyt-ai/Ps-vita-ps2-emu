@@ -2,7 +2,7 @@
 
 _Written by Fable 5.2 on 2026-11-16 from the repository at `20875f2`, after reviewing [PERF_WORK_NOT_DONE.md](PERF_WORK_NOT_DONE.md). Nothing here was run on a Vita and nothing was built. Figures called "measured" are the sessions' own; everything called an estimate is mine._
 
-**Gate results (16 Nov, on the Vita; details in [PERF_WORK_NOT_DONE.md](PERF_WORK_NOT_DONE.md), "Gates G0-G3"):** G0: per game frame the GPU thread uses about 470 ms of CPU, the emulation thread about 300 ms, VU1 about 245 ms. G1: the ceiling is about 3.2 game fps (1.9x today), with the emulation thread the wall, so the EE work is as urgent as the renderer. G2: EE game time is spread: top 20 functions 53% of game code, top 50 76%. G3: 93.6% of VIF1 bytes repeat at the same address with the same data from one game frame to the next, so W2 can key by address. Also measured: one world batch per draw costs about 5% in totals, not a quarter (steady rates equal).
+**Gate results (16 Nov, on the Vita; details in [PERF_WORK_NOT_DONE.md](PERF_WORK_NOT_DONE.md), "Gates G0-G3"):** G0: per game frame the GPU thread uses about 470 ms of CPU, the emulation thread about 300 ms, VU1 about 245 ms. G1: the ceiling is about 3.2 game fps (1.9x today), with the emulation thread the wall, so the EE work is as urgent as the renderer. G2: EE game time is spread: top 20 functions 53% of game code, top 50 76%. Finished on 17 Nov: the top "`sceTimerInit`" entry is libtimer's TIMER1 interrupt handler (real work, about 2,250 interrupts per emulated second). Blocks with VU0 code hold 11.8% of EE samples. EE game code is only 10–18% of the emulation thread, about 56 ms per game frame at the ceiling; the VIF relay sections are about three times that (E3 status below). G3: 93.6% of VIF1 bytes repeat at the same address with the same data from one game frame to the next, so W2 can key by address. Also measured: one world batch per draw costs about 5% in totals, not a quarter (steady rates equal).
 
 ## The answer
 
@@ -150,6 +150,12 @@ Each package names the budget line it serves, the place in the code, and the tes
   - Run it over a recorded gameplay session for every overlay before it is switched on.
 - **Order of work:** by G2's ranking, top first, until the emulation thread meets its budget. Sony library functions that show up (`sceVu0*` matrix code, memory copies) are keyed by code hash alone and serve every game: that is C3 in the list.
 - **Done when:** the game code share of the emulation thread is under 20 ms per game frame, and the harness reports no differences.
+- **Status (17 Nov, branch `claude/ee-overlays-6f84d4`, details in [PERF_WORK_NOT_DONE.md](PERF_WORK_NOT_DONE.md), "E3 native overlays"):**
+  - **Built:** both entries (the block hook and the syscall stub, patch 0110), the harness and seven library overlays (`PSMTXCopy`, `PSMTXConcat`, `PSMTXTranspose`, `Vu0Sinf`, `Vu0Cosf`, `memset`, `fptoui`). In RE4's gameplay walk, 17,780 calls were checked against the recompiler with 0 differences, and the pictures are identical.
+  - **Measured on the Vita:** no gain. Game fps, emulation-thread CPU and the ceiling's vm fps are the same within noise, and the overlaid code's share of EE samples did not drop. For short leaf functions the call in and out costs about what the recompiled code did. `ee_overlays` stays off.
+  - **The premise was too high.** EE game code is about 56 ms per game frame at the ceiling (18% of the emulation thread), not 100–250 ms. The VIF sections take about 51% of that thread there.
+  - **What follows:** E1 comes before more E3. More overlays only make sense for long code per call (RE4's `partsWorldCalc`, `HermiteInterpolation`, the collision tests, not written yet) or with a cheaper entry for leaves (the caller's `jal` as a direct native call).
+  - **The timer interrupt** (libtimer's TIMER1 handler, 6-7% of EE samples, about 2,250 interrupts per emulated second) is a separate target.
 
 **E4. The rest of the EE profile (all games).** C2 (COP2 flag work only where flags are read) if G2 shows time in VU0 code. Then tier 2's remaining gaps. The on-device optimizing compile (B1) only if overlays and these leave a gap.
 
