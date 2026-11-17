@@ -2575,6 +2575,12 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 			EndBatchStrip(nullptr, last);
 		return;
 	}
+	//The slot path's own time (W2 diagnostics: with the retained path on, the batches it left)
+	struct SLOT_TIMER
+	{
+		uint64 start = NowUs();
+		~SLOT_TIMER() { g_worldSlotUs += NowUs() - start; }
+	} slotTimer;
 	// Triangles of this state waiting in m_batch (clipped ones) are drawn with the world draw
 	// (FlushBatch draws both): same state, so their order does not matter.
 	if(m_worldSlots >= std::min<uint32>(std::max<uint32>(g_gpuWorldSlots, 1), WORLD_SLOTS)) FlushWorld();
@@ -2911,6 +2917,8 @@ bool CGSH_Hardware::BuildRetainedProgram()
 bool CGSH_Hardware::DrawRetainedWorld(const Re4Vu1::WORLD_BATCH& batch)
 {
 	if(!BuildRetainedProgram()) return false;
+	uint64 segment = NowUs(); //W2 diagnostics: time per step (g_retainedSegmentUs)
+	auto mark = [&segment](int index) { uint64 now = NowUs(); g_retainedSegmentUs[index] += now - segment; segment = now; };
 	const auto& s = m_state;
 	const auto& target = *m_currentTarget;
 	const int32* raw = batch.raw.data();
@@ -2974,8 +2982,10 @@ bool CGSH_Hardware::DrawRetainedWorld(const Re4Vu1::WORLD_BATCH& batch)
 	// The batch's vertices and triangles on the GPU, once (the winding sign decides the
 	// triangles' order, so it is part of the key)
 	uint64 windingClass = (batch.vf31.w > 0) ? 0x9E3779B97F4A7C15ULL : (batch.vf31.w < 0) ? 0xC2B2AE3D27D4EB4FULL : 0x165667B19E3779F9ULL;
-	uint64 key = XXH3_64bits(raw, static_cast<size_t>(batch.count) * 48) ^ windingClass ^ (static_cast<uint64>(batch.count) << 40);
+	mark(0); //matrix and sampled vertices
+	uint64 key = (batch.hash ? batch.hash : XXH3_64bits(raw, static_cast<size_t>(batch.count) * 48)) ^ windingClass ^ (static_cast<uint64>(batch.count) << 40);
 	auto& entry = m_retainedWorld[key];
+	mark(1); //hash and lookup
 	if(!entry.vbo)
 	{
 		g_retainedMisses++;
@@ -3067,6 +3077,7 @@ bool CGSH_Hardware::DrawRetainedWorld(const Re4Vu1::WORLD_BATCH& batch)
 		}
 		g_retainedInside++;
 	}
+	mark(2); //building (misses) and the box test
 	if(entry.indexCount == 0) return true;
 
 	FlushBatch(); //what was drawn before this batch goes first (ends a run if it draws)
@@ -3086,6 +3097,7 @@ bool CGSH_Hardware::DrawRetainedWorld(const Re4Vu1::WORLD_BATCH& batch)
 		m_retainedRun = true;
 		g_retainedRuns++;
 	}
+	mark(3); //flush and run setup
 	glUniform4fv(m_retainedLocations[0], 4, mf);
 	glUniform4f(m_retainedLocations[1], batch.colorOffset.x, batch.colorOffset.y, batch.colorOffset.z, 0);
 	glUniform4f(m_retainedLocations[2], batch.colorScale.x * batch.colorOffset.w, batch.colorScale.y * batch.colorOffset.w, batch.colorScale.z * batch.colorOffset.w, 1);
@@ -3097,7 +3109,9 @@ bool CGSH_Hardware::DrawRetainedWorld(const Re4Vu1::WORLD_BATCH& batch)
 	glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 48, reinterpret_cast<const void*>(16));
 	glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 48, reinterpret_cast<const void*>(32));
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, entry.ibo);
+	mark(4); //uniforms and buffers
 	glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(entry.indexCount), GL_UNSIGNED_SHORT, nullptr);
+	mark(5); //the draw call
 	if(!g_retainedRunsOn) EndRetainedRun(); //gpu_world_runs=0: one draw at a time
 	g_gpuWorldDraws++;
 	m_stats.drawCalls++;

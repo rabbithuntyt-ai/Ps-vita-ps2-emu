@@ -286,7 +286,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-target-pool")) CGSH_Hardware::g_targetPool = false;
 		else if(!std::strcmp(argv[i], "--no-sprite-new-target")) CGSH_Hardware::g_spriteCreatesTarget = false;
 		else if(!std::strcmp(argv[i], "--no-strip-cover")) CGSH_Hardware::g_stripCover = false;
-		else if(!std::strcmp(argv[i], "--gpu-world-retained")) CGSH_Hardware::g_gpuWorldRetained = true;
+		else if(!std::strcmp(argv[i], "--gpu-world-retained")) Re4Vu1Hle::g_hashBatches = CGSH_Hardware::g_gpuWorldRetained = true;
 #endif
 	}
 

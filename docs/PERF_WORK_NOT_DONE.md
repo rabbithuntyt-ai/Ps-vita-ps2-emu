@@ -245,6 +245,41 @@ read-backs, which wait for the GS thread). RE4 gameplay on the Vita, W1 on, warm
 So W5 waits until the GPU thread is no longer the wall; W2 (geometry kept on the GPU) is the
 next renderer step.
 
+### W2, world geometry kept on the GPU: stage 1 (2026-11-17)
+
+`gpu_world_retained` (on in RE4's profile): each world batch's vertices and triangles go into
+static GPU buffers once, keyed by a hash of its data (computed on the VU1 thread where the HLE
+builds the batch, `Re4Vu1Hle::g_hashBatches`). A draw sets one matrix folding the projection,
+the batch's 4096 pixel period, the sign that makes w positive and the screen mapping; the
+vertex shader divides for depth and clamps it per vertex like the world shader.
+
+What the measurements taught:
+- **Clipping is not the GPU's to do here.** RE4's program clips against |w| in its clip space
+  (geometry behind the camera is mirrored, not cut), and the old world shader used |w| too.
+  Drawing every batch with true homogeneous clipping put large ground triangles across the
+  sky. Now a batch is drawn retained only when its bounding box (8 corners through the clip
+  matrix) lies inside the clip volume with one sign of w; a box beyond one plane draws
+  nothing; the rest goes through the old clipping path. PC: 82% retained, 2% skipped, 16%
+  through the old path; 99.3% cache hits; 3.3 MB; pictures as before. Vita pictures clean.
+- **The vertex work was not the cost.** On the Vita, with nearly every batch a cache hit, the
+  world path still took about 200 ms/s: about 65 µs per batch with no vertex touched. Step
+  timers (perf.csv `world_seg`: matrix, hash, box, flush/setup, uniforms, draw call) showed the
+  hash at 44.5 ms/s; moving it to the VU1 thread brought it to 7 ms/s (lookup only) and the
+  world path to 172 ms/s. Runs of retained draws sharing their GL setup (`gpu_world_runs`, 370
+  runs a second instead of 3,000 setups) made no measurable difference. What remains per
+  second: retained draws about 72 ms (the draw call itself 7.4 µs each), the old path for
+  edge batches 52 ms (`world_slot_ms`), state and strip bookkeeping around both about 48 ms.
+- Game fps in the alternating runs (1.72-2.00 with any setting) does not resolve the
+  difference: the world path is about 18% of the GPU thread.
+
+The GPU thread per game frame now (run SH1, 1.96 game fps, 496 ms in the pump): register
+path 208 ms (characters, effects, HUD and post-processing; 96,000 register writes; 51 ms of
+draws inside), image transfers 100 ms, world 88 ms, display stage 72 ms (it includes the
+flush of the batch pending at each flip), render target round trips 79 ms (inside the above).
+The register path is the largest part: characters (W3) and the generic path (W7) are next.
+Stages c-d of W2 (no unpack and no copy for cached geometry) would relieve the emulation and
+VU1 threads, which are not the wall today.
+
 P1 as built: `CVif1::ReceiveDMA` copies the DMA data into a queue and returns at once (small
 chunks without a tag are merged, buffers are reused). The VU1 worker runs `ProcessPacket` on it
 and runs each program inline. DIRECT data and MSKPATH3 go into the XGKICK queue, so PATH1 and

@@ -3,6 +3,7 @@
 #include <memory>
 #include "GSH_Primitives.h"
 #include "Re4Vu1Batch.h"
+#include "xxhash.h"
 #include "ee/GIF.h"
 #include "ee/Vif.h"
 #include "ee/Vpu.h"
@@ -73,6 +74,9 @@ namespace
 		{
 			std::memcpy(batch->raw.data() + i * 4, qword(top + 0x21 + i), 16);
 		}
+		// W2: the retained world path keys batches by this hash; computed here (VU1 thread,
+		// the data just copied) instead of on the GPU thread
+		if(Re4Vu1Hle::g_hashBatches) batch->hash = XXH3_64bits(batch->raw.data(), batch->raw.size() * sizeof(int32_t));
 		// Where the program stops (E bit at 0x13F8): MSCNT continues there.
 		state.nPC = 0x1408;
 		return batch;

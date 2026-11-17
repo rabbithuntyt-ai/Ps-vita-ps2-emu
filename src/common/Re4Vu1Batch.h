@@ -22,6 +22,7 @@ namespace Re4Vu1
 		VEC4 colorScale = {};      //VI5-1
 		VEC4 vf31 = {};            //texture offset (xy), q scale (w)
 		std::vector<int32_t> raw;  //per vertex P, T, C: 12 integers
+		uint64_t hash = 0;         //XXH3 of raw, set where the batch is built (W2: off the GPU thread)
 	};
 
 	// A vertex before the perspective divide (for clipping) and its decisions.

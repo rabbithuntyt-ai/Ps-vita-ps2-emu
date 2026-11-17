@@ -11,4 +11,6 @@ namespace Re4Vu1Hle
 	// Installs (or removes) CVpu's program replacement hooks.
 	void Enable(bool);
 	bool IsEnabled();
+	// W2: hash each batch's data where it is built (the retained world path's key)
+	inline bool g_hashBatches = false;
 }
