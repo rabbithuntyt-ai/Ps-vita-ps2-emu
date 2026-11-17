@@ -264,6 +264,7 @@ CGSH_Hardware::CGSH_Hardware(const OPTIONS& options)
     , m_options(options)
 {
 	g_clockUs = NowUs;
+	g_sectionClock = NowUs; //CGSHandler section times (patch 0101)
 }
 
 CGSH_Hardware::~CGSH_Hardware()
@@ -288,6 +289,7 @@ bool CGSH_Hardware::Pump(uint32 timeoutMs)
 	while(m_mailBox.IsPending() && !m_flipped)
 	{
 		m_mailBox.ReceiveCall();
+		g_mailCalls++;
 	}
 	FlushBatch();
 	GetTimes().pumpUs += NowUs() - pumpStart;
@@ -1155,6 +1157,7 @@ void CGSH_Hardware::BeginTransferWrite()
 
 void CGSH_Hardware::ProcessHostToLocalTransfer()
 {
+	if(g_gsCeiling) return; //G1 ceiling run: no GPU side
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
 	m_stats.transfersIn++;
 	auto bltBuf = make_convertible<BITBLTBUF>(m_nReg[GS_REG_BITBLTBUF]);
@@ -1218,6 +1221,7 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 
 void CGSH_Hardware::ProcessLocalToHostTransfer()
 {
+	if(g_gsCeiling) return; //G1 ceiling run: no GPU side
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
 	m_stats.transfersOut++;
 	FlushBatch();
@@ -1230,6 +1234,7 @@ void CGSH_Hardware::ProcessLocalToHostTransfer()
 
 void CGSH_Hardware::ProcessLocalToLocalTransfer()
 {
+	if(g_gsCeiling) return; //G1 ceiling run: no GPU side
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
 	m_stats.transfersLocal++;
 	FlushBatch();
@@ -2266,11 +2271,17 @@ bool CGSH_Hardware::BuildWorldProgram()
 
 void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 {
-	if(!g_gpuWorld || (batch.count == 0))
+	if(!g_gpuWorld || (batch.count == 0) || g_gsCeiling)
 	{
 		CGSH_Primitives::DrawWorldBatch(batch);
 		return;
 	}
+	//Whole GPU world path for this batch, draw included (gpu_parts' world value, G0)
+	struct WORLD_TIMER
+	{
+		uint64 start = NowUs();
+		~WORLD_TIMER() { g_worldUs += NowUs() - start; }
+	} worldTimer;
 	bool drawing = BeginBatchStrip();
 	if(drawing && !m_stateApplied) ApplyState();
 	const auto& s = m_state;

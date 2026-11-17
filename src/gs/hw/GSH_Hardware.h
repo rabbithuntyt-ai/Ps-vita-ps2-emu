@@ -249,6 +249,7 @@ public:
 	//Triangles with a corner more than this many hundredths of a screen beyond the target's
 	//edge are drawn by the CPU path (gpu_world_guard; 0: off)
 	static inline uint32 g_gpuWorldGuard = 0;
+	static inline uint64 g_mailCalls = 0; //GPU thread mailbox calls received (G0: W5 sizes the queue records)
 	//World vertices in one array per attribute (gpu_world_soa, on)
 	static inline bool g_gpuWorldSoa = false;
 	static inline uint64 g_gpuWorldGuarded = 0, g_gpuWorldMaxVertices = 0;

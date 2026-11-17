@@ -96,7 +96,7 @@ void CGSH_Primitives::VertexKick(uint8 registerId, uint64 data)
 
 	if(m_vtxCount == 0) return;
 
-	bool drawingKick = ((registerId == GS_REG_XYZ2) || (registerId == GS_REG_XYZF2)) && m_drawEnabled && !m_skipDrawing;
+	bool drawingKick = ((registerId == GS_REG_XYZ2) || (registerId == GS_REG_XYZF2)) && m_drawEnabled && !m_skipDrawing && !g_gsCeiling;
 	bool fog = (registerId == GS_REG_XYZF2) || (registerId == GS_REG_XYZF3);
 
 	m_cvtValid[m_vtxCount - 1] = false;
@@ -278,6 +278,7 @@ void CGSH_Primitives::DrawDirectTriangle(const CSoftwareRasterizer::VERTEX* vert
 
 void CGSH_Primitives::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 {
+	if(g_gsCeiling) return;
 	g_worldBatches++;
 	g_worldVertices += batch.count;
 	struct TIMER

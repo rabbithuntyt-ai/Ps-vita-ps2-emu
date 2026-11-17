@@ -281,6 +281,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-gpu-world")) CGSH_Hardware::g_gpuWorld = false;
 		else if(!std::strcmp(argv[i], "--gpu-world")) CGSH_Hardware::g_gpuWorld = true;
 		else if(!std::strcmp(argv[i], "--gpu-world-guard") && (i + 1 < argc)) CGSH_Hardware::g_gpuWorldGuard = std::atoi(argv[++i]);
+		else if(!std::strcmp(argv[i], "--gs-ceiling")) CGSH_Primitives::g_gsCeiling = true;
 #endif
 	}
 

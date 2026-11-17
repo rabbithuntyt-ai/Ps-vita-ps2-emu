@@ -50,6 +50,8 @@
 #endif
 #include "CpuScreen.h"
 #include "Cores.h"
+#include "ee/Vif1.h"
+#include "xxhash.h"
 #include "EmuSession.h"
 #include "EmuProfile.h"
 #include "iop/Iop_SubSystem.h"
@@ -360,6 +362,7 @@ namespace
 		else if(key == "gpu_world_slots") CGSH_Hardware::g_gpuWorldSlots = value; //batches per world draw (1 on the Vita: GSH_Hardware.h)
 		else if(key == "gpu_world_soa") CGSH_Hardware::g_gpuWorldSoa = value != 0; //world vertices one array per attribute (on)
 		else if(key == "gpu_world_guard") CGSH_Hardware::g_gpuWorldGuard = value; //hundredths of a screen beyond the edge (200; 0: off)
+		else if(key == "gs_ceiling") CGSH_Primitives::g_gsCeiling = value != 0; //G1 ceiling run: no draws or GPU transfers (pictures wrong)
 		else if(key == "gpu_world_debug") CGSH_Hardware::g_gpuWorldDebug = value; //4: no culling, 64: the other faces (diagnostics)
 		else if(key == "gs_vertex_ring") CGSH_Hardware::g_vertexRing = value != 0; //with gs_shaders: vertices in GPU buffers (on)
 		else if(key == "re4_skip_dof") CGSH_Hardware::g_re4SkipDof = value; //RE4: draws left out after the depth blur starts (176)
@@ -681,6 +684,66 @@ namespace
 		}
 	}
 
+	// G3 (docs/PATH_TO_30FPS.md): every VIF1 transfer of two whole game frames, to see whether
+	// geometry comes from the same EE addresses each frame. Autostart vif1_log=S arms it at
+	// second S; it starts at the next game frame and writes vif1log.txt:
+	// "frame address qwc tag hash" per transfer (hash: XXH3 of the transfer's data).
+	namespace Vif1Log
+	{
+		struct ENTRY
+		{
+			uint32 frame, address, qwc;
+			bool tag;
+			uint64 hash;
+		};
+		uint32_t g_afterSeconds = 0;
+		std::atomic<int> g_state{0}; //0 off, 1 waiting for a new frame, 2 recording, 3 done, 4 written
+		uint32 g_startFrame = 0;
+		std::vector<ENTRY> g_entries;
+
+		void Hook(uint32 address, uint32 qwc, bool tag, const uint8* data)
+		{
+			uint32 frame = CGSH_Hardware::g_gameFrames;
+			int state = g_state.load();
+			if(state == 1)
+			{
+				if(frame == g_startFrame) return;
+				g_startFrame = frame;
+				g_state = state = 2;
+			}
+			if(state != 2) return;
+			uint32 index = frame - g_startFrame;
+			if((index >= 2) || (g_entries.size() >= 100000))
+			{
+				g_state = 3;
+				return;
+			}
+			g_entries.push_back({index, address, qwc, tag, XXH3_64bits(data, static_cast<size_t>(qwc) * 16)});
+		}
+
+		void Poll(uint64 seconds)
+		{
+			if((g_afterSeconds != 0) && (g_state.load() == 0) && (seconds >= g_afterSeconds))
+			{
+				g_entries.reserve(100000);
+				g_startFrame = CGSH_Hardware::g_gameFrames;
+				g_state = 1;
+				CVif1::g_dmaLog = &Hook;
+			}
+			if(g_state.load() == 3)
+			{
+				CVif1::g_dmaLog = nullptr;
+				if(FILE* file = std::fopen(VITAPS2_DATA_DIR "/vif1log.txt", "w"))
+				{
+					for(const auto& e : g_entries)
+						std::fprintf(file, "%u %08X %u %d %016llX\n", e.frame, e.address, e.qwc, e.tag ? 1 : 0, static_cast<unsigned long long>(e.hash));
+					std::fclose(file);
+				}
+				g_state = 4;
+			}
+		}
+	}
+
 	CGSH_Hardware* GetHardwareGs(CEmuSession* session)
 	{
 		return session ? static_cast<CGSH_Hardware*>(session->GetVm()->GetGSHandler()) : nullptr;
@@ -734,7 +797,7 @@ namespace
 				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop");
 				//The IOP thread's sections (iop_thread)
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",iopt_%s", EmuProfile::GetSectionName(i));
-				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3");
+				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3,gs_feed_ms,gs_feed_calls,gs_feed_kb,gs_regs_ms,gs_reg_calls,gs_reg_writes,gs_mail_calls,world_ms");
 				std::fprintf(perfFile, "\n");
 			}
 		}
@@ -978,6 +1041,11 @@ namespace
 					if(key == "ee_hot_after")
 					{
 						eeHotAfterSeconds = static_cast<uint32_t>(std::atoi(value.c_str()));
+						continue;
+					}
+					if(key == "vif1_log")
+					{
+						Vif1Log::g_afterSeconds = static_cast<uint32_t>(std::atoi(value.c_str()));
 						continue;
 					}
 					if(key == "copy_bench")
@@ -1286,6 +1354,7 @@ namespace
 						}
 						perfSpuFull = full;
 						perfSpuRead = read;
+						Vif1Log::Poll((now - runStart) / 1000000ULL);
 						// EE hotspots of MPEG playback: from the first second with
 						// BDEC activity on, written every 10 seconds.
 						if(!eeHotMovie && (eeHotAfterSeconds != 0) && (now - runStart >= eeHotAfterSeconds * 1000000ULL))
@@ -1324,7 +1393,7 @@ namespace
 						{
 							if(FILE* hot = std::fopen(VITAPS2_DATA_DIR "/eehot.txt", "w"))
 							{
-								session->WriteEeHotspots(hot, 80);
+								session->WriteEeHotspots(hot, 4000); //G2: enough blocks to sum by function (runs/re4/eefuncs.py)
 								std::fclose(hot);
 							}
 							if(FILE* hot = std::fopen(VITAPS2_DATA_DIR "/iophot.txt", "w"))
@@ -1513,6 +1582,16 @@ namespace
 							//whether the battery ran out or ran hot (the 2026-11-15 hang, docs/RE4.md)
 							std::fprintf(perfFile, ",%d,%d,%d,%d,%d", scePowerGetBatteryLifePercent(), scePowerIsBatteryCharging() ? 1 : 0,
 							    scePowerGetBatteryTemp() / 100, scePowerGetArmClockFrequency(), VitaCores::g_core3 ? 1 : 0);
+							//G0 (docs/PATH_TO_30FPS.md): the GPU thread's entry points, inclusive (draws inside count)
+							{
+								static uint64 last[8] = {};
+								uint64 now[8] = {CGSHandler::g_feedUs, CGSHandler::g_feedCalls, CGSHandler::g_feedBytes, CGSHandler::g_submitUs,
+								                 CGSHandler::g_submitCalls, CGSHandler::g_registerWrites, CGSH_Hardware::g_mailCalls, CGSH_Primitives::g_worldUs};
+								std::fprintf(perfFile, ",%.1f,%llu,%llu,%.1f,%llu,%llu,%llu,%.1f", (now[0] - last[0]) / 1000.0, (unsigned long long)(now[1] - last[1]),
+								             (unsigned long long)((now[2] - last[2]) / 1024), (now[3] - last[3]) / 1000.0, (unsigned long long)(now[4] - last[4]),
+								             (unsigned long long)(now[5] - last[5]), (unsigned long long)(now[6] - last[6]), (now[7] - last[7]) / 1000.0);
+								for(int i = 0; i < 8; i++) last[i] = now[i];
+							}
 						}
 						std::fprintf(perfFile, "\n");
 						std::fflush(perfFile);

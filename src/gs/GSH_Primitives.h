@@ -39,6 +39,10 @@ public:
 	static inline uint64 g_dirtyBy[256] = {};   //diagnostics: register writes that changed the state
 	static inline uint64 g_worldUs = 0;           //time in DrawWorldBatch (with g_clockUs)
 	static inline uint64 (*g_clockUs)() = nullptr; //a cheap clock, set by the renderer
+	//G1 ceiling run (gs_ceiling, docs/PATH_TO_30FPS.md): no draws, no GPU side of transfers, no
+	//read-backs; registers are still processed. Pictures are wrong; the frame rate shows what
+	//the EE, IOP and VU1 allow
+	static inline bool g_gsCeiling = false;
 
 protected:
 	void WriteRegisterImpl(uint8, uint64) override;

@@ -1,0 +1,83 @@
+diff --git a/Source/gs/GSHandler.h b/Source/gs/GSHandler.h
+--- a/Source/gs/GSHandler.h
++++ b/Source/gs/GSHandler.h
+@@ -856,6 +856,15 @@
+ 	//it has none for [data, data + length); else it holds length + 0x10 readable bytes
+ 	//and stays alive as long as the returned pointer.
+ 	static inline std::function<std::shared_ptr<const uint8>(const void* data, uint32 length)> g_imageDataSource;
++	//GS thread section times (microseconds, inclusive: draws inside count too) and counts, when
++	//g_sectionClock is set (VitaPS2 perf.csv: gs_feed_ms, gs_regs_ms, gs_reg_writes...)
++	static inline uint64 (*g_sectionClock)() = nullptr;
++	static inline uint64 g_feedUs = 0;
++	static inline uint64 g_feedCalls = 0;
++	static inline uint64 g_feedBytes = 0;
++	static inline uint64 g_submitUs = 0;
++	static inline uint64 g_submitCalls = 0;
++	static inline uint64 g_registerWrites = 0;
+ 	//GS thread, after a whole PSMCT32 transfer whose data came from g_imageDataSource
+ 	//(rectangle in the destination buffer): the renderer may keep it as the texels' source
+ 	virtual void OnImageDataSource(uint32 dbp, uint32 dbw, uint32 x, uint32 y, uint32 w, uint32 h, const std::shared_ptr<const uint8>& data)
+diff --git a/Source/gs/GSHandler.cpp b/Source/gs/GSHandler.cpp
+--- a/Source/gs/GSHandler.cpp
++++ b/Source/gs/GSHandler.cpp
+@@ -653,7 +653,9 @@
+ 				    auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
+ 				    bool whole = (bltBuf.nDstPsm == PSMCT32) && (m_trxCtx.nRRX == 0) && (m_trxCtx.nRRY == 0) &&
+ 				                 (m_trxCtx.nSize == length) && (length == trxReg.nRRW * trxReg.nRRH * 4) && (trxPos.nDIR == 0);
++				    uint64 feedStart = g_sectionClock ? g_sectionClock() : 0;
+ 				    FeedImageDataImpl(source.get(), length);
++				    if(g_sectionClock) { g_feedUs += g_sectionClock() - feedStart; g_feedCalls++; g_feedBytes += length; }
+ 				    if(whole)
+ 				    {
+ 					    OnImageDataSource(bltBuf.GetDstPtr(), bltBuf.nDstWidth, trxPos.nDSAX, trxPos.nDSAY, trxReg.nRRW, trxReg.nRRH, source);
+@@ -678,7 +680,9 @@
+ 			    m_frameDump->AddImagePacket(imageData, length);
+ 		    }
+ #endif
++		    uint64 feedStart = g_sectionClock ? g_sectionClock() : 0;
+ 		    FeedImageDataImpl(imageData, length);
++		    if(g_sectionClock) { g_feedUs += g_sectionClock() - feedStart; g_feedCalls++; g_feedBytes += length; }
+ 		    delete[] imageData;
+ 	    });
+ }
+@@ -763,7 +767,9 @@
+ 
+ 	SendGSCall(
+ 	    [this, bufferStart, bufferEnd]() {
++		    uint64 submitStart = g_sectionClock ? g_sectionClock() : 0;
+ 		    SubmitWriteBufferImpl(bufferStart, bufferEnd);
++		    if(g_sectionClock) { g_submitUs += g_sectionClock() - submitStart; g_submitCalls++; g_registerWrites += bufferEnd - bufferStart; }
+ 	    });
+ 
+ 	m_writeBufferSubmitIndex = m_writeBufferSize;
+diff --git a/Source/ee/Vif1.h b/Source/ee/Vif1.h
+--- a/Source/ee/Vif1.h
++++ b/Source/ee/Vif1.h
+@@ -19,6 +19,10 @@
+ 
+ 	uint32 ReceiveDMA(uint32, uint32, uint32, bool) override;
+ 
++	//Diagnostics: called on the EE thread for each VIF1 transfer to VIF1 (address as DMAC
++	//gives it, quadwords, tag included, the data in EE RAM or scratchpad)
++	static inline void (*g_dmaLog)(uint32 address, uint32 qwc, bool tagIncluded, const uint8* data) = nullptr;
++
+ private:
+ 	void ExecuteCommand(StreamType&, CODE) override;
+ 
+diff --git a/Source/ee/Vif1.cpp b/Source/ee/Vif1.cpp
+--- a/Source/ee/Vif1.cpp
++++ b/Source/ee/Vif1.cpp
+@@ -71,6 +71,13 @@
+ uint32 CVif1::ReceiveDMA(uint32 address, uint32 qwc, uint32 direction, bool tagIncluded)
+ {
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_VIF);
++	if(g_dmaLog && (direction != Dmac::CChannel::CHCR_DIR_TO))
++	{
++		//Diagnostics (VitaPS2 vif1_log): each transfer's source, length and data
++		bool spr = (address & 0x80000000) != 0;
++		uint32 offset = address & (spr ? (PS2::EE_SPR_SIZE - 1) : (PS2::EE_RAM_SIZE - 1));
++		g_dmaLog(address, qwc, tagIncluded, (spr ? m_spr : m_ram) + offset);
++	}
+ 	if(direction == Dmac::CChannel::CHCR_DIR_TO)
+ 	{
+ 		uint8* source = nullptr;
