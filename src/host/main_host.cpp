@@ -286,6 +286,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-target-pool")) CGSH_Hardware::g_targetPool = false;
 		else if(!std::strcmp(argv[i], "--no-sprite-new-target")) CGSH_Hardware::g_spriteCreatesTarget = false;
 		else if(!std::strcmp(argv[i], "--no-strip-cover")) CGSH_Hardware::g_stripCover = false;
+		else if(!std::strcmp(argv[i], "--gpu-world-retained")) CGSH_Hardware::g_gpuWorldRetained = true;
 #endif
 	}
 
@@ -621,6 +622,7 @@ int main(int argc, char** argv)
 			std::printf("world batches on the CPU: %llu (%llu vertices, %llu clipped triangles), on the GPU: %llu batches %llu draws %llu fallbacks\n", (unsigned long long)CGSH_Primitives::g_worldBatches,
 			            (unsigned long long)CGSH_Primitives::g_worldVertices, (unsigned long long)CGSH_Primitives::g_worldClipped, (unsigned long long)CGSH_Hardware::g_gpuWorldBatches, (unsigned long long)CGSH_Hardware::g_gpuWorldDraws, (unsigned long long)CGSH_Hardware::g_gpuWorldFallbacks);
 		if(Re4Vu1Hle::IsEnabled()) std::printf("most world vertices in one draw: %llu, guard band triangles: %llu\n", (unsigned long long)CGSH_Hardware::g_gpuWorldMaxVertices, (unsigned long long)CGSH_Hardware::g_gpuWorldGuarded);
+		if(CGSH_Hardware::g_gpuWorldRetained) std::printf("retained world: %llu inside, %llu outside, %llu edge; %llu hits, %llu misses, %llu evictions, %.1f MB\n", (unsigned long long)CGSH_Hardware::g_retainedInside, (unsigned long long)CGSH_Hardware::g_retainedOutside, (unsigned long long)CGSH_Hardware::g_retainedEdge, (unsigned long long)CGSH_Hardware::g_retainedHits, (unsigned long long)CGSH_Hardware::g_retainedMisses, (unsigned long long)CGSH_Hardware::g_retainedEvictions, CGSH_Hardware::g_retainedMegabytes);
 #endif
 
 		if(width == 0)

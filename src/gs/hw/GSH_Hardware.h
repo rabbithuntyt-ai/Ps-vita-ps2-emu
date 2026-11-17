@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <functional>
 #include <map>
+#include <unordered_map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -216,6 +217,11 @@ public:
 	static inline bool g_partialRelayout = true; //W1: also targets the new one starts inside (partial_relayout)
 	static inline bool g_spriteCreatesTarget = true; //W1: an opaque first sprite creates its target without an upload (sprite_new_target)
 	static inline bool g_stripCover = true; //W1: strip clears replace a new target's rows without an upload (strip_cover)
+	static inline bool g_gpuWorldRetained = false; //W2: world geometry kept on the GPU (gpu_world_retained)
+	static inline uint32 g_retainedBudgetMb = 24;  //W2: GPU memory for it (gpu_world_cache_mb)
+	static inline uint64 g_retainedHits = 0, g_retainedMisses = 0, g_retainedEvictions = 0;
+	static inline uint64 g_retainedInside = 0, g_retainedOutside = 0, g_retainedEdge = 0; //batches drawn retained, skipped, left to the clipping path
+	static inline float g_retainedMegabytes = 0; //W2: GPU memory in use for it (perf.csv world_cache_mb)
 	static inline uint64 g_stripCoverSkips = 0, g_stripCoverSettles = 0; //strip clears completed, cut short
 	// Copies of the target being drawn made by a draw, not glCopyTexSubImage2D (feedback_draw, on)
 	static inline bool g_feedbackDraw = true;
@@ -381,6 +387,26 @@ private:
 	GLint m_worldLocations[16] = {};
 	bool BuildWorldProgram();
 	void FlushWorld();
+	// W2: world batches kept on the GPU. A batch's vertices (floats) and triangles go into
+	// static buffers once, keyed by a hash of its data; each draw sets one matrix that folds the
+	// projection, the 4096 pixel wrap, w > 0 and the depth mapping, and the GPU transforms and
+	// clips (gpu_world_retained).
+	struct RETAINED_WORLD
+	{
+		GLuint vbo = 0, ibo = 0;
+		uint32 indexCount = 0, bytes = 0, lastFrame = 0;
+		float boxMin[3] = {}, boxMax[3] = {}; //object space bounds of its positions
+	};
+	std::unordered_map<uint64, RETAINED_WORLD> m_retainedWorld;
+	uint64 m_retainedBytes = 0;
+	GLuint m_retainedProgram = 0;
+	bool m_retainedProgramFailed = false;
+	GLint m_retainedLocations[9] = {};
+	bool BuildRetainedProgram();
+	bool DrawRetainedWorld(const Re4Vu1::WORLD_BATCH&);
+	void SetWorldFragmentUniforms(GLint tex, GLint texXf, GLint mode, GLint fog, GLint alpha);
+	void TrimRetainedWorld();
+	void ReleaseRetainedWorld();
 	// Alpha test as ApplyState set it (GL function, reference), for the shader
 	GLenum m_alphaTestFunc = GL_ALWAYS;
 	float m_alphaTestRef = 0;
