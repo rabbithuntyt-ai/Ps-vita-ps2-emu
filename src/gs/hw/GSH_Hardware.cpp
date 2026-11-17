@@ -2578,8 +2578,8 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 	//The slot path's own time (W2 diagnostics: with the retained path on, the batches it left)
 	struct SLOT_TIMER
 	{
-		uint64 start = NowUs();
-		~SLOT_TIMER() { g_worldSlotUs += NowUs() - start; }
+		uint64 start = g_fineTimers ? NowUs() : 0;
+		~SLOT_TIMER() { if(g_fineTimers) g_worldSlotUs += NowUs() - start; }
 	} slotTimer;
 	// Triangles of this state waiting in m_batch (clipped ones) are drawn with the world draw
 	// (FlushBatch draws both): same state, so their order does not matter.
@@ -2917,8 +2917,8 @@ bool CGSH_Hardware::BuildRetainedProgram()
 bool CGSH_Hardware::DrawRetainedWorld(const Re4Vu1::WORLD_BATCH& batch)
 {
 	if(!BuildRetainedProgram()) return false;
-	uint64 segment = NowUs(); //W2 diagnostics: time per step (g_retainedSegmentUs)
-	auto mark = [&segment](int index) { uint64 now = NowUs(); g_retainedSegmentUs[index] += now - segment; segment = now; };
+	uint64 segment = g_fineTimers ? NowUs() : 0; //W2 diagnostics: time per step (g_retainedSegmentUs, fine_timers)
+	auto mark = [&segment](int index) { if(!g_fineTimers) return; uint64 now = NowUs(); g_retainedSegmentUs[index] += now - segment; segment = now; };
 	const auto& s = m_state;
 	const auto& target = *m_currentTarget;
 	const int32* raw = batch.raw.data();
@@ -3247,6 +3247,12 @@ bool CGSH_Hardware::WouldSkipDraw() const
 
 void CGSH_Hardware::ApplyState()
 {
+	struct REG_TIMER
+	{
+		uint64& total;
+		uint64 start = g_fineTimers ? NowUs() : 0;
+		~REG_TIMER() { if(g_fineTimers) total += NowUs() - start; }
+	} regTimer{g_regSplitUs[0]}; //register path split (perf.csv reg_split)
 	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	const auto& s = m_state;
 	m_stateApplied = true;
@@ -3740,6 +3746,12 @@ bool CGSH_Hardware::SkipOverwrittenRows(const CSoftwareRasterizer::VERTEX& a, co
 
 void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoftwareRasterizer::VERTEX* vertices)
 {
+	struct REG_TIMER
+	{
+		uint64& total;
+		uint64 start = g_fineTimers ? NowUs() : 0;
+		~REG_TIMER() { if(g_fineTimers) total += NowUs() - start; }
+	} regTimer{g_regSplitUs[2]}; //register path split (perf.csv reg_split)
 	if(m_diagFile) m_diagKinds[kind & 3]++;
 	if(!m_stateApplied)
 	{
@@ -3895,6 +3907,12 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 
 void CGSH_Hardware::OnDrawStripTriangle(const CSoftwareRasterizer::VERTEX* vertices, bool continues)
 {
+	struct REG_TIMER
+	{
+		uint64& total;
+		uint64 start = g_fineTimers ? NowUs() : 0;
+		~REG_TIMER() { if(g_fineTimers) total += NowUs() - start; }
+	} regTimer{g_regSplitUs[3]}; //register path split (perf.csv reg_split)
 	if(m_stripCover.target) SettleStripCover(); //W1
 	g_stripCalls++;
 	if(continues) g_stripContinues++;
@@ -4019,6 +4037,12 @@ void CGSH_Hardware::FlushPoints()
 
 void CGSH_Hardware::FlushBatch()
 {
+	struct REG_TIMER
+	{
+		uint64& total;
+		uint64 start = g_fineTimers ? NowUs() : 0;
+		~REG_TIMER() { if(g_fineTimers) total += NowUs() - start; }
+	} regTimer{g_regSplitUs[1]}; //register path split (perf.csv reg_split)
 	CStageTimer stageTimer(GPU_STAGE_GL);
 	FlushWorld();
 	FlushPoints();

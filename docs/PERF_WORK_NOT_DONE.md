@@ -280,6 +280,19 @@ The register path is the largest part: characters (W3) and the generic path (W7)
 Stages c-d of W2 (no unpack and no copy for cached geometry) would relieve the emulation and
 VU1 threads, which are not the wall today.
 
+**The register path, split (Vita, run RG1, per game frame, inclusive timers):** 260 ms in all;
+primitives through `OnDraw` 119 ms and strip triangles 88 ms, which hold the state
+application (`ApplyState`, 70 ms, with texture binding) and batch flushes (`FlushBatch`, 33
+ms). About 22,500 primitives per game frame outside the world path, roughly 6 µs each: the
+per-vertex conversion and batching that W3 (characters on the GPU) and W7 (whole register
+runs converted in one loop) are meant to remove.
+
+**Timers cost on the Vita.** A clock read is a kernel call. The per-primitive and per-batch
+timers (`reg_split`, `world_seg`, `world_slot_ms`) are now behind `fine_timers=1`, off by
+default; the world step timers had shipped on in RE4's build since the W2 commit. Clean runs
+afterwards (RE4's profile as shipped, warm, 120 s): **184 and 182 game frames, 2.03-2.06 game
+fps**, 453 ms in the GPU pump per game frame. On 15 Nov the same walk ran at 0.6-0.8.
+
 P1 as built: `CVif1::ReceiveDMA` copies the DMA data into a queue and returns at once (small
 chunks without a tag are merged, buffers are reused). The VU1 worker runs `ProcessPacket` on it
 and runs each program inline. DIRECT data and MSKPATH3 go into the XGKICK queue, so PATH1 and

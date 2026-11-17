@@ -226,6 +226,8 @@ public:
 	static inline uint64 g_retainedRuns = 0;    //runs started
 	static inline uint64 g_retainedSegmentUs[6] = {}; //W2 diagnostics: matrix, hash, box, flush/setup, uniforms, draw call (perf.csv world_seg)
 	static inline uint64 g_worldSlotUs = 0; //W2 diagnostics: time in the slot (non-retained) world path (perf.csv world_slot_ms)
+	static inline uint64 g_regSplitUs[4] = {}; //diagnostics, inclusive: ApplyState, FlushBatch, OnDraw, OnDrawStripTriangle (perf.csv reg_split)
+	static inline bool g_fineTimers = false; //per primitive and per batch timers (reg_split, world_seg, world_slot_ms): fine_timers=1; each costs two clock reads
 	static inline uint64 g_stripCoverSkips = 0, g_stripCoverSettles = 0; //strip clears completed, cut short
 	// Copies of the target being drawn made by a draw, not glCopyTexSubImage2D (feedback_draw, on)
 	static inline bool g_feedbackDraw = true;
