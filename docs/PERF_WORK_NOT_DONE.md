@@ -125,6 +125,61 @@ Testing safety, learned the hard way (details in RE4.md, "Traps when testing"):
   reboot the Vita (`tools/vita_rescue.py reboot`), for when the command server is stuck but
   Wi-Fi is up. Tested: back in about 18 s.
 
+### Gates G0-G3 of PATH_TO_30FPS.md (2026-11-16, on the Vita)
+
+Build `ad5322a` plus the ceiling's display skip; RE4 gameplay from `state_b2`, 120 s, warm.
+New perf.csv columns: `gs_feed_ms`, `gs_feed_calls`, `gs_feed_kb`, `gs_regs_ms`,
+`gs_reg_calls`, `gs_reg_writes`, `gs_mail_calls`, `world_ms` (patch 0101 and
+`GSH_Hardware.cpp`); settings `gs_ceiling=1` and `vif1_log=S`; scripts `runs/re4/eefuncs.py`
+and `runs/re4/vif1cmp.py`.
+
+**Before the gates: one batch per draw costs little.** Warm, alternating pairs, 120 s:
+`gpu_world_slots=16` 151 and 151 game frames (1.73 and 1.81 game fps after 30 s),
+`gpu_world_slots=1` 143 and 145 (1.79 and 1.77). The steady rate is the same; the totals
+differ by about 5%, all in the first 30 s. The 207 in the first table came from longer runs.
+
+**G0, time per game frame (run G0, 1.69 game fps):**
+
+| Thread | CPU share | Per game frame | Budget |
+|---|---|---|---|
+| GPU thread (core 1) | 79% (pump elapsed 919 ms/s) | about 470 ms CPU, 544 ms in the pump | 33 ms |
+| Emulation thread (core 0) | 51% | about 300 ms | 33 ms |
+| VU1 thread (core 2) | 42% | about 245 ms | 33 ms |
+
+The GPU thread's pump, split by entry point (inclusive: the draws a call makes count in it),
+per game frame: register write buffers 253 ms (1,760 calls, 64,400 register writes), the GPU
+world path 95 ms (draws included), image transfers 92 ms (360 calls, 1.6 MB), the display
+stage at the flip 83 ms, the rest about 20 ms. Mailbox calls: 3,330 per game frame. So
+nearly all of the "unattributed" half sits in the register path (characters, effects, HUD,
+and the post-processing that causes the round trips), the world path outside its draw call,
+and the display.
+
+**G1, the ceiling** (`gs_ceiling=1`: no draws, no GPU side of transfers or read-backs, no
+display work; registers still processed): `vm_fps` 7.6 against 4.0 (1.9x), so about 3.2
+game fps if the game keeps the same emulated frames per game frame (`game_fps` reads 0 here:
+it counts drawn frames). The emulation thread is then the wall: 95.5% busy, VU1 83.5%, the
+GPU thread 41.5%. A first ceiling run without the display skip stayed at the GPU thread
+(the flip rebuilt the picture from GS memory: 742 ms/s). **Under 5**: by the plan's rule,
+the EE work is as urgent as the renderer.
+
+**G2, EE time by RE4 function** (`ee_hot_after=30`, 5,968 samples, 1,485 blocks covering
+87.8%): game code 84.8% of EE samples, BIOS/kernel 3.0%. The top 5 game functions are 21.5%
+of game code, top 10 36.1%, top 20 52.7%, top 50 75.8%. Top entries: `sceTimerInit` 6.1%
+(probably unnamed code after that symbol, maybe a wait loop: check before counting it as
+work), `partsWorldCalc__6cModel` 3.3%, `HermiteInterpolation` 3.1%, `InsertPacket` 2.9%,
+`InsertPacketSCR` 2.8%, collision tests (`collision_sphere_hexahedron`, `hitCheck3`,
+`AtSphereCapsuleCk`) 7.9% together, `Vu0Sinf`/`Vu0Cosf` 4.4%, `PSMTX*` 4.0%, `memset`
+1.5%. Library math (`PSMTX*`, `Vu0*`, `memset`) is about 10% and would help every game (C3).
+For overlays: covering 90% of game code needs well over 50 functions; this is spread, not
+concentrated. The share inside the game's draw phase and in VU0 (COP2) code is not split
+out yet.
+
+**G3, VIF1 transfers frame to frame** (`vif1_log=60`, two consecutive game frames while
+walking): 11,607 and 11,635 transfers, 3.3 MB each. Of frame 1's bytes: 93.6% same address
+and same data as frame 0, 4.4% same data at another address, 2.0% new; no address carried
+different data. No transfers from the scratchpad; 6,803 include their DMA tag. Geometry can
+be keyed by address (W2), with a data check.
+
 P1 as built: `CVif1::ReceiveDMA` copies the DMA data into a queue and returns at once (small
 chunks without a tag are merged, buffers are reused). The VU1 worker runs `ProcessPacket` on it
 and runs each program inline. DIRECT data and MSKPATH3 go into the XGKICK queue, so PATH1 and

@@ -3520,7 +3520,7 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 	const auto& layer = dispInfo.layers[0];
 	// A skipped frame was not drawn: keep showing the last drawn one (double
 	// buffered games would otherwise flash an older frame).
-	if(m_lastFrameSkipped)
+	if(m_lastFrameSkipped || g_gsCeiling) //ceiling run (G1): no display work either
 	{
 		m_displayStats.skipped++;
 		CGSH_Primitives::FlipImpl(dispInfo);

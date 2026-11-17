@@ -2,6 +2,8 @@
 
 _Written by Fable 5.2 on 2026-11-16 from the repository at `20875f2`, after reviewing [PERF_WORK_NOT_DONE.md](PERF_WORK_NOT_DONE.md). Nothing here was run on a Vita and nothing was built. Figures called "measured" are the sessions' own; everything called an estimate is mine._
 
+**Gate results (16 Nov, on the Vita; details in [PERF_WORK_NOT_DONE.md](PERF_WORK_NOT_DONE.md), "Gates G0-G3"):** G0: per game frame the GPU thread uses about 470 ms of CPU, the emulation thread about 300 ms, VU1 about 245 ms. G1: the ceiling is about 3.2 game fps (1.9x today), with the emulation thread the wall, so the EE work is as urgent as the renderer. G2: EE game time is spread: top 20 functions 53% of game code, top 50 76%. G3: 93.6% of VIF1 bytes repeat at the same address with the same data from one game frame to the next, so W2 can key by address. Also measured: one world batch per draw costs about 5% in totals, not a quarter (steady rates equal).
+
 ## The answer
 
 The steps in the review (second half of this file) do not reach 30. They remove the renderer's wall, which is necessary. By my estimate they leave the game somewhere near 10 frames a second, because the emulation thread and the VU1 thread are also several times over their budgets.
