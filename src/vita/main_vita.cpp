@@ -365,6 +365,8 @@ namespace
 		else if(key == "gs_ceiling") CGSH_Primitives::g_gsCeiling = value != 0; //G1 ceiling run: no draws or GPU transfers (pictures wrong)
 		else if(key == "target_pool") CGSH_Hardware::g_targetPool = value != 0; //W1: reuse released render targets' GL objects (on)
 		else if(key == "partial_relayout") CGSH_Hardware::g_partialRelayout = value != 0; //W1 (on)
+		else if(key == "sprite_new_target") CGSH_Hardware::g_spriteCreatesTarget = value != 0; //W1 (on)
+		else if(key == "strip_cover") CGSH_Hardware::g_stripCover = value != 0; //W1 (on)
 		else if(key == "gpu_world_debug") CGSH_Hardware::g_gpuWorldDebug = value; //4: no culling, 64: the other faces (diagnostics)
 		else if(key == "gs_vertex_ring") CGSH_Hardware::g_vertexRing = value != 0; //with gs_shaders: vertices in GPU buffers (on)
 		else if(key == "re4_skip_dof") CGSH_Hardware::g_re4SkipDof = value; //RE4: draws left out after the depth blur starts (176)

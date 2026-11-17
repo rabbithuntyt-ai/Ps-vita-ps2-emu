@@ -214,6 +214,9 @@ public:
 	// Targets copied into a new layout (buffer width) on the GPU (gpu_relayout, on by default)
 	static inline bool g_gpuRelayout = true;
 	static inline bool g_partialRelayout = true; //W1: also targets the new one starts inside (partial_relayout)
+	static inline bool g_spriteCreatesTarget = true; //W1: an opaque first sprite creates its target without an upload (sprite_new_target)
+	static inline bool g_stripCover = true; //W1: strip clears replace a new target's rows without an upload (strip_cover)
+	static inline uint64 g_stripCoverSkips = 0, g_stripCoverSettles = 0; //strip clears completed, cut short
 	// Copies of the target being drawn made by a draw, not glCopyTexSubImage2D (feedback_draw, on)
 	static inline bool g_feedbackDraw = true;
 	// Alpha index textures (PSMT8H/4HL/4HH) of render targets converted on the GPU (gpu_alpha_clut, on)
@@ -409,6 +412,7 @@ private:
 	};
 	enum { TARGET_POOL_SIZE = 8 };
 	std::vector<POOLED_TARGET> m_targetPool;
+	uint32 m_diagFirstKind = 4; //diagnostics: kind of the primitive that applied the state (S entries)
 	void ReleaseTargetPool();
 	// Keeps only the first rows of a target (on the GPU, no read back).
 	void ShrinkTarget(TARGET&, uint32 rows);
@@ -419,7 +423,17 @@ private:
 	void UploadStaleRows(TARGET&, uint32 rowEnd);
 	// Before the first primitive of a state: an opaque sprite over whole rows
 	// not uploaded yet makes them valid without an upload.
-	void SkipOverwrittenRows(const CSoftwareRasterizer::VERTEX&, const CSoftwareRasterizer::VERTEX&);
+	bool SkipOverwrittenRows(const CSoftwareRasterizer::VERTEX&, const CSoftwareRasterizer::VERTEX&);
+	// W1: a target cleared by full-height sprites in vertical strips (scissor 64 wide, RE4):
+	// its new rows are not uploaded; columns [0, coveredX) are drawn. Anything else that
+	// touches GPU targets or GS memory first uploads the rest (SettleStripCover).
+	struct STRIP_COVER
+	{
+		TARGET* target = nullptr;
+		uint32 begin = 0, end = 0, coveredX = 0;
+	};
+	STRIP_COVER m_stripCover;
+	void SettleStripCover();
 	void MarkTargetDirty(TARGET&, int32 x0, int32 y0, int32 x1, int32 y1);
 	// GS memory spanned by a range of rows (whole page rows).
 	void RowsToBytes(const TARGET&, uint32 rowBegin, uint32 rowEnd, uint32& start, uint32& end) const;
@@ -450,6 +464,7 @@ private:
 	void WriteFlipDiagnostics(const DISPLAY_INFO&);
 	void ApplyState();
 	bool SkipDrawRule();
+	bool WouldSkipDraw() const;
 	uint32 m_skipDraws = 0;
 	// Batch program (gs_shaders)
 	bool BuildBatchProgram();

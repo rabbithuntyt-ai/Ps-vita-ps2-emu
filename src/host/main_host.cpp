@@ -284,6 +284,8 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--gs-ceiling")) CGSH_Primitives::g_gsCeiling = true;
 		else if(!std::strcmp(argv[i], "--no-partial-relayout")) CGSH_Hardware::g_partialRelayout = false;
 		else if(!std::strcmp(argv[i], "--no-target-pool")) CGSH_Hardware::g_targetPool = false;
+		else if(!std::strcmp(argv[i], "--no-sprite-new-target")) CGSH_Hardware::g_spriteCreatesTarget = false;
+		else if(!std::strcmp(argv[i], "--no-strip-cover")) CGSH_Hardware::g_stripCover = false;
 #endif
 	}
 

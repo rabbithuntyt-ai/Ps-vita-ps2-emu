@@ -464,6 +464,8 @@ bool CGSH_Hardware::RowsOverlap(const TARGET& target, uint32 rowBegin, uint32 ro
 
 void CGSH_Hardware::DeleteTarget(TARGET& target)
 {
+	//W1: a strip clear cut short by removal: GS memory still holds the columns not drawn
+	if(m_stripCover.target == &target) m_stripCover.target = nullptr;
 	if(m_pointTarget == &target)
 	{
 		if(!m_points.empty()) FlushBatch(); //drawn while it was the current target
@@ -498,6 +500,7 @@ void CGSH_Hardware::ReleaseTargetPool()
 
 void CGSH_Hardware::RemoveTargetsOverlapping(const TARGET* except, uint32 start, uint32 size)
 {
+	SettleStripCover(); //W1: a strip clear in progress ends here
 	for(auto it = m_targets.begin(); it != m_targets.end();)
 	{
 		TARGET& other = **it;
@@ -553,6 +556,7 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 	}
 	if(!create) return nullptr;
 
+	SettleStripCover(); //W1
 	FlushBatch();
 
 	auto target = std::make_unique<TARGET>();
@@ -762,10 +766,19 @@ void CGSH_Hardware::RelayoutTarget(TARGET& old, TARGET& target)
 	uint32 rowsReached = std::min(((lastPage / newPerRow) + 1) * pageH, target.height);
 	if(rowsReached > target.validRows)
 	{
-		bool coversAll = ((firstNewPage % newPerRow) == 0) && ((copiedPages % newPerRow) == 0) && ((old.validRows % pageH) == 0) &&
-		                 ((skipPages % oldPerRow) == 0) && ((firstNewPage / newPerRow) * pageH == target.validRows);
-		if(coversAll)
+		// Whole page rows from coveredFrom to rowsReached: the copy replaces them
+		bool wholeRows = ((firstNewPage % newPerRow) == 0) && ((copiedPages % newPerRow) == 0) && ((old.validRows % pageH) == 0) &&
+		                 ((skipPages % oldPerRow) == 0);
+		uint32 coveredFrom = (firstNewPage / newPerRow) * pageH;
+		if(wholeRows && (coveredFrom <= target.validRows))
 			target.validRows = rowsReached; //every row is replaced by the copy
+		else if(wholeRows && g_partialRelayout)
+		{
+			//W1: only the rows above the copy come from GS memory (RE4 uploaded 256x416 of
+			//0x2D8000 and then copied 0x310000 over its lower half)
+			EnsureValidRows(target, coveredFrom);
+			target.validRows = rowsReached;
+		}
 		else
 			EnsureValidRows(target, rowsReached);
 	}
@@ -1071,6 +1084,7 @@ void CGSH_Hardware::MarkTargetDirty(TARGET& target, int32 x0, int32 y0, int32 x1
 
 void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEnd)
 {
+	if(m_stripCover.target == &target) SettleStripCover(); //W1: its columns not drawn yet come from GS memory first
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
 	if(!target.gpuDirty) return;
 	uint32 y0 = std::max(target.dirtyY0, rowBegin);
@@ -1267,6 +1281,7 @@ void CGSH_Hardware::BeginTransferWrite()
 
 void CGSH_Hardware::ProcessHostToLocalTransfer()
 {
+	SettleStripCover(); //W1: a strip clear in progress ends here
 	if(g_gsCeiling) return; //G1 ceiling run: no GPU side
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
 	m_stats.transfersIn++;
@@ -1331,6 +1346,7 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 
 void CGSH_Hardware::ProcessLocalToHostTransfer()
 {
+	SettleStripCover(); //W1: a strip clear in progress ends here
 	if(g_gsCeiling) return; //G1 ceiling run: no GPU side
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
 	m_stats.transfersOut++;
@@ -1344,6 +1360,7 @@ void CGSH_Hardware::ProcessLocalToHostTransfer()
 
 void CGSH_Hardware::ProcessLocalToLocalTransfer()
 {
+	SettleStripCover(); //W1: a strip clear in progress ends here
 	if(g_gsCeiling) return; //G1 ceiling run: no GPU side
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
 	m_stats.transfersLocal++;
@@ -2381,6 +2398,7 @@ bool CGSH_Hardware::BuildWorldProgram()
 
 void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 {
+	SettleStripCover(); //W1: a strip clear in progress ends here
 	if(!g_gpuWorld || (batch.count == 0) || g_gsCeiling)
 	{
 		CGSH_Primitives::DrawWorldBatch(batch);
@@ -2777,6 +2795,16 @@ bool CGSH_Hardware::SkipDrawRule()
 	return true;
 }
 
+bool CGSH_Hardware::WouldSkipDraw() const
+{
+	//SkipDrawRule's answer for the current state, without counting
+	const auto& s = m_state;
+	if(m_skipDraws != 0) return true;
+	if(!s.textured || (s.fbp != 0x310000)) return false;
+	if((s.fpsm == CGSHandler::PSMCT32) && (s.tbp == 0x1C0000) && (s.tpsm == CGSHandler::PSMZ24)) return g_re4SkipDof != 0;
+	return ((s.tbp == 0x2A0000) || (s.tbp == 0x348000)) && (s.fpsm == s.tpsm) && (s.fbmsk == 0);
+}
+
 void CGSH_Hardware::ApplyState()
 {
 	const auto& s = m_state;
@@ -2802,7 +2830,8 @@ void CGSH_Hardware::ApplyState()
 	if(m_diagFile && (target != m_diagLastTarget) && (m_diagUploads.size() < 60000))
 	{
 		char text[96];
-		std::snprintf(text, sizeof(text), " S%X/%u/%X:z%X/%X%s%s", s.fbp, s.fbw, s.fpsm, s.zbp, s.zpsm, s.textured ? "t" : "", s.alphaBlend ? "b" : "");
+		std::snprintf(text, sizeof(text), " S%X/%u/%X:z%X/%X%s%s[%c%s%s%s]", s.fbp, s.fbw, s.fpsm, s.zbp, s.zpsm, s.textured ? "t" : "", s.alphaBlend ? "b" : "",
+		              "pltsx"[std::min<uint32>(m_diagFirstKind, 4)], (s.zte && (s.ztst != DEPTH_TEST_ALWAYS)) ? "z" : "", (s.ate && (s.atst != ALPHA_TEST_ALWAYS)) ? "a" : "", (s.fbmsk != 0) ? "m" : "");
 		m_diagUploads += text;
 		m_diagLastTarget = target;
 	}
@@ -3157,17 +3186,40 @@ void CGSH_Hardware::AddVertex(const CSoftwareRasterizer::VERTEX& v)
 	m_batch.push_back(out);
 }
 
-void CGSH_Hardware::SkipOverwrittenRows(const CSoftwareRasterizer::VERTEX& a, const CSoftwareRasterizer::VERTEX& b)
+void CGSH_Hardware::SettleStripCover()
+{
+	auto& c = m_stripCover;
+	if(!c.target) return;
+	TARGET* target = c.target;
+	c.target = nullptr;
+	if(c.coveredX < target->width)
+	{
+		g_stripCoverSettles++;
+		UploadTarget(*target, c.coveredX, c.begin, target->width - c.coveredX, c.end - c.begin);
+	}
+}
+
+bool CGSH_Hardware::SkipOverwrittenRows(const CSoftwareRasterizer::VERTEX& a, const CSoftwareRasterizer::VERTEX& b)
 {
 	// Only pixels the sprite surely replaces: no blending, masks or tests
 	// that can keep the old color.
 	const auto& s = m_state;
-	if(s.alphaBlend || (s.fbmsk != 0) || s.date) return;
-	if(s.ate && (s.atst != ALPHA_TEST_ALWAYS)) return;
-	if(s.zte && (s.ztst != DEPTH_TEST_ALWAYS)) return;
+	if(s.alphaBlend || (s.fbmsk != 0) || s.date) return false;
+	if(s.ate && (s.atst != ALPHA_TEST_ALWAYS)) return false;
+	if(s.zte && (s.ztst != DEPTH_TEST_ALWAYS)) return false;
+	// A strip clear in progress on another buffer ends here
+	if(m_stripCover.target && ((m_stripCover.target->fbp != s.fbp) || (m_stripCover.target->fbw != s.fbw))) SettleStripCover();
 	uint32 needed = static_cast<uint32>(std::max(s.scay1, 0)) + 1;
-	TARGET* target = FindTarget(s.fbp, s.fbw, s.fpsm, false, needed);
-	if(!target) return;
+	// W1: a target this draw needs is created here, as ApplyState would right after, so a new
+	// one is not uploaded first (RE4 copies the whole frame into a new 512x448 target at
+	// 0x310000 with one sprite). Not for draws ApplyState leaves out.
+	bool create = g_spriteCreatesTarget && !(g_re4SkipDof && WouldSkipDraw());
+	TARGET* target = FindTarget(s.fbp, s.fbw, s.fpsm, create, needed);
+	if(!target)
+	{
+		SettleStripCover();
+		return false;
+	}
 	needed = std::min(needed, target->height);
 	// Pixels the sprite draws: [ceil(x0), ceil(x1)) (12.4 fixed point corners,
 	// as CSoftwareRasterizer; a frame drawn at -0.25..511.75 covers 0..511).
@@ -3176,14 +3228,56 @@ void CGSH_Hardware::SkipOverwrittenRows(const CSoftwareRasterizer::VERTEX& a, co
 	int32 x0 = ceilPixel(std::min(a.x, b.x)), x1 = ceilPixel(std::max(a.x, b.x));
 	int32 y0 = ceilPixel(std::min(a.y, b.y)), y1 = ceilPixel(std::max(a.y, b.y));
 	int32 width = static_cast<int32>(target->width);
-	if((x0 > 0) || (x1 < width) || (s.scax0 > 0) || (s.scax1 < width - 1)) return;
-	// Whole rows [begin, end) covered: their GS memory is not needed on the
-	// GPU, no upload. Other targets holding these rows still go back to
-	// memory, as for an upload.
+	if(m_diagFile && (m_diagUploads.size() < 60000))
+	{
+		char text[96];
+		std::snprintf(text, sizeof(text), " K%X:%d,%d-%d,%d/sc%d,%d-%d,%d/v%u", target->fbp, x0, y0, x1, y1, s.scax0, s.scay0, s.scax1, s.scay1, target->validRows);
+		m_diagUploads += text;
+	}
 	auto covers = [&](uint32 begin, uint32 end) {
 		return (y0 <= static_cast<int32>(begin)) && (y1 >= static_cast<int32>(end)) &&
 		       (s.scay0 <= static_cast<int32>(begin)) && (s.scay1 + 1 >= static_cast<int32>(end));
 	};
+	// Columns this sprite draws (sprite and scissor)
+	int32 cx0 = std::max<int32>(std::max(x0, 0), s.scax0), cx1 = std::min<int32>(std::min(x1, width), s.scax1 + 1);
+	auto& cover = m_stripCover;
+	if(cover.target)
+	{
+		// The next strip: it must cover the pending rows and start inside the covered columns
+		if((cover.target == target) && covers(cover.begin, cover.end) && (cx0 <= static_cast<int32>(cover.coveredX)) && (cx1 > static_cast<int32>(cover.coveredX)))
+		{
+			cover.coveredX = static_cast<uint32>(cx1);
+			if(cover.coveredX >= target->width)
+			{
+				g_stripCoverSkips++;
+				m_stats.skippedUploadRows += cover.end - cover.begin;
+				cover.target = nullptr;
+			}
+			return true;
+		}
+		SettleStripCover();
+	}
+	if((x0 > 0) || (x1 < width) || (s.scax0 > 0) || (s.scax1 < width - 1))
+	{
+		// The first strip of a strip clear over rows never uploaded (and none stale)
+		if(g_stripCover && (needed > target->validRows) && (target->staleBegin >= target->staleEnd) && covers(target->validRows, needed) &&
+		   (cx0 <= 0) && (cx1 > 0) && (cx1 < width))
+		{
+			uint32 start = 0, stop = 0;
+			RowsToBytes(*target, target->validRows, needed, start, stop);
+			RemoveTargetsOverlapping(target, start, stop - start);
+			cover.target = target;
+			cover.begin = target->validRows;
+			cover.end = needed;
+			cover.coveredX = static_cast<uint32>(cx1);
+			target->validRows = needed;
+			return true;
+		}
+		return false;
+	}
+	// Whole rows [begin, end) covered: their GS memory is not needed on the
+	// GPU, no upload. Other targets holding these rows still go back to
+	// memory, as for an upload.
 	auto skip = [&](uint32 begin, uint32 end) {
 		uint32 start = 0, stop = 0;
 		RowsToBytes(*target, begin, end, start, stop);
@@ -3200,6 +3294,7 @@ void CGSH_Hardware::SkipOverwrittenRows(const CSoftwareRasterizer::VERTEX& a, co
 		skip(target->validRows, needed);
 		target->validRows = needed;
 	}
+	return false;
 }
 
 void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoftwareRasterizer::VERTEX* vertices)
@@ -3209,8 +3304,17 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 	{
 		// The first primitive after a state change: an opaque sprite over
 		// rows that were never uploaded makes their upload unnecessary.
-		if(kind == CSoftwareRasterizer::PRIMITIVE_SPRITE) SkipOverwrittenRows(vertices[0], vertices[1]);
+		m_diagFirstKind = kind & 3;
+		bool continuesStrip = (kind == CSoftwareRasterizer::PRIMITIVE_SPRITE) && SkipOverwrittenRows(vertices[0], vertices[1]);
+		if(!continuesStrip) SettleStripCover();
 		ApplyState();
+	}
+	else if(m_stripCover.target)
+	{
+		// Same state, the scissor may span more than the strips covered so far: a sprite
+		// that continues them extends the cover, anything else gets the rest uploaded first
+		bool continuesStrip = (kind == CSoftwareRasterizer::PRIMITIVE_SPRITE) && SkipOverwrittenRows(vertices[0], vertices[1]);
+		if(!continuesStrip) SettleStripCover();
 	}
 	if(m_diagFile && (kind == CSoftwareRasterizer::PRIMITIVE_TRIANGLE) && ((m_diagKinds[2] % 700) == 1) && (m_diagPrims.size() < 6000))
 	{
@@ -3350,6 +3454,7 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 
 void CGSH_Hardware::OnDrawStripTriangle(const CSoftwareRasterizer::VERTEX* vertices, bool continues)
 {
+	if(m_stripCover.target) SettleStripCover(); //W1
 	g_stripCalls++;
 	if(continues) g_stripContinues++;
 	g_stripCalls++;
@@ -3622,6 +3727,7 @@ void CGSH_Hardware::WriteFrameDump(const uint32* pixels, uint32 width, uint32 he
 
 void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 {
+	SettleStripCover(); //W1: a strip clear in progress ends here
 	CStageTimer stageTimer(GPU_STAGE_DISPLAY);
 	FlushBatch();
 	m_depthSceneValid = false;
