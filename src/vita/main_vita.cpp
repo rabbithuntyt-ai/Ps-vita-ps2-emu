@@ -277,6 +277,7 @@ namespace
 		bool movieHle = false;   //native movie decoding (libmpeg 2.2 games, docs/HLE_MPEG.md)
 		bool eeOverlays = false; //native overlays of hot EE functions (EeOverlays.h, docs/PATH_TO_30FPS.md E3)
 		std::string overlaysOff; //names of overlays left off, comma separated (ov_off)
+		std::string overlaysStub; //names entered through a syscall stub instead of the block hook (ov_stub)
 	};
 
 	std::string SettingsPathFor(const std::string& gamePath)
@@ -312,6 +313,7 @@ namespace
 		else if(key == "jit_regions") settings.jitRegions = value != 0;
 		else if(key == "ee_overlays") settings.eeOverlays = value != 0;
 		else if(key == "ov_off") settings.overlaysOff = text;
+		else if(key == "ov_stub") settings.overlaysStub = text;
 		else if(key == "cheap_exits") settings.cheapExits = value != 0;
 		else if(key == "pinned_fields") settings.pinnedFields = value != 0;
 		else if(key == "fast_ram") settings.fastRam = value != 0;
@@ -956,6 +958,13 @@ namespace
 					size_t end = settings.overlaysOff.find(',', start);
 					if(end == std::string::npos) end = settings.overlaysOff.size();
 					if(end > start) overlaySettings.disabled.push_back(settings.overlaysOff.substr(start, end - start));
+					start = end + 1;
+				}
+				for(size_t start = 0; start <= settings.overlaysStub.size();)
+				{
+					size_t end = settings.overlaysStub.find(',', start);
+					if(end == std::string::npos) end = settings.overlaysStub.size();
+					if(end > start) overlaySettings.stubs.push_back(settings.overlaysStub.substr(start, end - start));
 					start = end + 1;
 				}
 				eeOverlays.Enable(*session->GetVm(), overlaySettings, VITAPS2_DATA_DIR "/overlays.txt");

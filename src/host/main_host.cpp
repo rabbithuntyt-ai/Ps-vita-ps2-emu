@@ -273,6 +273,18 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--overlay-verify-every") && (i + 1 < argc)) overlaySettings.verifyEvery = std::max(1, std::atoi(argv[++i]));
 		else if(!std::strcmp(argv[i], "--overlay-selftest")) overlaySettings.selfTest = true; //the check must report every call
 		else if(!std::strcmp(argv[i], "--overlay-verify-max") && (i + 1 < argc)) overlaySettings.verifyMax = std::atoi(argv[++i]);
+		else if(!std::strcmp(argv[i], "--overlay-stub") && (i + 1 < argc))
+		{
+			//names entered through a syscall stub instead of the block hook, comma separated
+			std::string names = argv[++i];
+			for(size_t start = 0; start <= names.size();)
+			{
+				size_t end = names.find(',', start);
+				if(end == std::string::npos) end = names.size();
+				if(end > start) overlaySettings.stubs.push_back(names.substr(start, end - start));
+				start = end + 1;
+			}
+		}
 		else if(!std::strcmp(argv[i], "--overlay-off") && (i + 1 < argc))
 		{
 			//names, comma separated (or "all")

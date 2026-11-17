@@ -844,7 +844,8 @@ struct CEeOverlays::INSTANCE
 	uint32 address = 0;
 	uint32 params[2] = {};
 	bool enabled = true;
-	bool stub = false;
+	bool stub = false;    //wanted as a stub (settings)
+	bool patched = false; //the stub is in place
 	std::atomic<uint64_t> calls{0};
 	std::atomic<uint64_t> taken{0};
 	std::atomic<uint64_t> verified{0};
@@ -974,6 +975,8 @@ bool CEeOverlays::Lookup(void* context, CMIPS& ee, uint32 address, EeOverlay::HO
 		instance->address = address;
 		std::memcpy(instance->params, params, sizeof(params));
 		instance->enabled = !disabled;
+		for(const auto& name : self->m_settings.stubs)
+			if((name == overlay.name) && overlay.stubSafe && !self->m_settings.verify && !disabled) instance->stub = true;
 		hook.function = &CEeOverlays::Dispatch;
 		hook.id = id;
 		hook.codeSize = overlay.words * 4;
@@ -1013,7 +1016,7 @@ void CEeOverlays::OnSyscall(void* context, CMIPS& ee)
 	uint32 address = ee.m_State.nCOP0[CCOP_SCU::EPC] - 4;
 	for(auto* instance : self->m_instances)
 	{
-		if(!instance->stub || (instance->address != address)) continue;
+		if(!instance->patched || (instance->address != address)) continue;
 		instance->calls.fetch_add(1, std::memory_order_relaxed);
 		if(self->Run(ee, *instance)) instance->taken.fetch_add(1, std::memory_order_relaxed);
 		return;
@@ -1028,9 +1031,42 @@ void CEeOverlays::OnVBlank(void* context, CMIPS& ee)
 
 void CEeOverlays::PatchStubs(CMIPS& ee)
 {
-	// Stubs: only for overlays that never decline, set per name in the settings
-	// (none by default: the block hook serves every overlay here)
-	(void)ee;
+	// Stubs (settings: stubs, only overlays that never decline): the function's first
+	// four words become addiu v1, zero, SYSCALL; syscall; jr ra; nop. The overlay was
+	// found by its code when a block was first compiled there; here the code is
+	// checked again before it is patched, and a stub the game overwrote (code loaded
+	// again) is noticed and patched again once the code matches.
+	static const uint32 stub[4] = {0x24030000 | EeOverlay::SYSCALL, 0x0000000C, 0x03E00008, 0x00000000};
+	uint8* ram = m_vm->m_ee->m_ram;
+	for(auto* instance : m_instances)
+	{
+		if(!instance->stub) continue;
+		uint32 address = instance->address;
+		const OVERLAY& overlay = *instance->overlay;
+		if(std::memcmp(ram + address, stub, sizeof(stub)) == 0)
+		{
+			instance->patched = true;
+			continue;
+		}
+		instance->patched = false;
+		bool match = true;
+		for(uint32 i = 0; match && (i < overlay.words); i++)
+		{
+			uint32 mask = ~0U;
+			for(const auto& [word, wordMask] : overlay.masks)
+				if(word == i) mask = wordMask;
+			uint32 value = 0;
+			std::memcpy(&value, ram + address + i * 4, 4);
+			match = ((value ^ overlay.code[i]) & mask) == 0;
+		}
+		if(!match) continue;
+		uint32 pc = ee.m_State.nPC & 0x1FFFFFFF;
+		if((pc >= address) && (pc < address + sizeof(stub))) continue; //not under the PC
+		std::memcpy(ram + address, stub, sizeof(stub));
+		ee.m_executor->ClearActiveBlocksInRange(address, address + overlay.words * 4, false);
+		instance->patched = true;
+		Log("%s at 0x%08X: syscall stub\n", overlay.name, address);
+	}
 }
 
 uint32 CEeOverlays::VerifyEntry(CMIPS& ee, INSTANCE& instance)

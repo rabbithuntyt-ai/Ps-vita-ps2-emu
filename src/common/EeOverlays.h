@@ -42,6 +42,8 @@ public:
 		bool enabled = true;
 		// Names of the overlays switched off (empty: all on), or on ("" = default set).
 		std::vector<std::string> disabled;
+		// Overlays entered through a syscall stub patched over the function (only those that never decline)
+		std::vector<std::string> stubs;
 		bool verify = false;       // compare against the original instead of replacing it
 		uint32_t verifyFirst = 200; // every call of an overlay up to this many...
 		uint32_t verifyEvery = 50;  // ...then one in N
