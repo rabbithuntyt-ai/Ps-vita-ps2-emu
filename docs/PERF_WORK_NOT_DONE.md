@@ -180,6 +180,33 @@ and same data as frame 0, 4.4% same data at another address, 2.0% new; no addres
 different data. No transfers from the scratchpad; 6,803 include their DMA tag. Geometry can
 be keyed by address (W2), with a data check.
 
+### W1, no round trips: first steps (2026-11-16/17)
+
+How a game frame's render target traffic looks (PC runner, `gs_diag`, `runs/re4/diagrt.py`):
+RE4's post-processing draws into 0x2A0000, 0x2D8000, 0x310000 and 0x348000 at 64, 128, 256
+and 512 pixel widths by turns. Each width change made a new target (`N`), filled by a
+read-back of the old one (`D`) and an upload from GS memory (`U`). Before W1, per game frame:
+10 new targets, 8 uploads, 7 read-backs, 3 GPU relayouts.
+
+| Step (setting, all on) | What it removes |
+|---|---|
+| Target pool (`target_pool`) | Released targets keep their GL objects (8, by size): 10 creations a frame became 3 |
+| Partial relayout (`partial_relayout`) | A new target that starts inside an old one of the same pixel size at a whole page row gets the shared pages by GPU copy; the old one keeps its rows before it |
+| Sprite creates its target (`sprite_new_target`) | An opaque first sprite's target is created before the upload decision |
+| Strip cover (`strip_cover`) | RE4 clears the new 512x448 target at 0x310000 with eight full-screen sprites under 64-wide scissors: consecutive opaque strips replace never-uploaded rows, so no upload; anything else touching targets first uploads the columns not drawn yet |
+| Narrower relayout uploads (part of `partial_relayout`) | A relayout covering whole page rows from row R on uploads only the rows above R (0x2D8000: 256x416 became 256x192) |
+
+On the Vita (RE4 gameplay, two alternating rounds, GPU thread ms per second for read-backs +
+uploads + target creation + relayouts): all of W1 off 299 and 302; W1 without the strip
+cover 240 and 239; with it 191 and 192 (uploads 113 -> 65). The narrower relayout uploads
+came after these runs. Game fps 1.68/1.71 off against 1.76-1.80 on: within run noise, as the
+whole step is about 11% of the GPU thread. Pictures as before (PC: no pixel off by more than
+16, mean difference 0.01; the GS tests caught a strip cover bug before it shipped).
+
+Still per frame (PC): 6 uploads (largest 256x224 at 0x310000 and 0x348000, 256x192 at
+0x2D8000), 12 read-backs (largest: all of 0x2D8000 256x448 when it is reused 64 wide; 128x224
+of 0x348000; seven 128x32 pieces of 0x348000 when the last pass reads it as a texture).
+
 P1 as built: `CVif1::ReceiveDMA` copies the DMA data into a queue and returns at once (small
 chunks without a tag are merged, buffers are reused). The VU1 worker runs `ProcessPacket` on it
 and runs each program inline. DIRECT data and MSKPATH3 go into the XGKICK queue, so PATH1 and
