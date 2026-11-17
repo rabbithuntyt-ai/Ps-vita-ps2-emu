@@ -222,6 +222,8 @@ public:
 	static inline uint64 g_retainedHits = 0, g_retainedMisses = 0, g_retainedEvictions = 0;
 	static inline uint64 g_retainedInside = 0, g_retainedOutside = 0, g_retainedEdge = 0; //batches drawn retained, skipped, left to the clipping path
 	static inline float g_retainedMegabytes = 0; //W2: GPU memory in use for it (perf.csv world_cache_mb)
+	static inline bool g_retainedRunsOn = true; //W2: consecutive retained draws share their setup (gpu_world_runs)
+	static inline uint64 g_retainedRuns = 0;    //runs started
 	static inline uint64 g_stripCoverSkips = 0, g_stripCoverSettles = 0; //strip clears completed, cut short
 	// Copies of the target being drawn made by a draw, not glCopyTexSubImage2D (feedback_draw, on)
 	static inline bool g_feedbackDraw = true;
@@ -407,6 +409,8 @@ private:
 	void SetWorldFragmentUniforms(GLint tex, GLint texXf, GLint mode, GLint fog, GLint alpha);
 	void TrimRetainedWorld();
 	void ReleaseRetainedWorld();
+	bool m_retainedRun = false; //W2: the retained program and streams are set up (EndRetainedRun undoes it)
+	void EndRetainedRun();
 	// Alpha test as ApplyState set it (GL function, reference), for the shader
 	GLenum m_alphaTestFunc = GL_ALWAYS;
 	float m_alphaTestRef = 0;

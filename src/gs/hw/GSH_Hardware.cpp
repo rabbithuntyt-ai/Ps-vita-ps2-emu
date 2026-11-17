@@ -292,6 +292,7 @@ bool CGSH_Hardware::Pump(uint32 timeoutMs)
 		g_mailCalls++;
 	}
 	FlushBatch();
+	EndRetainedRun(); //the frontend draws on this context between pumps
 	GetTimes().pumpUs += NowUs() - pumpStart;
 	bool flipped = m_flipped;
 	m_flipped = false;
@@ -775,6 +776,7 @@ void CGSH_Hardware::TrimTargetFront(TARGET& target, uint32 rows)
 
 void CGSH_Hardware::DrawCopyQuads(GLuint texture, GLuint framebuffer, uint32 width, uint32 height, const std::vector<BATCH_VERTEX>& quads)
 {
+	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
 	glViewport(0, 0, width, height);
 	glDisable(GL_SCISSOR_TEST);
@@ -946,6 +948,7 @@ void CGSH_Hardware::RelayoutTarget(TARGET& old, TARGET& target)
 
 void CGSH_Hardware::AllocateTargetGl(TARGET& target)
 {
+	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	CPartTimer timer(GPU_PART_TARGET_CREATE);
 	for(auto it = m_targetPool.begin(); it != m_targetPool.end(); ++it)
 	{
@@ -1092,6 +1095,7 @@ void CGSH_Hardware::EnsureValidRows(TARGET& target, uint32 rows)
 
 void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 width, uint32 height)
 {
+	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
 	x0 = std::min(x0, target.width);
 	y0 = std::min(y0, target.height);
@@ -1178,6 +1182,7 @@ void CGSH_Hardware::MarkTargetDirty(TARGET& target, int32 x0, int32 y0, int32 x1
 
 void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEnd)
 {
+	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	if(m_stripCover.target == &target) SettleStripCover(); //W1: its columns not drawn yet come from GS memory first
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
 	if(!target.gpuDirty) return;
@@ -2003,6 +2008,7 @@ bool CGSH_Hardware::BindAlphaClutTexture()
 	glBindTexture(GL_TEXTURE_2D, source->colorTexture);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	glUseProgram(m_alphaClutProgram);
 	glUniform1i(m_alphaClutSourceLocation, 0);
 	glUniform1i(m_alphaClutClutLocation, 1);
@@ -2728,6 +2734,7 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 void CGSH_Hardware::FlushWorld()
 {
 	if(m_worldSlots == 0) return;
+	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	if(m_worldIndices.empty() || !m_currentTarget)
 	{
 		m_worldVertices.clear();
@@ -3062,29 +3069,46 @@ bool CGSH_Hardware::DrawRetainedWorld(const Re4Vu1::WORLD_BATCH& batch)
 	}
 	if(entry.indexCount == 0) return true;
 
-	FlushBatch(); //what was drawn before this batch goes first
+	FlushBatch(); //what was drawn before this batch goes first (ends a run if it draws)
 	CPartTimer timer(GPU_PART_DRAW);
-	glUseProgram(m_retainedProgram);
+	if(!m_retainedRun)
+	{
+		// A run of retained draws: program, streams, culling and the fragment side once
+		glUseProgram(m_retainedProgram);
+		SetWorldFragmentUniforms(m_retainedLocations[4], m_retainedLocations[5], m_retainedLocations[6], m_retainedLocations[7], m_retainedLocations[8]);
+		glDisableClientState(GL_VERTEX_ARRAY);
+		glDisableClientState(GL_COLOR_ARRAY);
+		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+		for(GLuint i = 0; i < 3; i++) glEnableVertexAttribArray(i);
+		glEnable(GL_CULL_FACE);
+		glFrontFace(GL_CCW);
+		glCullFace(GL_FRONT); //as FlushWorld: the order follows the winding sign
+		m_retainedRun = true;
+		g_retainedRuns++;
+	}
 	glUniform4fv(m_retainedLocations[0], 4, mf);
 	glUniform4f(m_retainedLocations[1], batch.colorOffset.x, batch.colorOffset.y, batch.colorOffset.z, 0);
 	glUniform4f(m_retainedLocations[2], batch.colorScale.x * batch.colorOffset.w, batch.colorScale.y * batch.colorOffset.w, batch.colorScale.z * batch.colorOffset.w, 1);
 	// The FOG register at the batch's kicks (the packet does not set it; games set it per object)
 	float fog = s.fog ? static_cast<float>((m_nReg[GS_REG_FOG] >> 56) & 0xFF) / 255.0f : 1.0f;
 	glUniform4f(m_retainedLocations[3], batch.vf31.x, batch.vf31.y, fog, 0);
-	SetWorldFragmentUniforms(m_retainedLocations[4], m_retainedLocations[5], m_retainedLocations[6], m_retainedLocations[7], m_retainedLocations[8]);
-	glDisableClientState(GL_VERTEX_ARRAY);
-	glDisableClientState(GL_COLOR_ARRAY);
-	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 	glBindBuffer(GL_ARRAY_BUFFER, entry.vbo);
-	for(GLuint i = 0; i < 3; i++) glEnableVertexAttribArray(i);
 	glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 48, reinterpret_cast<const void*>(0));
 	glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 48, reinterpret_cast<const void*>(16));
 	glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 48, reinterpret_cast<const void*>(32));
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, entry.ibo);
-	glEnable(GL_CULL_FACE);
-	glFrontFace(GL_CCW);
-	glCullFace(GL_FRONT); //as FlushWorld: the order follows the winding sign
 	glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(entry.indexCount), GL_UNSIGNED_SHORT, nullptr);
+	if(!g_retainedRunsOn) EndRetainedRun(); //gpu_world_runs=0: one draw at a time
+	g_gpuWorldDraws++;
+	m_stats.drawCalls++;
+	m_currentTarget->drawBatches++;
+	return true;
+}
+
+void CGSH_Hardware::EndRetainedRun()
+{
+	if(!m_retainedRun) return;
+	m_retainedRun = false;
 	glDisable(GL_CULL_FACE);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -3093,10 +3117,6 @@ bool CGSH_Hardware::DrawRetainedWorld(const Re4Vu1::WORLD_BATCH& batch)
 	glEnableClientState(GL_VERTEX_ARRAY);
 	glEnableClientState(GL_COLOR_ARRAY);
 	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-	g_gpuWorldDraws++;
-	m_stats.drawCalls++;
-	m_currentTarget->drawBatches++;
-	return true;
 }
 
 void CGSH_Hardware::TrimRetainedWorld()
@@ -3122,6 +3142,7 @@ void CGSH_Hardware::TrimRetainedWorld()
 
 void CGSH_Hardware::ReleaseRetainedWorld()
 {
+	EndRetainedRun();
 	for(auto& [key, entry] : m_retainedWorld)
 	{
 		if(entry.vbo) glDeleteBuffers(1, &entry.vbo);
@@ -3212,6 +3233,7 @@ bool CGSH_Hardware::WouldSkipDraw() const
 
 void CGSH_Hardware::ApplyState()
 {
+	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	const auto& s = m_state;
 	m_stateApplied = true;
 	m_batchShaderActive = g_shaderBatches && BuildBatchProgram();
@@ -3929,6 +3951,7 @@ void CGSH_Hardware::AddDirectPoint(const CSoftwareRasterizer::VERTEX& v)
 void CGSH_Hardware::FlushPoints()
 {
 	if(m_points.empty()) return;
+	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	TARGET& target = *m_pointTarget;
 	uint32 width = m_pointX1 - m_pointX0 + 1, height = m_pointY1 - m_pointY0 + 1;
 	if(m_pointUnique == width * height)
@@ -3986,6 +4009,7 @@ void CGSH_Hardware::FlushBatch()
 	FlushWorld();
 	FlushPoints();
 	if(m_batch.empty()) return;
+	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	if(m_batchShaderActive)
 	{
 		DrawBatchWithProgram();
@@ -4132,6 +4156,7 @@ void CGSH_Hardware::WriteFrameDump(const uint32* pixels, uint32 width, uint32 he
 
 void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 {
+	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	SettleStripCover(); //W1: a strip clear in progress ends here
 	CStageTimer stageTimer(GPU_STAGE_DISPLAY);
 	FlushBatch();
