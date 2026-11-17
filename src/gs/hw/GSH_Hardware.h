@@ -416,6 +416,8 @@ private:
 	void ReleaseTargetPool();
 	// Keeps only the first rows of a target (on the GPU, no read back).
 	void ShrinkTarget(TARGET&, uint32 rows);
+	// W1: drops the first rows (whole page rows): the target starts after them
+	void TrimTargetFront(TARGET&, uint32 rows);
 	void RemoveTargetsOverlapping(const TARGET* except, uint32 start, uint32 size);
 	void EnsureValidRows(TARGET&, uint32 rows);
 	// Rows a transfer rewrote in another layout: uploaded when used (stale range).

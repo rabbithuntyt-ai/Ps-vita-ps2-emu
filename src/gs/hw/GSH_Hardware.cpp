@@ -631,6 +631,40 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 			}
 		}
 	}
+	// W1: targets of the same pixel size that start inside the new one and reach past its end
+	// at a whole page row (RE4: 0x2D8000 256 wide, 448 rows, used again 64 wide): the rows the
+	// new one covers are copied into it on the GPU, the rest stays a target that starts after
+	// it, instead of a read-back of the whole old one.
+	std::vector<std::pair<std::unique_ptr<TARGET>, uint32>> front; //target, rows the new one covers
+	if(g_gpuRelayout && g_partialRelayout)
+	{
+		for(auto it = m_targets.begin(); it != m_targets.end();)
+		{
+			const TARGET& old = **it;
+			uint32 overlapRows = 0;
+			bool take = (PsmClass(old.psm) == PsmClass(target->psm)) && !old.depthUsed && (old.staleBegin >= old.staleEnd) && (old.validRows != 0) &&
+			            (old.fbp >= start) && (old.fbp < end) && (old.width == old.fbw * 64) && (target->width == target->fbw * 64);
+			if(take)
+			{
+				uint32 oldStart = 0, oldEnd = 0;
+				RowsToBytes(old, 0, old.validRows, oldStart, oldEnd);
+				GS_SURFACE surface;
+				surface.Init(old.psm, old.fbp, old.fbw);
+				uint32 rowBytes = std::max<uint32>(surface.pagesPerRow, 1) * 8192;
+				overlapRows = ((end - old.fbp) / rowBytes) << surface.phShift;
+				take = (oldEnd > end) && (((end - old.fbp) % rowBytes) == 0) && (overlapRows != 0) && (overlapRows < old.validRows);
+			}
+			if(take)
+			{
+				front.emplace_back(std::move(*it), overlapRows);
+				it = m_targets.erase(it);
+			}
+			else
+			{
+				++it;
+			}
+		}
+	}
 	for(auto& other : m_targets)
 	{
 		if((other->fbp >= start) || other->depthUsed) continue;
@@ -675,8 +709,65 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 		m_stats.partialRelayouts++;
 		m_targets.push_back(std::move(old));
 	}
-	if(!partial.empty()) m_stateApplied = false;
+	for(auto& [old, overlapRows] : front)
+	{
+		uint32 validRows = old->validRows;
+		old->validRows = overlapRows; //only these rows go to the new target
+		RelayoutTarget(*old, *created);
+		old->validRows = validRows;
+		TrimTargetFront(*old, overlapRows);
+		m_stats.partialRelayouts++;
+		m_targets.push_back(std::move(old));
+	}
+	if(!partial.empty() || !front.empty()) m_stateApplied = false;
 	return created;
+}
+
+void CGSH_Hardware::TrimTargetFront(TARGET& target, uint32 rows)
+{
+	// W1: the first 'rows' rows (whole page rows) leave the target: it starts after them,
+	// its other rows move up on the GPU (callers: no depth, no stale rows)
+	FlushBatch();
+	GS_SURFACE surface;
+	surface.Init(target.psm, target.fbp, target.fbw);
+	uint32 pagesPerRow = std::max<uint32>(surface.pagesPerRow, 1);
+	GLuint oldFramebuffer = target.framebuffer, oldColor = target.colorTexture, oldDepth = target.depthBuffer;
+	uint32 oldHeight = target.height;
+	target.fbp += (rows >> surface.phShift) * pagesPerRow * 8192;
+	target.height = oldHeight - rows;
+	target.framebuffer = target.colorTexture = target.depthBuffer = 0;
+	AllocateTargetGl(target);
+	glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
+	glBindTexture(GL_TEXTURE_2D, target.colorTexture);
+	glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, rows, target.width, target.height);
+	// The old GL objects: to the pool like a released target of the old size
+	TARGET old;
+	old.width = target.width;
+	old.height = oldHeight;
+	old.framebuffer = oldFramebuffer;
+	old.colorTexture = oldColor;
+	old.depthBuffer = oldDepth;
+	DeleteTarget(old);
+	auto shift = [rows](uint32 value) { return (value > rows) ? value - rows : 0; };
+	target.validRows = shift(target.validRows);
+	target.drawnRows = shift(target.drawnRows);
+	if(target.gpuDirty)
+	{
+		if(target.dirtyY1 <= rows)
+			target.gpuDirty = false;
+		else
+		{
+			target.dirtyY0 = shift(target.dirtyY0);
+			target.dirtyY1 -= rows;
+		}
+	}
+	if(m_diagFile && (m_diagUploads.size() < 60000))
+	{
+		char text[64];
+		std::snprintf(text, sizeof(text), " F%X>%X:%u", target.fbp - (rows >> surface.phShift) * pagesPerRow * 8192, target.fbp, rows);
+		m_diagUploads += text;
+	}
+	m_stateApplied = false;
 }
 
 void CGSH_Hardware::DrawCopyQuads(GLuint texture, GLuint framebuffer, uint32 width, uint32 height, const std::vector<BATCH_VERTEX>& quads)
