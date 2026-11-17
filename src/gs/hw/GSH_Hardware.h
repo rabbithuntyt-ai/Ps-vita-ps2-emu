@@ -97,6 +97,7 @@ public:
 		uint32 approximateBlends = 0;
 		uint32 approximateWrapModes = 0; //region repeat masks GL cannot express
 		uint32 targetsCreated = 0;
+		uint32 targetsPooled = 0; //of them, GL objects reused from the pool (W1)
 		uint32 transfersIn = 0, transfersOut = 0, transfersLocal = 0; //host->local, local->host, local->local
 		uint32 deferredUploads = 0;   //target rows left to fill from GS memory on use (texture data over a target)
 		uint32 skippedUploadRows = 0; //target rows an opaque sprite replaced before they were uploaded
@@ -105,6 +106,7 @@ public:
 		uint32 pointRects = 0;         //point runs uploaded as one rectangle
 		uint32 pointsDrawn = 0;        //points drawn as points
 		uint32 relayouts = 0;
+		uint32 partialRelayouts = 0;  //old targets the new one started inside, copied on the GPU and shrunk (W1)
 		uint32 alphaClutPasses = 0;    //alpha index textures converted on the GPU          //targets copied into a new layout on the GPU
 		uint32 contentTextureHits = 0; //textures found by content (see BindTexture)
 		uint32 redundantStateChanges = 0; //state rewrites that did not break batching //state changes with a blend GL cannot express
@@ -211,6 +213,7 @@ public:
 	static inline bool g_contentTextures = true;
 	// Targets copied into a new layout (buffer width) on the GPU (gpu_relayout, on by default)
 	static inline bool g_gpuRelayout = true;
+	static inline bool g_partialRelayout = true; //W1: also targets the new one starts inside (partial_relayout)
 	// Copies of the target being drawn made by a draw, not glCopyTexSubImage2D (feedback_draw, on)
 	static inline bool g_feedbackDraw = true;
 	// Alpha index textures (PSMT8H/4HL/4HH) of render targets converted on the GPU (gpu_alpha_clut, on)
@@ -250,6 +253,8 @@ public:
 	//edge are drawn by the CPU path (gpu_world_guard; 0: off)
 	static inline uint32 g_gpuWorldGuard = 0;
 	static inline uint64 g_mailCalls = 0; //GPU thread mailbox calls received (G0: W5 sizes the queue records)
+	static inline bool g_targetPool = true; //W1: reuse released targets' GL objects (target_pool)
+	static inline uint64 g_targetsPooledTotal = 0; //targets that got pooled GL objects (perf.csv targets_pooled)
 	//World vertices in one array per attribute (gpu_world_soa, on)
 	static inline bool g_gpuWorldSoa = false;
 	static inline uint64 g_gpuWorldGuarded = 0, g_gpuWorldMaxVertices = 0;
@@ -396,6 +401,15 @@ private:
 	// A rectangle of a texture to the same place of another of the same size.
 	void CopyRegionOnGpu(GLuint texture, uint32 width, uint32 height, GLuint framebuffer, uint32 x, uint32 y, uint32 w, uint32 h);
 	void AllocateTargetGl(TARGET&);
+	// W1: GL objects of released targets, reused by AllocateTargetGl for the same size
+	struct POOLED_TARGET
+	{
+		uint32 width, height;
+		GLuint framebuffer, colorTexture, depthBuffer;
+	};
+	enum { TARGET_POOL_SIZE = 8 };
+	std::vector<POOLED_TARGET> m_targetPool;
+	void ReleaseTargetPool();
 	// Keeps only the first rows of a target (on the GPU, no read back).
 	void ShrinkTarget(TARGET&, uint32 rows);
 	void RemoveTargetsOverlapping(const TARGET* except, uint32 start, uint32 size);

@@ -363,6 +363,8 @@ namespace
 		else if(key == "gpu_world_soa") CGSH_Hardware::g_gpuWorldSoa = value != 0; //world vertices one array per attribute (on)
 		else if(key == "gpu_world_guard") CGSH_Hardware::g_gpuWorldGuard = value; //hundredths of a screen beyond the edge (200; 0: off)
 		else if(key == "gs_ceiling") CGSH_Primitives::g_gsCeiling = value != 0; //G1 ceiling run: no draws or GPU transfers (pictures wrong)
+		else if(key == "target_pool") CGSH_Hardware::g_targetPool = value != 0; //W1: reuse released render targets' GL objects (on)
+		else if(key == "partial_relayout") CGSH_Hardware::g_partialRelayout = value != 0; //W1 (on)
 		else if(key == "gpu_world_debug") CGSH_Hardware::g_gpuWorldDebug = value; //4: no culling, 64: the other faces (diagnostics)
 		else if(key == "gs_vertex_ring") CGSH_Hardware::g_vertexRing = value != 0; //with gs_shaders: vertices in GPU buffers (on)
 		else if(key == "re4_skip_dof") CGSH_Hardware::g_re4SkipDof = value; //RE4: draws left out after the depth blur starts (176)
@@ -797,7 +799,7 @@ namespace
 				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop");
 				//The IOP thread's sections (iop_thread)
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",iopt_%s", EmuProfile::GetSectionName(i));
-				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3,gs_feed_ms,gs_feed_calls,gs_feed_kb,gs_regs_ms,gs_reg_calls,gs_reg_writes,gs_mail_calls,world_ms");
+				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3,gs_feed_ms,gs_feed_calls,gs_feed_kb,gs_regs_ms,gs_reg_calls,gs_reg_writes,gs_mail_calls,world_ms,targets_pooled");
 				std::fprintf(perfFile, "\n");
 			}
 		}
@@ -1591,6 +1593,9 @@ namespace
 								             (unsigned long long)((now[2] - last[2]) / 1024), (now[3] - last[3]) / 1000.0, (unsigned long long)(now[4] - last[4]),
 								             (unsigned long long)(now[5] - last[5]), (unsigned long long)(now[6] - last[6]), (now[7] - last[7]) / 1000.0);
 								for(int i = 0; i < 8; i++) last[i] = now[i];
+								static uint64 lastPooled = 0;
+								std::fprintf(perfFile, ",%llu", (unsigned long long)(CGSH_Hardware::g_targetsPooledTotal - lastPooled));
+								lastPooled = CGSH_Hardware::g_targetsPooledTotal;
 							}
 						}
 						std::fprintf(perfFile, "\n");

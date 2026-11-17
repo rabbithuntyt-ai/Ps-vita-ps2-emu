@@ -363,6 +363,7 @@ void CGSH_Hardware::ReleaseImpl()
 		DeleteTarget(*target);
 	}
 	m_targets.clear();
+	ReleaseTargetPool();
 	for(auto& texture : m_glTextures)
 	{
 		glDeleteTextures(1, &texture.second.texture);
@@ -470,10 +471,29 @@ void CGSH_Hardware::DeleteTarget(TARGET& target)
 	}
 	if(m_currentTarget == &target) m_currentTarget = nullptr;
 	if(m_lastDisplayedTarget == &target) m_lastDisplayedTarget = nullptr;
-	if(target.framebuffer) glDeleteFramebuffers(1, &target.framebuffer);
-	if(target.colorTexture) glDeleteTextures(1, &target.colorTexture);
-	if(target.depthBuffer) glDeleteRenderbuffers(1, &target.depthBuffer);
+	if(g_targetPool && target.framebuffer && target.colorTexture && target.depthBuffer && (m_targetPool.size() < TARGET_POOL_SIZE))
+	{
+		//W1: keep the GL objects for the next target of this size (a new one costs ~19 ms on the Vita)
+		m_targetPool.push_back({target.width, target.height, target.framebuffer, target.colorTexture, target.depthBuffer});
+	}
+	else
+	{
+		if(target.framebuffer) glDeleteFramebuffers(1, &target.framebuffer);
+		if(target.colorTexture) glDeleteTextures(1, &target.colorTexture);
+		if(target.depthBuffer) glDeleteRenderbuffers(1, &target.depthBuffer);
+	}
 	target.framebuffer = target.colorTexture = target.depthBuffer = 0;
+}
+
+void CGSH_Hardware::ReleaseTargetPool()
+{
+	for(const auto& pooled : m_targetPool)
+	{
+		glDeleteFramebuffers(1, &pooled.framebuffer);
+		glDeleteTextures(1, &pooled.colorTexture);
+		glDeleteRenderbuffers(1, &pooled.depthBuffer);
+	}
+	m_targetPool.clear();
 }
 
 void CGSH_Hardware::RemoveTargetsOverlapping(const TARGET* except, uint32 start, uint32 size)
@@ -573,6 +593,40 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 			}
 		}
 	}
+	// W1: targets of the same pixel size that the new one starts inside, at a whole row of
+	// pages (Resident Evil 4: 0x2D8000 256 wide inside 0x2A0000 256 wide, 7 page rows in).
+	// The pages they share are copied on the GPU and the old one keeps its rows before the
+	// new one, instead of a read-back of the old one and an upload of the new one.
+	std::vector<std::pair<std::unique_ptr<TARGET>, uint32>> partial; //target, rows it keeps
+	if(g_gpuRelayout && g_partialRelayout)
+	{
+		for(auto it = m_targets.begin(); it != m_targets.end();)
+		{
+			const TARGET& old = **it;
+			uint32 keepRows = 0;
+			bool take = (PsmClass(old.psm) == PsmClass(target->psm)) && !old.depthUsed && (old.staleBegin >= old.staleEnd) && (old.validRows != 0) &&
+			            (old.fbp < start) && (old.width == old.fbw * 64) && (target->width == target->fbw * 64);
+			if(take)
+			{
+				uint32 oldStart = 0, oldEnd = 0;
+				RowsToBytes(old, 0, old.validRows, oldStart, oldEnd);
+				GS_SURFACE surface;
+				surface.Init(old.psm, old.fbp, old.fbw);
+				uint32 rowBytes = std::max<uint32>(surface.pagesPerRow, 1) * 8192;
+				keepRows = ((start - old.fbp) / rowBytes) << surface.phShift;
+				take = (oldEnd > start) && (oldEnd <= end) && (((start - old.fbp) % rowBytes) == 0) && (keepRows < old.validRows);
+			}
+			if(take)
+			{
+				partial.emplace_back(std::move(*it), keepRows);
+				it = m_targets.erase(it);
+			}
+			else
+			{
+				++it;
+			}
+		}
+	}
 	for(auto& other : m_targets)
 	{
 		if((other->fbp >= start) || other->depthUsed) continue;
@@ -598,6 +652,26 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 		RelayoutTarget(*old, *created);
 		DeleteTarget(*old);
 	}
+	for(auto& [old, keepRows] : partial)
+	{
+		RelayoutTarget(*old, *created);
+		if(keepRows == 0)
+		{
+			DeleteTarget(*old);
+			continue;
+		}
+		ShrinkTarget(*old, keepRows);
+		if(old->gpuDirty)
+		{
+			if(old->dirtyY0 >= keepRows)
+				old->gpuDirty = false;
+			else
+				old->dirtyY1 = std::min(old->dirtyY1, keepRows);
+		}
+		m_stats.partialRelayouts++;
+		m_targets.push_back(std::move(old));
+	}
+	if(!partial.empty()) m_stateApplied = false;
 	return created;
 }
 
@@ -672,18 +746,24 @@ void CGSH_Hardware::RelayoutTarget(TARGET& old, TARGET& target)
 	newSurface.Init(target.psm, target.fbp, target.fbw);
 	uint32 pageW = 1 << oldSurface.pwShift, pageH = 1 << oldSurface.phShift;
 	uint32 oldPerRow = std::max<uint32>(oldSurface.pagesPerRow, 1), newPerRow = std::max<uint32>(newSurface.pagesPerRow, 1);
-	uint32 firstPage = (old.fbp - target.fbp) / 8192;
+	// The old target may also start before the new one (W1: the new one starts inside it):
+	// its pages before the new target's first page are skipped (the caller keeps them).
+	int32 firstPage = (static_cast<int32>(old.fbp) - static_cast<int32>(target.fbp)) / 8192;
+	uint32 skipPages = (firstPage < 0) ? static_cast<uint32>(-firstPage) : 0;
 	uint32 pageRows = (old.validRows + pageH - 1) / pageH;
 	uint32 pageCount = pageRows * oldPerRow;
+	if(skipPages >= pageCount) return;
+	uint32 firstNewPage = static_cast<uint32>(firstPage + static_cast<int32>(skipPages));
+	uint32 copiedPages = pageCount - skipPages;
 	// Rows of the new target the copied pages reach: valid after the copy. Rows among them
 	// that the old target does not cover come from GS memory first (no other target holds
 	// them: those were removed or copied).
-	uint32 lastPage = firstPage + pageCount - 1;
+	uint32 lastPage = firstNewPage + copiedPages - 1;
 	uint32 rowsReached = std::min(((lastPage / newPerRow) + 1) * pageH, target.height);
 	if(rowsReached > target.validRows)
 	{
-		bool coversAll = ((firstPage % newPerRow) == 0) && ((pageCount % newPerRow) == 0) && ((old.validRows % pageH) == 0) &&
-		                 ((firstPage / newPerRow) * pageH == target.validRows);
+		bool coversAll = ((firstNewPage % newPerRow) == 0) && ((copiedPages % newPerRow) == 0) && ((old.validRows % pageH) == 0) &&
+		                 ((skipPages % oldPerRow) == 0) && ((firstNewPage / newPerRow) * pageH == target.validRows);
 		if(coversAll)
 			target.validRows = rowsReached; //every row is replaced by the copy
 		else
@@ -693,11 +773,11 @@ void CGSH_Hardware::RelayoutTarget(TARGET& old, TARGET& target)
 	std::vector<BATCH_VERTEX> quads;
 	quads.reserve(pageCount * 6);
 	int32 dirtyX0 = 0x7FFFFFFF, dirtyY0 = 0x7FFFFFFF, dirtyX1 = 0, dirtyY1 = 0;
-	for(uint32 page = 0; page < pageCount; page++)
+	for(uint32 page = skipPages; page < pageCount; page++)
 	{
 		uint32 sx = (page % oldPerRow) * pageW, sy = (page / oldPerRow) * pageH;
 		uint32 h = std::min(pageH, old.validRows - sy);
-		uint32 newPage = firstPage + page;
+		uint32 newPage = static_cast<uint32>(firstPage + static_cast<int32>(page));
 		uint32 dx = (newPage % newPerRow) * pageW, dy = (newPage / newPerRow) * pageH;
 		if((dy >= target.height) || (dx >= target.width) || (sx >= old.width)) continue;
 		h = std::min(h, target.height - dy);
@@ -760,6 +840,36 @@ void CGSH_Hardware::RelayoutTarget(TARGET& old, TARGET& target)
 void CGSH_Hardware::AllocateTargetGl(TARGET& target)
 {
 	CPartTimer timer(GPU_PART_TARGET_CREATE);
+	for(auto it = m_targetPool.begin(); it != m_targetPool.end(); ++it)
+	{
+		if((it->width != target.width) || (it->height != target.height)) continue;
+		target.framebuffer = it->framebuffer;
+		target.colorTexture = it->colorTexture;
+		target.depthBuffer = it->depthBuffer;
+		m_targetPool.erase(it);
+		m_stats.targetsPooled++;
+		g_targetsPooledTotal++;
+		if(m_diagFile && (m_diagUploads.size() < 60000))
+		{
+			char text[64];
+			std::snprintf(text, sizeof(text), " N%X/%u:%ux%u(pool)", target.fbp, target.fbw, target.width, target.height);
+			m_diagUploads += text;
+		}
+		// As a new one: texture and framebuffer bound, depth cleared
+		glBindTexture(GL_TEXTURE_2D, target.colorTexture);
+		glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
+		glDisable(GL_SCISSOR_TEST);
+		glDepthMask(GL_TRUE);
+		glClearDepth(0.0);
+		glClear(GL_DEPTH_BUFFER_BIT);
+		return;
+	}
+	if(m_diagFile && (m_diagUploads.size() < 60000))
+	{
+		char text[64];
+		std::snprintf(text, sizeof(text), " N%X/%u:%ux%u", target.fbp, target.fbw, target.width, target.height);
+		m_diagUploads += text;
+	}
 	glGenTextures(1, &target.colorTexture);
 	glBindTexture(GL_TEXTURE_2D, target.colorTexture);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
