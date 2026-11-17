@@ -146,7 +146,11 @@ add_library(vitaps2_common STATIC
 	src/common/MpegHle.h
 	src/common/MpegShadow.cpp
 	src/common/MpegShadow.h
+	src/common/EeOverlays.cpp
+	src/common/EeOverlays.h
 )
+# Native overlays must round exactly where the recompiler does
+set_source_files_properties(src/common/EeOverlays.cpp PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-frounding-math")
 target_include_directories(vitaps2_common PUBLIC src/common)
 target_link_libraries(vitaps2_common PUBLIC gsh_software PlayCore)
 

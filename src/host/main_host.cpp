@@ -46,6 +46,7 @@
 #include "PadHandler.h"
 #include "ControllerInfo.h"
 #include "MpegHle.h"
+#include "EeOverlays.h"
 #include "ee/Vif.h"
 #include "Vu1Stats.h"
 #include "Vu1Verify.h"
@@ -210,6 +211,8 @@ int main(int argc, char** argv)
 	uint64_t hotFrom = ~0ULL; //sample the EE PC from this frame on (--hot-from)
 	std::string ramDumpPath;
 	std::string loadStatePath; //--load-state: a save state (the Vita's too), loaded at frame 120
+	bool overlaysOn = false;            //--overlays: native overlays of hot EE functions (EeOverlays.h)
+	CEeOverlays::SETTINGS overlaySettings;
 	for(int i = 2; i < argc; i++)
 	{
 		if(!std::strcmp(argv[i], "--frames") && (i + 1 < argc)) targetFrames = std::strtoull(argv[++i], nullptr, 10);
@@ -260,6 +263,30 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--hot-from") && (i + 1 < argc)) hotFrom = std::strtoull(argv[++i], nullptr, 10);
 		else if(!std::strcmp(argv[i], "--dump-ram") && (i + 1 < argc)) ramDumpPath = argv[++i];
 		else if(!std::strcmp(argv[i], "--load-state") && (i + 1 < argc)) loadStatePath = argv[++i];
+		else if(!std::strcmp(argv[i], "--overlays")) overlaysOn = true; //overlays.txt
+		else if(!std::strcmp(argv[i], "--overlay-verify"))
+		{
+			//Each overlay checked against the recompiled original (overlays.txt)
+			overlaysOn = true;
+			overlaySettings.verify = true;
+		}
+		else if(!std::strcmp(argv[i], "--overlay-verify-every") && (i + 1 < argc)) overlaySettings.verifyEvery = std::max(1, std::atoi(argv[++i]));
+		else if(!std::strcmp(argv[i], "--overlay-selftest")) overlaySettings.selfTest = true; //the check must report every call
+		else if(!std::strcmp(argv[i], "--overlay-verify-max") && (i + 1 < argc)) overlaySettings.verifyMax = std::atoi(argv[++i]);
+		else if(!std::strcmp(argv[i], "--overlay-off") && (i + 1 < argc))
+		{
+			//names, comma separated (or "all")
+			std::string names = argv[++i];
+			for(size_t start = 0; start <= names.size();)
+			{
+				size_t end = names.find(',', start);
+				if(end == std::string::npos) end = names.size();
+				std::string name = names.substr(start, end - start);
+				if(name == "all") overlaySettings.enabled = false;
+				else if(!name.empty()) overlaySettings.disabled.push_back(name);
+				start = end + 1;
+			}
+		}
 		else if(!std::strcmp(argv[i], "--vu1-stats")) EmuProfile::g_vu1Programs.enabled = true; //vu1prog.txt
 		else if(!std::strcmp(argv[i], "--vu-old-checks"))
 		{
@@ -367,6 +394,8 @@ int main(int argc, char** argv)
 		session.Boot(bootPath);
 		CMpegHle mpegHle;
 		if(mpegHleEnabled) mpegHle.Enable(session.GetVm()->m_ee->m_ram, "mpeghle.txt", nullptr);
+		CEeOverlays overlays;
+		if(overlaysOn) overlays.Enable(*session.GetVm(), overlaySettings, "overlays.txt");
 #ifdef VITAPS2_HAS_GL
 		if(hardware && gsDiagLines)
 		{
@@ -489,6 +518,12 @@ int main(int argc, char** argv)
 		auto threadUsage = ThreadProfiler::Sample();
 		auto profile = session.TakeProfile();
 		session.Pause();
+		if(overlays.IsEnabled())
+		{
+			std::printf("EE overlays:\n");
+			overlays.WriteReport(stdout);
+			overlays.Disable(); //the report goes into overlays.txt too
+		}
 		std::printf("emulation thread (%u samples):", profile.samples);
 		for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++)
 			if(profile.share[i] >= 0.005f) std::printf(" %s %.0f%%", EmuProfile::GetSectionName(i), profile.share[i] * 100.0f);

@@ -1,0 +1,257 @@
+diff --git a/Source/ee/EeBasicBlock.h b/Source/ee/EeBasicBlock.h
+--- a/Source/ee/EeBasicBlock.h
++++ b/Source/ee/EeBasicBlock.h
+@@ -2,6 +2,7 @@
+ 
+ #include <vector>
+ #include "BasicBlock.h"
++#include "EeOverlay.h"
+ 
+ class CEeBasicBlock : public CBasicBlock
+ {
+@@ -31,6 +32,26 @@
+ 	bool m_isIdleLoopBlock = false;
+ };
+ 
++//A block at a native overlay's entry (EeOverlay.h): the overlay is called first; when
++//it took the call the block leaves to ra, else the block's own code runs.
++class CEeOverlayBlock : public CEeBasicBlock
++{
++public:
++	CEeOverlayBlock(CMIPS&, uint32 begin, uint32 end, BLOCK_CATEGORY, const EeOverlay::HOOK&);
++
++protected:
++	void CompileProlog(CMipsJitter*) override;
++	void CompileEpilog(CMipsJitter*, bool) override;
++	bool CanUseLikelyExit() const override
++	{
++		return false;
++	}
++
++private:
++	EeOverlay::HOOK m_hook;
++	unsigned int m_slowExitLabel = 0;
++};
++
+ //Tier 2: consecutive blocks of a function compiled as one unit. Each part is
+ //compiled like a block of its own (same instructions, cycles counted per part,
+ //exception test after each), but branches between parts jump straight to a
+diff --git a/Source/ee/EeBasicBlock.cpp b/Source/ee/EeBasicBlock.cpp
+--- a/Source/ee/EeBasicBlock.cpp
++++ b/Source/ee/EeBasicBlock.cpp
+@@ -40,6 +40,61 @@
+ 	CBasicBlock::CompileEpilog(jitter, loopsOnItself);
+ }
+ 
++CEeOverlayBlock::CEeOverlayBlock(CMIPS& context, uint32 begin, uint32 end, BLOCK_CATEGORY category, const EeOverlay::HOOK& hook)
++    : CEeBasicBlock(context, begin, end, category)
++    , m_hook(hook)
++{
++}
++
++void CEeOverlayBlock::CompileProlog(CMipsJitter* jitter)
++{
++	CEeBasicBlock::CompileProlog(jitter);
++	m_slowExitLabel = jitter->CreateLabel();
++
++	//cycles = overlay(context, id); quota -= cycles (0: not taken, the code below runs)
++	jitter->PushCtx();
++	jitter->PushCst(m_hook.id);
++	jitter->Call(reinterpret_cast<void*>(m_hook.function), 2, Jitter::CJitter::RETURN_VALUE_32);
++	jitter->PushTop();
++	jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
++	jitter->Swap();
++	jitter->Sub();
++	jitter->PullRel(offsetof(CMIPS, m_State.cycleQuota));
++	jitter->PushCst(0);
++	jitter->BeginIf(Jitter::CONDITION_NE);
++	{
++		//Taken: return to the caller (jr ra)
++		jitter->PushRel(offsetof(CMIPS, m_State.nGPR[CMIPS::RA].nV[0]));
++		jitter->PullRel(offsetof(CMIPS, m_State.nPC));
++		jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
++		jitter->PushCst(0);
++		jitter->BeginIf(Jitter::CONDITION_GT);
++		{
++			jitter->JumpToDynamic(reinterpret_cast<void*>(&RegionExitTrampoline));
++		}
++		jitter->EndIf();
++		jitter->Goto(m_slowExitLabel);
++	}
++	jitter->EndIf();
++}
++
++void CEeOverlayBlock::CompileEpilog(CMipsJitter* jitter, bool loopsOnItself)
++{
++	CEeBasicBlock::CompileEpilog(jitter, loopsOnItself);
++
++	//Back to the executor with nPC set (the usual slow exit falls through here
++	//too: it has done the same already, so this changes nothing for it)
++	jitter->MarkLabel(m_slowExitLabel);
++	CompileQuotaPoisonFix(jitter);
++	jitter->PushRel(offsetof(CMIPS, m_State.nHasException));
++	jitter->PushRel(offsetof(CMIPS, m_State.cycleQuota));
++	jitter->PushCst(0);
++	jitter->Cmp(Jitter::CONDITION_LE);
++	jitter->Shl(7);
++	jitter->Or();
++	jitter->PullRel(offsetof(CMIPS, m_State.nHasException));
++}
++
+ bool CEeBasicBlock::IsCodeIdleLoopBlock() const
+ {
+ 	enum OP
+diff --git a/Source/ee/EeExecutor.h b/Source/ee/EeExecutor.h
+--- a/Source/ee/EeExecutor.h
++++ b/Source/ee/EeExecutor.h
+@@ -89,6 +89,12 @@
+ 	std::vector<uint32> m_tier2Requests;
+ 	std::atomic<bool> m_hasTier2Requests = false;
+ 
++	//Native overlays (EeOverlay.h): the hook of the block being created, and the
++	//function starts taken over (never inside tier 2 or region code)
++	EeOverlay::HOOK m_pendingOverlay;
++	uint32 m_pendingOverlayAddress = MIPS_INVALID_PC;
++	std::set<uint32> m_overlayAddresses;
++
+ 	static inline bool g_regions = false;
+ 	std::vector<CEeRegionBlock::PART> m_pendingRegion;
+ 	std::map<uint32, uint32> m_regionRanges; //region start -> end (checked against the blocks before use)
+diff --git a/Source/ee/EeExecutor.cpp b/Source/ee/EeExecutor.cpp
+--- a/Source/ee/EeExecutor.cpp
++++ b/Source/ee/EeExecutor.cpp
+@@ -144,6 +144,7 @@
+ 	m_tier2Ranges.clear();
+ 	m_tier2Failed.clear();
+ 	m_tier2Links.clear();
++	m_overlayAddresses.clear();
+ 	m_blockFpRoundingModes.clear();
+ 	m_idleLoopBlocks.clear();
+ 	CGenericMipsExecutor::Reset();
+@@ -233,7 +234,7 @@
+ bool CEeExecutor::IsExcludedFromTier2(uint32 address) const
+ {
+ 	return m_blockFpRoundingModes.count(address) || m_idleLoopBlocks.count(address) || m_blockFpUseAccurateAddSub.count(address) ||
+-	       m_context.HasBreakpointInRange(address, address);
++	       m_overlayAddresses.count(address) || m_context.HasBreakpointInRange(address, address);
+ }
+ 
+ //A region at 'address'; replace: a block may be there already (it is dropped)
+@@ -301,6 +302,21 @@
+ 
+ void CEeExecutor::PartitionFunction(uint32 startAddress)
+ {
++	if(EeOverlay::g_lookup && (startAddress >= 0x100000))
++	{
++		EeOverlay::HOOK hook;
++		if(EeOverlay::g_lookup(EeOverlay::g_lookupContext, m_context, startAddress, hook) && hook.function)
++		{
++			//The usual block, with the overlay's call in front (BlockFactory)
++			m_overlayAddresses.insert(startAddress);
++			m_pendingOverlay = hook;
++			m_pendingOverlayAddress = startAddress;
++			CGenericMipsExecutor::PartitionFunction(startAddress);
++			m_pendingOverlay = EeOverlay::HOOK();
++			m_pendingOverlayAddress = MIPS_INVALID_PC;
++			return;
++		}
++	}
+ 	if(Tier2::g_settings.eager && (Tier2::GetEffectiveMode() != Tier2::MODE_OFF))
+ 	{
+ 		if(TryTier2(startAddress, false)) return;
+@@ -365,6 +381,15 @@
+ 		return m_pendingTier2;
+ 	}
+ 
++	if(m_pendingOverlay.function && (m_pendingOverlayAddress == start))
++	{
++		//Not cached by content: the overlay's id belongs to this address
++		if(start < PS2::EE_RAM_SIZE) SetMemoryProtected(m_ram + start, std::min<uint32>(std::max(blockSize, m_pendingOverlay.codeSize), PS2::EE_RAM_SIZE - start), true);
++		auto block = std::make_shared<CEeOverlayBlock>(context, start, end, m_blockCategory, m_pendingOverlay);
++		block->Compile();
++		return block;
++	}
++
+ 	if(!m_pendingRegion.empty() && (m_pendingRegion.front().begin == start))
+ 	{
+ 		if(start >= 0x100000 && start < PS2::EE_RAM_SIZE)
+diff --git a/Source/ee/PS2OS.cpp b/Source/ee/PS2OS.cpp
+--- a/Source/ee/PS2OS.cpp
++++ b/Source/ee/PS2OS.cpp
+@@ -1,3 +1,4 @@
++#include "EeOverlay.h"
+ #include <chrono>
+ #include <cstring>
+ #include <stddef.h>
+@@ -3288,6 +3289,10 @@
+ 			ThreadShakeAndBake();
+ 		}
+ 	}
++	else if((func == EeOverlay::SYSCALL) && EeOverlay::g_syscall)
++	{
++		EeOverlay::g_syscall(EeOverlay::g_syscallContext, m_ee);
++	}
+ 	else if((func >= HLE_SYSCALL_START) && (func < HLE_SYSCALL_END) && g_hleSyscallHandler)
+ 	{
+ 		g_hleSyscallHandler(g_hleContext, m_ee);
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -1,3 +1,4 @@
++#include "EeOverlay.h"
+ #include "Ee_SubSystem.h"
+ #include "../ParallelIop.h"
+ #include "EeExecutor.h"
+@@ -404,6 +405,7 @@
+ 	m_intc.AssertLine(CINTC::INTC_LINE_VBLANK_START);
+ 	m_os->GetLibMc2().NotifyVBlankStart();
+ 	if(CPS2OS::g_hleVBlankHook) CPS2OS::g_hleVBlankHook(CPS2OS::g_hleContext, m_EE);
++	if(EeOverlay::g_vblank) EeOverlay::g_vblank(EeOverlay::g_vblankContext, m_EE);
+ 	if(m_os->CheckVBlankFlag())
+ 	{
+ 		//Make sure a vblank start interrupt is serviced now because
+diff --git a/Source/ee/EeOverlay.h b/Source/ee/EeOverlay.h
+new file mode 100644
+--- /dev/null
++++ b/Source/ee/EeOverlay.h
+@@ -0,0 +1,40 @@
++#pragma once
++
++#include "Types.h"
++
++class CMIPS;
++
++//Native overlays of game functions (frontend: src/common/EeOverlays). Two ways in:
++//- a hook where a block is compiled: the block at the function's entry first calls
++//  the overlay, which returns the EE cycles the function took (the block then leaves
++//  to ra, as the function's jr ra would) or 0 (the block's own code runs: the
++//  original function, for calls the overlay declines or checks);
++//- a syscall stub patched over the function's entry by the frontend
++//  (addiu v1, zero, SYSCALL; syscall; jr ra; nop), for code a hook can't see.
++namespace EeOverlay
++{
++	using Function = uint32 (*)(CMIPS*, uint32 id);
++
++	struct HOOK
++	{
++		Function function = nullptr;
++		uint32 id = 0;
++		uint32 codeSize = 0; //bytes of guest code it stands for (write protected with the block)
++	};
++
++	//Asked before a block is partitioned at 'address' (EE RAM, 0x100000 and up):
++	//true, with 'hook' set, when an overlay takes the function there over.
++	using Lookup = bool (*)(void* context, CMIPS&, uint32 address, HOOK&);
++	inline Lookup g_lookup = nullptr;
++	inline void* g_lookupContext = nullptr;
++
++	enum
++	{
++		SYSCALL = 0xA0E, //in CPS2OS's HLE range, unused by the movie HLE
++	};
++	using Handler = void (*)(void* context, CMIPS&);
++	inline Handler g_syscall = nullptr; //SYSCALL
++	inline void* g_syscallContext = nullptr;
++	inline Handler g_vblank = nullptr; //EE thread, each vblank start (stubs are patched in here)
++	inline void* g_vblankContext = nullptr;
++}

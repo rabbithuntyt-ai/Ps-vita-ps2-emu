@@ -56,6 +56,7 @@
 #include "EmuProfile.h"
 #include "iop/Iop_SubSystem.h"
 #include "MpegHle.h"
+#include "EeOverlays.h"
 #include "ParallelIop.h"
 #include "MpegShadow.h"
 #include "Ps2Const.h"
@@ -274,6 +275,8 @@ namespace
 		bool threadedSpu = true; //SPU2 audio mixing on the second core
 		bool jitCache = true;    //keep compiled code between runs (ux0:data/VitaPS2/jitcache)
 		bool movieHle = false;   //native movie decoding (libmpeg 2.2 games, docs/HLE_MPEG.md)
+		bool eeOverlays = false; //native overlays of hot EE functions (EeOverlays.h, docs/PATH_TO_30FPS.md E3)
+		std::string overlaysOff; //names of overlays left off, comma separated (ov_off)
 	};
 
 	std::string SettingsPathFor(const std::string& gamePath)
@@ -307,6 +310,8 @@ namespace
 		else if(key == "safe_jit") settings.safeJit = value != 0;
 		else if(key == "indirect_jit") settings.indirectJit = value != 0;
 		else if(key == "jit_regions") settings.jitRegions = value != 0;
+		else if(key == "ee_overlays") settings.eeOverlays = value != 0;
+		else if(key == "ov_off") settings.overlaysOff = text;
 		else if(key == "cheap_exits") settings.cheapExits = value != 0;
 		else if(key == "pinned_fields") settings.pinnedFields = value != 0;
 		else if(key == "fast_ram") settings.fastRam = value != 0;
@@ -797,7 +802,7 @@ namespace
 				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop");
 				//The IOP thread's sections (iop_thread)
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",iopt_%s", EmuProfile::GetSectionName(i));
-				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3,gs_feed_ms,gs_feed_calls,gs_feed_kb,gs_regs_ms,gs_reg_calls,gs_reg_writes,gs_mail_calls,world_ms");
+				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3,gs_feed_ms,gs_feed_calls,gs_feed_kb,gs_regs_ms,gs_reg_calls,gs_reg_writes,gs_mail_calls,world_ms,ov_taken");
 				std::fprintf(perfFile, "\n");
 			}
 		}
@@ -824,6 +829,7 @@ namespace
 		uint32_t eeHotSeconds = 0;
 		CMpegShadow mpegShadow; //movie HLE shadow mode (autostart key mpeg_shadow=1)
 		CMpegHle mpegHle;       //movie HLE replace mode (autostart key mpeg_hle=1)
+		CEeOverlays eeOverlays; //native overlays (ee_overlays=1), log in overlays.txt
 		std::future<bool> stateOperation; //save or load state in progress
 		bool stateIsLoad = false;
 		bool pendingStateLoad = false; //autostart load_state=1
@@ -942,6 +948,18 @@ namespace
 			session->Boot(path);
 			if(settings.eeSlice != 0) session->GetVm()->SetEeTickStep(static_cast<int>(settings.eeSlice));
 			if(settings.iopRate != 100) session->GetVm()->SetIopRatePercent(static_cast<int>(settings.iopRate));
+			if(settings.eeOverlays)
+			{
+				CEeOverlays::SETTINGS overlaySettings;
+				for(size_t start = 0; start <= settings.overlaysOff.size();)
+				{
+					size_t end = settings.overlaysOff.find(',', start);
+					if(end == std::string::npos) end = settings.overlaysOff.size();
+					if(end > start) overlaySettings.disabled.push_back(settings.overlaysOff.substr(start, end - start));
+					start = end + 1;
+				}
+				eeOverlays.Enable(*session->GetVm(), overlaySettings, VITAPS2_DATA_DIR "/overlays.txt");
+			}
 			if(settings.movieHle)
 			{
 				if(settings.threadLockHle) mpegHle.EnableThreadLockHle();
@@ -1592,6 +1610,14 @@ namespace
 								             (unsigned long long)(now[5] - last[5]), (unsigned long long)(now[6] - last[6]), (now[7] - last[7]) / 1000.0);
 								for(int i = 0; i < 8; i++) last[i] = now[i];
 							}
+							//E3: overlay calls taken (native instead of recompiled)
+							{
+								static uint64_t lastTaken = 0;
+								uint64_t taken = 0;
+								for(const auto& s : eeOverlays.GetStats()) taken += s.taken;
+								std::fprintf(perfFile, ",%llu", (unsigned long long)(taken - lastTaken));
+								lastTaken = taken;
+							}
 						}
 						std::fprintf(perfFile, "\n");
 						std::fflush(perfFile);
@@ -1832,6 +1858,7 @@ namespace
 		}
 
 		mpegHle.Disable();
+		eeOverlays.Disable(); //writes the call counts into overlays.txt
 		if(settings.jitCache)
 		{
 			std::printf("%s\n", JitCacheSetup::Describe().c_str());
