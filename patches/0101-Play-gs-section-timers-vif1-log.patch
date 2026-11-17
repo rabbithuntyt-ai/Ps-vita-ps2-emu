@@ -1,7 +1,7 @@
 diff --git a/Source/gs/GSHandler.h b/Source/gs/GSHandler.h
 --- a/Source/gs/GSHandler.h
 +++ b/Source/gs/GSHandler.h
-@@ -856,6 +856,18 @@
+@@ -856,6 +856,25 @@
  	//it has none for [data, data + length); else it holds length + 0x10 readable bytes
  	//and stays alive as long as the returned pointer.
  	static inline std::function<std::shared_ptr<const uint8>(const void* data, uint32 length)> g_imageDataSource;
@@ -17,6 +17,13 @@ diff --git a/Source/gs/GSHandler.h b/Source/gs/GSHandler.h
 +	//Calls sent to the GS thread without waiting, and the senders' time in SendCall (W5)
 +	static inline uint64 g_sendUs = 0;
 +	static inline uint64 g_sendCalls = 0;
++	//VIF1 read-backs (local to host through VIF1): the EE waits for the GS thread (W5/E1)
++	static inline uint64 g_readbackUs = 0;
++	static inline uint64 g_readbacks = 0;
++	static inline uint64 g_readbackBytes = 0;
++	//Calls to the GS thread that waited for completion, and the senders' time waiting
++	static inline uint64 g_waitUs = 0;
++	static inline uint64 g_waitCalls = 0;
  	//GS thread, after a whole PSMCT32 transfer whose data came from g_imageDataSource
  	//(rectangle in the destination buffer): the renderer may keep it as the texels' source
  	virtual void OnImageDataSource(uint32 dbp, uint32 dbw, uint32 x, uint32 y, uint32 w, uint32 h, const std::shared_ptr<const uint8>& data)
@@ -53,8 +60,13 @@ diff --git a/Source/gs/GSHandler.cpp b/Source/gs/GSHandler.cpp
  	    });
  
  	m_writeBufferSubmitIndex = m_writeBufferSize;
-@@ -2248,12 +2254,16 @@
+@@ -2245,15 +2251,21 @@
+ 	if(waitForCompletion)
+ 	{
+ 		EmuProfile::CScope profileScope(EmuProfile::SECTION_GS_WAIT);
++		uint64 waitStart = g_sectionClock ? g_sectionClock() : 0;
  		m_mailBox.SendCall(function, true);
++		if(g_sectionClock) { g_waitUs += g_sectionClock() - waitStart; g_waitCalls++; }
  		return;
  	}
 +	uint64 sendStart = g_sectionClock ? g_sectionClock() : 0;
@@ -101,3 +113,15 @@ diff --git a/Source/ee/Vif1.cpp b/Source/ee/Vif1.cpp
  	if(direction == Dmac::CChannel::CHCR_DIR_TO)
  	{
  		uint8* source = nullptr;
+@@ -88,9 +95,11 @@
+ 			assert((address + size) <= PS2::EE_RAM_SIZE);
+ 		}
+ 		//Asynchronous VIF1: the draws queued before the read-back go first
++		uint64 readStart = CGSHandler::g_sectionClock ? CGSHandler::g_sectionClock() : 0;
+ 		m_vpu.Sync();
+ 		auto gs = m_gif.GetGsHandler();
+ 		gs->ReadImageData(source + address, size);
++		if(CGSHandler::g_sectionClock) { CGSHandler::g_readbackUs += CGSHandler::g_sectionClock() - readStart; CGSHandler::g_readbacks++; CGSHandler::g_readbackBytes += size; }
+ 		return qwc;
+ 	}
+ 	else if(m_vpu.IsAsync())

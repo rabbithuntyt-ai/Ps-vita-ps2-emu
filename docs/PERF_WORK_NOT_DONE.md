@@ -226,6 +226,25 @@ the frame buffer, 512x32 and 256x64 of 0x310000. Target creation rose 11 -> 20 m
 trims allocate). Next ideas if they become worth it: uploads made lazy while a strip clear is
 pending; textures read straight from a target of another width.
 
+### W5, hand-offs to the GPU thread: measured, not worth building now (2026-11-17)
+
+New perf.csv columns (patch 0101): `gs_send_ms`/`gs_send_calls` (calls sent to the GS thread
+without waiting, and the senders' time in `SendCall`), `gs_wait_ms`/`gs_wait_calls` (calls that
+waited for completion), `vif1_readback_ms`/`vif1_readbacks`/`vif1_readback_kb` (VIF1
+read-backs, which wait for the GS thread). RE4 gameplay on the Vita, W1 on, warm:
+
+- Sends: 7,091 a second taking 15 ms/s on the senders, 2.1 µs each. Batching them (W5) would
+  save about 1.5% of a core.
+- Waits: 455 ms/s in 2.3 calls a second, about 200 ms each. They are all `CGSHandler::Finish`:
+  once the emulation thread is `MAX_INFLIGHT_FRAMES` frames ahead of the GPU thread, it waits
+  for it. That is back-pressure from the GPU thread being the wall, not overhead: the
+  emulation thread finishes a game frame's work in about half the time and then waits
+  (matching the ceiling run, G1: about 3.2 game fps for the emulation side alone).
+- VIF1 read-backs: none in this scene.
+
+So W5 waits until the GPU thread is no longer the wall; W2 (geometry kept on the GPU) is the
+next renderer step.
+
 P1 as built: `CVif1::ReceiveDMA` copies the DMA data into a queue and returns at once (small
 chunks without a tag are merged, buffers are reused). The VU1 worker runs `ProcessPacket` on it
 and runs each program inline. DIRECT data and MSKPATH3 go into the XGKICK queue, so PATH1 and
