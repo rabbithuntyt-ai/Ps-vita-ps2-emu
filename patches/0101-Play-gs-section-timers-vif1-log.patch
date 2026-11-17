@@ -1,7 +1,7 @@
 diff --git a/Source/gs/GSHandler.h b/Source/gs/GSHandler.h
 --- a/Source/gs/GSHandler.h
 +++ b/Source/gs/GSHandler.h
-@@ -856,6 +856,15 @@
+@@ -856,6 +856,18 @@
  	//it has none for [data, data + length); else it holds length + 0x10 readable bytes
  	//and stays alive as long as the returned pointer.
  	static inline std::function<std::shared_ptr<const uint8>(const void* data, uint32 length)> g_imageDataSource;
@@ -14,6 +14,9 @@ diff --git a/Source/gs/GSHandler.h b/Source/gs/GSHandler.h
 +	static inline uint64 g_submitUs = 0;
 +	static inline uint64 g_submitCalls = 0;
 +	static inline uint64 g_registerWrites = 0;
++	//Calls sent to the GS thread without waiting, and the senders' time in SendCall (W5)
++	static inline uint64 g_sendUs = 0;
++	static inline uint64 g_sendCalls = 0;
  	//GS thread, after a whole PSMCT32 transfer whose data came from g_imageDataSource
  	//(rectangle in the destination buffer): the renderer may keep it as the texels' source
  	virtual void OnImageDataSource(uint32 dbp, uint32 dbw, uint32 x, uint32 y, uint32 w, uint32 h, const std::shared_ptr<const uint8>& data)
@@ -50,6 +53,23 @@ diff --git a/Source/gs/GSHandler.cpp b/Source/gs/GSHandler.cpp
  	    });
  
  	m_writeBufferSubmitIndex = m_writeBufferSize;
+@@ -2248,12 +2254,16 @@
+ 		m_mailBox.SendCall(function, true);
+ 		return;
+ 	}
++	uint64 sendStart = g_sectionClock ? g_sectionClock() : 0;
+ 	m_mailBox.SendCall(function, false);
++	if(g_sectionClock) { g_sendUs += g_sectionClock() - sendStart; g_sendCalls++; }
+ }
+ 
+ void CGSHandler::SendGSCall(CMailBox::FunctionType&& function)
+ {
++	uint64 sendStart = g_sectionClock ? g_sectionClock() : 0;
+ 	m_mailBox.SendCall(std::move(function));
++	if(g_sectionClock) { g_sendUs += g_sectionClock() - sendStart; g_sendCalls++; }
+ }
+ 
+ void CGSHandler::ProcessSingleFrame()
 diff --git a/Source/ee/Vif1.h b/Source/ee/Vif1.h
 --- a/Source/ee/Vif1.h
 +++ b/Source/ee/Vif1.h

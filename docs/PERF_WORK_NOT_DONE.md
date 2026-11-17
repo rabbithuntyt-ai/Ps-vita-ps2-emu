@@ -203,9 +203,28 @@ came after these runs. Game fps 1.68/1.71 off against 1.76-1.80 on: within run n
 whole step is about 11% of the GPU thread. Pictures as before (PC: no pixel off by more than
 16, mean difference 0.01; the GS tests caught a strip cover bug before it shipped).
 
-Still per frame (PC): 6 uploads (largest 256x224 at 0x310000 and 0x348000, 256x192 at
-0x2D8000), 12 read-backs (largest: all of 0x2D8000 256x448 when it is reused 64 wide; 128x224
-of 0x348000; seven 128x32 pieces of 0x348000 when the last pass reads it as a texture).
+Then the front trim (`TrimTargetFront`, part of `partial_relayout`): an old target that starts
+inside the new one and reaches past its end at a whole page row gives the covered rows to the
+new one by GPU copy and keeps the rest as a target starting after it (RE4: the whole 256x448
+read-back of 0x2D8000 each time it is reused 64 wide). PC: read-back pixels per game frame
+about 221k -> 106k.
+
+**W1 result on the Vita (17 Nov, everything above on, two alternating rounds):**
+
+| | W1 on | W1 off |
+|---|---|---|
+| Round trips (read-back + upload + create + relayout, ms per second) | 145, 152 | 304, 298 |
+| Game frames in 120 s | 161, 157 | 142, 142 |
+| Game fps after 30 s | 1.87, 1.89 | 1.73, 1.69 |
+| GPU pump per game frame | 504, 536 ms | 589, 579 ms |
+
+W1 stops here: what is left (about 150 ms/s) is pieces worth 2-3% of the GPU thread each. Per
+frame (PC): 4 uploads (512x128 of 0x310000 copied in from the trimmed tail right before a strip
+clear replaces it; 512x64 and 256x224 of 0x310000; 256x224 of 0x348000) and read-backs of
+128x224 and seven 128x32 pieces of 0x348000 (the last pass reads it as a texture), 512x32 of
+the frame buffer, 512x32 and 256x64 of 0x310000. Target creation rose 11 -> 20 ms/s (the
+trims allocate). Next ideas if they become worth it: uploads made lazy while a strip clear is
+pending; textures read straight from a target of another width.
 
 P1 as built: `CVif1::ReceiveDMA` copies the DMA data into a queue and returns at once (small
 chunks without a tag are merged, buffers are reused). The VU1 worker runs `ProcessPacket` on it
