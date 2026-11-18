@@ -1,0 +1,42 @@
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -153,6 +153,11 @@
+ void CVpu::WakeWorker()
+ {
+ #ifdef __vita__
++	//A busy worker finds the work itself: signal only one that is going to sleep (a signal is a
++	//system call, and Resident Evil 4 queues VIF1 data about 7,000 times a game frame). The
++	//worker marks itself, then checks for work, then sleeps; this side made the work visible
++	//before it reads the mark, so one of the two sees the other (both sequentially consistent).
++	if(!m_workerSleeping.load(std::memory_order_seq_cst)) return;
+ 	if(m_workerSema >= 0) sceKernelSignalSema(m_workerSema, 1);
+ #else
+ 	{
+@@ -207,8 +212,13 @@
+ 			if(found) continue;
+ 		}
+ 		//Timed waits: a lost or early wakeup costs at most a millisecond.
+-		SceUInt timeout = 1000;
+-		sceKernelWaitSema(m_workerSema, 1, &timeout);
++		m_workerSleeping.store(true, std::memory_order_seq_cst);
++		if(!hasWork())
++		{
++			SceUInt timeout = 1000;
++			sceKernelWaitSema(m_workerSema, 1, &timeout);
++		}
++		m_workerSleeping.store(false, std::memory_order_seq_cst);
+ #else
+ 		std::unique_lock<std::mutex> lock(m_workerMutex);
+ 		m_workerCondition.wait_for(lock, std::chrono::milliseconds(1), hasWork);
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -243,6 +243,7 @@
+ 	//variables lost wakeups on the Vita, which left VU1 "running" for good).
+ 	std::atomic<bool> m_workPending = false;
+ 	int m_workerSema = -1; //Vita: the worker sleeps on a kernel semaphore (keeps the signal)
++	std::atomic<bool> m_workerSleeping = false; //Vita: the worker is about to wait on m_workerSema
+ 	void WakeWorker();
+ 	//EE thread: true once no program runs and none is waiting for the worker
+ 	bool IsWorkerIdle() const

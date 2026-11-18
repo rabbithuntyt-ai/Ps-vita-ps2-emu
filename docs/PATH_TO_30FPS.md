@@ -23,8 +23,8 @@ At 30 frames a second each thread has 33 ms per game frame: 14.8 million CPU cyc
 | Thread | Budget | Today on the Vita | Target |
 |---|---|---|---|
 | GPU thread (core 1) | 33 ms | About 530 ms: 948 ms a second in the pump at about 1.8 game fps (measured 16 Nov) | 25 ms |
-| Emulation thread (core 0) | 33 ms | Not measured since P1. My estimate is 150–250 ms: about 100 ms of game code, 12–15 ms of IOP, and the rest relaying VU1's output and copying VIF1 data | 28 ms |
-| VU1 thread (core 2) | 33 ms | Not measured since P1 and V1 | 25 ms |
+| Emulation thread (core 0) | 33 ms | About 437 ms at 2.28 game fps (measured 17 Nov, E1 below): game code 85, waiting for VU1 97, queueing VIF1 data 66, relaying VU1 output 64, waiting for the GS thread 59. Not the limit: it waits 150 ms or more of each game frame | 28 ms |
+| VU1 thread (core 2) | 33 ms | About 380 ms busy of 437 (measured 17 Nov): programs 299 (skinning 91% of the cycles), unpack 63, DIRECT 20; idle 57 | 25 ms |
 | Core 3 | Shared with the system | Audio output and the profiler | Background checks |
 
 What one game frame carries at the gameplay start (from the docs' counts):
@@ -129,6 +129,19 @@ Each package names the budget line it serves, the place in the code, and the tes
   - SIGNAL and the case of another path in the middle of a packet keep today's logic, with the roles swapped: the worker waits and the emulation thread wakes it.
   - Measure first. The emulation profiler's sections show how large the relay is; do this only if it is a large slice.
 - **Done when:** the emulation thread spends no time in `FlushPendingXgKicks`.
+- **Measured first (17 Nov), and not done as written.** The VU1 worker never set its own profiler section, so its unpack and program time showed as the emulation thread's (`ps2_VIF`, `ps2_VIFunpack`, `ps2_VU1`): the "half of the thread relays VU1 and VIF1 output" figure came from that. Patch 0103 gives the worker its own section (perf.csv `vu1_sections`, EmuProfile order) and splits the relay (`ps2_VU1relay`) and the queue copy (`ps2_VIFqueue`) out. RE4 gameplay, 120 s, ms per game frame:
+
+  | | Before 0104 | With 0104 |
+  |---|---|---|
+  | Game fps | 2.29 | 2.28 |
+  | EE: queueing VIF1 data | 100 | 66 |
+  | EE: relaying VU1 output | 53 | 64 |
+  | EE: waiting for VU1 | 32 | 97 |
+  | EE: waiting for the GS thread | 110 | 59 |
+  | EE: game code | 81 | 85 |
+  | VU1 worker: programs / unpack / idle | 229 / 51 / 140 | 299 / 63 / 57 |
+
+  Patch 0104 signals the worker's semaphore only when it is about to sleep (it was a system call per queued VIF1 packet). The emulation thread saves 34 ms of queueing per game frame and spends it waiting: it is not the limit. The worker is: with `vu1_stats=1`, the skinning programs (0x0498, 0x0000, 0x0050) are 91% of VU1's cycles (the world program runs as HLE). Moving the relay onto that thread, as E1 says, would add 64 ms to a thread with about 57 ms idle. **Next is W3 (skinning off VU1)**; E1 comes back once the worker has room, or the relay goes to the GS thread with W5.
 
 **E2. The IOP: shrink it where it is.** The IOP thread on core 3 lost 12% in gameplay (measured 16 Nov, commit `20875f2`), so that is not the way. Its cost at full speed is about 12–15 ms per game frame (my estimate from the movie figures). The remedy is R3 in the list: native replacements for the game's own copies of SIO2MAN and PADMAN (16% of IOP time) and libsd (7%), and Capcom's sound mixer (37%). Those shares were measured in the intro movie; take the IOP profile in gameplay before starting.
 
