@@ -21,6 +21,8 @@ Graphics Synthesizer renderers and a native vitaGL frontend.
 > full-speed PS2 emulation needs on ARM. Commercial 3D games will run far
 > below full speed. See [docs/RESEARCH.md](docs/RESEARCH.md) for the analysis, [docs/ROADMAP.md](docs/ROADMAP.md) for the plan (library-wide first: the top 50 PS2 games without a Vita version) and [docs/AOT_TRANSLATION.md](docs/AOT_TRANSLATION.md) for near-native translation,
 > the options considered and the optimization roadmap.
+> For Resident Evil 4 the current plan and its measurements are in
+> [docs/PATH_TO_30FPS.md](docs/PATH_TO_30FPS.md) and [docs/PERF_WORK_NOT_DONE.md](docs/PERF_WORK_NOT_DONE.md).
 
 ## Real-world performance (PS Vita hardware)
 
@@ -57,6 +59,28 @@ notes for other sessions: [docs/RE4.md](docs/RE4.md).
 | Critical sections and start code scan native | 55.5 | 26.5 | 13 |
 | Orange intro: native memcpy, SPU2 priority, input bound by ViBuf | 53.0 | 30.6 | 14.2 |
 | Faster MPEG decoder, indirect jumps in compiled code (tier 2 step 1) | 58.8 | 32.9 | 15.3 |
+
+### Resident Evil 4 gameplay
+
+Real game frames per second (new pictures the game draws, `game_fps`) on a real Vita, over a
+scripted 120 s walk from the gameplay save state, warm recompiler cache. The goal is a locked
+30; the plan to get there, with its measurement gates and work packages, is
+[docs/PATH_TO_30FPS.md](docs/PATH_TO_30FPS.md), and every measurement is in
+[docs/PERF_WORK_NOT_DONE.md](docs/PERF_WORK_NOT_DONE.md).
+
+| Step (all on in RE4's game profile) | Game fps |
+|---|---|
+| Build of 15 Nov 2026 | 0.6-0.8 |
+| Asynchronous VU1 (VIF1 work on the VU1 thread) | 1.0-1.4 |
+| + depth-blur skip, world vertex program run natively, world vertices transformed on the GPU | 1.6-2.0 |
+| + render target round trips halved (target pool, GPU copies, strip clears without uploads) | 1.87-1.89 |
+| + world geometry kept in GPU buffers, diagnostics timers made opt-in | **2.03-2.06** |
+
+Where the time goes now, per game frame, on the GPU thread (the slowest of the three
+emulation threads): about 260 ms in the GS register path (characters, effects, post-processing),
+100 ms in texture transfers, 88 ms in the world, against a budget of 33 ms per thread at 30 fps.
+With all GPU work dropped, the emulation thread allows about 3.2 game fps, so the EE, VU1 and
+GPU sides all need large cuts. Next: characters skinned on the GPU (W3).
 
 ## Performance gap
 
@@ -138,13 +162,13 @@ scene repeatable, so a change can be measured on the exact same frames.
 
 | Component | State |
 |---|---|
-| EE / IOP / VU / SPU2 / HLE BIOS | Play! core with ~60 performance and Vita patches ([patches/](patches/)) |
+| EE / IOP / VU / SPU2 / HLE BIOS | Play! core with 101 performance and Vita patches ([patches/](patches/)): asynchronous VU1, VU loop copies, a 10-register NEON allocation without clamping, and more |
 | JIT on Vita (`sceKernelAllocMemBlockForVM` pool) | Running on hardware |
 | GPU GS renderer (vitaGL, default) | Running on hardware; tested against the software renderer on the host |
 | Software GS renderer (accuracy fallback) | Implemented and unit tested (see below) |
 | Vita frontend (game list, display, controls, audio, save states) | Running on hardware |
 | Silent Hill 2 (SLUS-20228) | Boots through the menus and plays the opening movie (below full speed) |
-| Resident Evil 4 (SLUS-21134) | Reaches the title menu and plays its movies with native decoding (14 of 30 pictures/s), through the intro and the car cutscene into real-time 3D (drawn, at about 1 fps; some textures wrong) |
+| Resident Evil 4 (SLUS-21134) | Plays: title menu, movies with native decoding (about 15 of 30 pictures/s), New Game through the intro into real-time 3D, and gameplay at about 2 game fps with its game profile (Leon and the world drawn right in the tested walk) |
 | Host build + automated tests | Passing |
 | VPK build | CI with the official VitaSDK Docker image |
 
@@ -197,6 +221,17 @@ draws (vitaGL on the Vita):
   `w = 1/Q`.
 * The GS runs on the main thread (which owns the GL context), freeing a CPU
   core compared to the software renderer.
+* When a game reuses GS memory under another width (post-processing chains),
+  render targets are re-laid out, trimmed or split on the GPU instead of read
+  back and uploaded again; released targets keep their GL objects in a pool;
+  full-screen clears drawn in strips replace a new target's contents without
+  an upload.
+* Resident Evil 4's world: its VU1 vertex program runs natively, and each
+  batch's vertices stay in a GPU buffer keyed by a hash of their data; a draw
+  only sets one matrix (projection, the GS's 4096 pixel wrap and depth folded
+  together). Batches near the clip volume keep the program's own clipping.
+* With a kernel module the app loads itself, light threads (audio output,
+  profiler) can run on the Vita's fourth core.
 * Host tests render scenes with both renderers through Mesa and compare them.
 
 ### Software renderer (Pause menu -> Renderer)

@@ -238,6 +238,8 @@ else()
 	# The Vita JIT's ARM code for EE blocks from a RAM dump, on any host (tools/jit_arm_report.py)
 	add_executable(jit_arm_dump tools/jit_arm_dump.cpp)
 	add_executable(vu_arm_dump tools/vu_arm_dump.cpp)
+	add_executable(vu_dis tools/vu_dis.cpp)
+	target_link_libraries(vu_dis PRIVATE PlayCore)
 	target_link_libraries(vu_arm_dump PRIVATE PlayCore)
 	target_link_libraries(jit_arm_dump PRIVATE PlayCore)
 
