@@ -338,6 +338,23 @@ for their own clock reads. RE4 gameplay on the Vita, warm, ms per game frame:
   reference. No transfer leaves its slot unchanged (the game streams different textures
   through the same slots), so skipping by slot cannot work; the full W4 (textures found by
   payload, GS memory written only when read another way) is the next transfer step.
+- **W4 tried and reverted (17 Nov).** Whole texture-like transfers were kept as payloads
+  (`CGSH_Hardware::TransferWrite` override, no Play change), texture binds matching a payload's
+  rectangle took the GL texture kept under the payload's hash, and every other reader (palette
+  loads, texture reads, target uploads and read-backs, local transfers, eager transfers, the
+  flip from memory, save states) wrote the payload first. Pictures stayed bit-identical (PC).
+  But in 420 frames of RE4 gameplay only 2,252 of 29,553 deferred payloads were dropped
+  unwritten: the game reuses each slot for transfers of another shape, so a new texture covers
+  only part of an earlier one, whose other pixels must be written in case something reads
+  them (writes by cause, with block-exact overlap tests and palettes kept eager: 12,569 overlap
+  with a new payload, 7,075 palettes written into the same blocks, 7,604 texture reads). About
+  8% of the transfer work saved, and payload hits mostly save decoding, which the content
+  cache already avoids: not worth the risk. The diff is kept in
+  `runs/re4/w4_lazy_transfers.diff` (local) for a game that streams whole slots.
+- **After patch 0102, 99.8% of RE4's transfer bytes go through the block path** (PC count over
+  420 frames: 233 MB by blocks, 0.5 MB by pixels). The 56 ms per game frame left is the block
+  path itself (a gather through a table per block and the compare that reports changes); the
+  A9 has no gather instruction, so more needs format-specific tricks.
 - **Idle is now 20%:** the GS thread waits for work a fifth of the time, so the emulation and
   VU1 threads limit the frame rate too.
 
