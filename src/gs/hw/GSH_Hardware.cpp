@@ -3253,6 +3253,7 @@ void CGSH_Hardware::ApplyState()
 		uint64 start = g_fineTimers ? NowUs() : 0;
 		~REG_TIMER() { if(g_fineTimers) total += NowUs() - start; }
 	} regTimer{g_regSplitUs[0]}; //register path split (perf.csv reg_split)
+	g_applyStateCalls++;
 	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	const auto& s = m_state;
 	m_stateApplied = true;
@@ -3266,6 +3267,8 @@ void CGSH_Hardware::ApplyState()
 	}
 
 	m_currentTarget = nullptr;
+	uint64 applyMark = g_fineTimers ? NowUs() : 0;
+	auto applySplit = [&applyMark](int index) { if(!g_fineTimers) return; uint64 now = NowUs(); g_applySplitUs[index] += now - applyMark; applyMark = now; };
 	TARGET* target = FindTarget(s.fbp, s.fbw, s.fpsm, true, static_cast<uint32>(std::max(s.scay1, 0)) + 1);
 	if(!target)
 	{
@@ -3290,8 +3293,10 @@ void CGSH_Hardware::ApplyState()
 	m_pointsDirect = !s.textured && !s.alphaBlend && !s.fog && (s.fbmsk == 0) && !s.date && !s.fba && !depthActive &&
 	                 (!s.ate || (s.atst == ALPHA_TEST_ALWAYS)) && (s.fpsm == PSMCT32);
 
+	applySplit(0); //target: find, create, rows from GS memory
 	// Texture next: binding may download targets or copy the current one.
 	BindTexture();
+	applySplit(1); //texture
 
 	glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
 	glViewport(0, 0, target->width, target->height);
@@ -3509,6 +3514,7 @@ void CGSH_Hardware::ApplyState()
 	}
 	SetupAlphaCombiner(m_fixAlpha);
 	SetupFog();
+	applySplit(2); //GL state
 }
 
 void CGSH_Hardware::SetupFog()

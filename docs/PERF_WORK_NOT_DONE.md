@@ -293,6 +293,14 @@ default; the world step timers had shipped on in RE4's build since the W2 commit
 afterwards (RE4's profile as shipped, warm, 120 s): **184 and 182 game frames, 2.03-2.06 game
 fps**, 453 ms in the GPU pump per game frame. On 15 Nov the same walk ran at 0.6-0.8.
 
+**State application, split (Vita, fine_timers, per game frame):** 568-582 `ApplyState` calls
+(against about 395 GPU draws) taking 70-72 ms: render target (find or create, rows from GS
+memory, the flushes those cause) 43.6 ms, texture binding 23.8 ms, the GL state calls 3.5 ms.
+vitaGL's state handling is cheap, and rebinding the same framebuffer costs nothing in vitaGL
+(it only stores the pointer; a scene restarts at a draw when the target really changes). The
+cost is render target and texture management: the W1 remainder and texture lookups.
+perf.csv `apply_calls`, `apply_split` (fine_timers).
+
 P1 as built: `CVif1::ReceiveDMA` copies the DMA data into a queue and returns at once (small
 chunks without a tag are merged, buffers are reused). The VU1 worker runs `ProcessPacket` on it
 and runs each program inline. DIRECT data and MSKPATH3 go into the XGKICK queue, so PATH1 and
