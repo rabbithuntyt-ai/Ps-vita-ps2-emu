@@ -24,6 +24,17 @@ Graphics Synthesizer renderers and a native vitaGL frontend.
 > For Resident Evil 4 the current plan and its measurements are in
 > [docs/PATH_TO_30FPS.md](docs/PATH_TO_30FPS.md) and [docs/PERF_WORK_NOT_DONE.md](docs/PERF_WORK_NOT_DONE.md).
 
+## On a real Vita (17 Nov 2026)
+
+Screenshots taken on the Vita with the stats overlay on (top left: emulated and shown fps,
+CPU per thread, where the emulation thread's time goes).
+
+| Resident Evil 4, gameplay (about 2 game fps) | Silent Hill 2, title menu (about 13 of 30 game fps) |
+|---|---|
+| ![Resident Evil 4 gameplay on the Vita](docs/screens/re4_gameplay.png) | ![Silent Hill 2 title menu on the Vita](docs/screens/silent_hill_2_title.png) |
+| **TimeSplitters, title menu (about 27 of 60 game fps)** | **The app's game list** |
+| ![TimeSplitters title menu on the Vita](docs/screens/timesplitters_title.png) | ![VitaStation2 game list](docs/screens/app_game_list.png) |
+
 ## Real-world performance (PS Vita hardware)
 
 Silent Hill 2 on an actual PS Vita, measured from the emulator's own counters
@@ -167,7 +178,8 @@ scene repeatable, so a change can be measured on the exact same frames.
 | GPU GS renderer (vitaGL, default) | Running on hardware; tested against the software renderer on the host |
 | Software GS renderer (accuracy fallback) | Implemented and unit tested (see below) |
 | Vita frontend (game list, display, controls, audio, save states) | Running on hardware |
-| Silent Hill 2 (SLUS-20228) | Boots through the menus and plays the opening movie (below full speed) |
+| Silent Hill 2 (SLUS-20228) | Boots through the menus (title menu at about 26 emulated fps, 13 of its 30 game fps) and plays the opening movie, below full speed |
+| TimeSplitters (SLUS-20090) | Boots to its title menu, drawn correctly (about 27 of 60 game fps); in early November it ran but showed nothing |
 | Resident Evil 4 (SLUS-21134) | Plays: title menu, movies with native decoding (about 15 of 30 pictures/s), New Game through the intro into real-time 3D, and gameplay at about 2 game fps with its game profile (Leon and the world drawn right in the tested walk) |
 | Host build + automated tests | Passing |
 | VPK build | CI with the official VitaSDK Docker image |
