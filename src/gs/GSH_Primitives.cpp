@@ -1,9 +1,11 @@
 #include "GSH_Primitives.h"
+#include "GsProfile.h"
 #include <cstring>
 #include <vector>
 
 void CGSH_Primitives::WriteRegisterImpl(uint8 registerId, uint64 data)
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_REGISTERS);
 	uint64 previous = m_nReg[registerId];
 	CGSHandler::WriteRegisterImpl(registerId, data);
 
@@ -88,6 +90,7 @@ void CGSH_Primitives::BeginPrimitive(uint64 data)
 
 void CGSH_Primitives::VertexKick(uint8 registerId, uint64 data)
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_VERTEX);
 	if(m_pendingPrim)
 	{
 		m_pendingPrim = false;
@@ -278,6 +281,7 @@ void CGSH_Primitives::DrawDirectTriangle(const CSoftwareRasterizer::VERTEX* vert
 
 void CGSH_Primitives::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_WORLD);
 	if(g_gsCeiling) return;
 	g_worldBatches++;
 	g_worldVertices += batch.count;

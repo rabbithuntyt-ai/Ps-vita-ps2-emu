@@ -50,6 +50,7 @@
 #endif
 #include "CpuScreen.h"
 #include "Cores.h"
+#include "GsProfile.h"
 #include "ee/Vif1.h"
 #include "xxhash.h"
 #include "EmuSession.h"
@@ -805,7 +806,7 @@ namespace
 				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop");
 				//The IOP thread's sections (iop_thread)
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",iopt_%s", EmuProfile::GetSectionName(i));
-				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3,gs_feed_ms,gs_feed_calls,gs_feed_kb,gs_regs_ms,gs_reg_calls,gs_reg_writes,gs_mail_calls,world_ms,targets_pooled,gs_send_ms,gs_send_calls,vif1_readback_ms,vif1_readbacks,vif1_readback_kb,gs_wait_ms,gs_wait_calls,world_hits,world_misses,world_cache_mb,world_runs,world_seg,world_slot_ms,reg_split,apply_calls,draw_calls,apply_split,prim_calls");
+				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3,gs_feed_ms,gs_feed_calls,gs_feed_kb,gs_regs_ms,gs_reg_calls,gs_reg_writes,gs_mail_calls,world_ms,targets_pooled,gs_send_ms,gs_send_calls,vif1_readback_ms,vif1_readbacks,vif1_readback_kb,gs_wait_ms,gs_wait_calls,world_hits,world_misses,world_cache_mb,world_runs,world_seg,world_slot_ms,reg_split,apply_calls,draw_calls,apply_split,prim_calls,gs_sections");
 				std::fprintf(perfFile, "\n");
 			}
 		}
@@ -1637,6 +1638,8 @@ namespace
 								static uint64 lastPrims = 0;
 								std::fprintf(perfFile, ",%llu", (unsigned long long)(CGSH_Hardware::g_primitiveCalls - lastPrims));
 								lastPrims = CGSH_Hardware::g_primitiveCalls;
+								static uint64 lastGs[GsProfile::SECTION_COUNT] = {};
+								for(unsigned int i = 0; i < GsProfile::SECTION_COUNT; i++) { uint64 n = GsProfile::g_samples[i].load(); std::fprintf(perfFile, "%c%llu", (i == 0) ? ',' : ';', (unsigned long long)(n - lastGs[i])); lastGs[i] = n; }
 							}
 						}
 						std::fprintf(perfFile, "\n");

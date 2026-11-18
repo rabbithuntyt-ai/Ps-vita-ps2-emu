@@ -1,0 +1,155 @@
+diff --git a/Source/gs/GsTransferWrite.h b/Source/gs/GsTransferWrite.h
+--- a/Source/gs/GsTransferWrite.h
++++ b/Source/gs/GsTransferWrite.h
+@@ -22,6 +22,107 @@
+ 		uint32 rrw;
+ 	};
+ 
++	// Whole GS blocks at a time (a block is 256 contiguous bytes with the same layout in every
++	// page): textures smaller than a page (Resident Evil 4 streams about 365 of them per frame,
++	// 4 bit 128x64, 64x64 and 32 bit palettes) went a pixel at a time. g_blockWrites=false
++	// keeps the per pixel path (tests compare the two).
++	inline bool g_blockWrites = true;
++
++	// For one block: the source unit of every unit of the block (in memory order), as an index
++	// from the block's first source unit in a transfer 'rrw' units wide. Units: pixels (CT32,
++	// CT16...) or nibbles (PSMT4). Rebuilt when rrw changes (GS thread only).
++	template <typename Storage, uint32 unitsPerBlock>
++	const uint32* GetBlockSources(uint32 rrw, uint32 offsetScale)
++	{
++		static uint32 tableRrw = 0;
++		static uint32 table[unitsPerBlock];
++		if(tableRrw != rrw)
++		{
++			const uint32* pageOffsets = CGsPixelFormats::CPixelIndexor<Storage>::GetPageOffsets();
++			for(uint32 y = 0; y < Storage::BLOCKHEIGHT; y++)
++				for(uint32 x = 0; x < Storage::BLOCKWIDTH; x++)
++					table[(pageOffsets[y * Storage::PAGEWIDTH + x] / offsetScale) % unitsPerBlock] = y * rrw + x;
++			tableRrw = rrw;
++		}
++		return table;
++	}
++
++	// The byte address of the block whose top left pixel is (x, y) (block aligned)
++	template <typename Storage>
++	uint32 BlockAddress(uint32 pointer, uint32 bufferWidth, uint32 x, uint32 y, uint32 offsetScale)
++	{
++		const uint32* pageOffsets = CGsPixelFormats::CPixelIndexor<Storage>::GetPageOffsets();
++		uint32 rowPage = ((y / Storage::PAGEHEIGHT) * (bufferWidth * 64)) / Storage::PAGEWIDTH;
++		uint32 inPage = pageOffsets[(y % Storage::PAGEHEIGHT) * Storage::PAGEWIDTH + (x % Storage::PAGEWIDTH)] / offsetScale;
++		return pointer + (rowPage + x / Storage::PAGEWIDTH) * CGsPixelFormats::PAGESIZE + (inPage & ~(CGsPixelFormats::BLOCKSIZE - 1));
++	}
++
++	// One row of whole blocks (BLOCKHEIGHT transfer rows) of a format with whole-byte units.
++	// False (nothing written) if a block is outside GS memory.
++	template <typename Storage>
++	bool WriteUnitBlockRow(uint8* ram, uint32 ramSize, uint32 pointer, uint32 bufferWidth, uint32 x, uint32 y, uint32 rrw,
++	                       const typename Storage::Unit* source, bool& dirty)
++	{
++		typedef typename Storage::Unit Unit;
++		const uint32 unitsPerBlock = CGsPixelFormats::BLOCKSIZE / sizeof(Unit);
++		uint32 blocks = rrw / Storage::BLOCKWIDTH;
++		for(uint32 k = 0; k < blocks; k++)
++		{
++			if(BlockAddress<Storage>(pointer, bufferWidth, (x + k * Storage::BLOCKWIDTH) % 2048, y, 1) + CGsPixelFormats::BLOCKSIZE > ramSize) return false;
++		}
++		const uint32* sources = GetBlockSources<Storage, CGsPixelFormats::BLOCKSIZE / sizeof(Unit)>(rrw, sizeof(Unit));
++		for(uint32 k = 0; k < blocks; k++)
++		{
++			Unit* block = reinterpret_cast<Unit*>(ram + BlockAddress<Storage>(pointer, bufferWidth, (x + k * Storage::BLOCKWIDTH) % 2048, y, 1));
++			const Unit* base = source + k * Storage::BLOCKWIDTH;
++			for(uint32 u = 0; u < unitsPerBlock; u++)
++			{
++				Unit value = base[sources[u]];
++				if(block[u] != value)
++				{
++					block[u] = value;
++					dirty = true;
++				}
++			}
++		}
++		return true;
++	}
++
++	// One row of whole PSMT4 blocks (16 transfer rows): each byte from its two source nibbles
++	template <typename Storage>
++	bool WritePsmt4BlockRow(uint8* ram, uint32 ramSize, uint32 pointer, uint32 bufferWidth, uint32 x, uint32 y, uint32 rrw,
++	                        const uint8* source, uint32 firstNibble, bool& dirty)
++	{
++		const uint32 nibblesPerBlock = CGsPixelFormats::BLOCKSIZE * 2;
++		uint32 blocks = rrw / Storage::BLOCKWIDTH;
++		for(uint32 k = 0; k < blocks; k++)
++		{
++			if(BlockAddress<Storage>(pointer, bufferWidth, (x + k * Storage::BLOCKWIDTH) % 2048, y, 2) + CGsPixelFormats::BLOCKSIZE > ramSize) return false;
++		}
++		const uint32* sources = GetBlockSources<Storage, CGsPixelFormats::BLOCKSIZE * 2>(rrw, 1);
++		for(uint32 k = 0; k < blocks; k++)
++		{
++			uint32* block = reinterpret_cast<uint32*>(ram + BlockAddress<Storage>(pointer, bufferWidth, (x + k * Storage::BLOCKWIDTH) % 2048, y, 2));
++			uint32 base = firstNibble + k * Storage::BLOCKWIDTH;
++			for(uint32 w = 0; w < nibblesPerBlock / 8; w++)
++			{
++				const uint32* nibbleSources = sources + w * 8;
++				uint32 word = 0;
++				for(uint32 j = 0; j < 8; j++)
++				{
++					uint32 n = base + nibbleSources[j];
++					word |= ((source[n >> 1] >> ((n & 1) * 4)) & 0x0F) << (j * 4);
++				}
++				if(block[w] != word)
++				{
++					block[w] = word;
++					dirty = true;
++				}
++			}
++		}
++		return true;
++	}
++
+ 	// Writes 'count' pixels of a formats with whole-byte units; returns
+ 	// whether memory changed. rrw must be nonzero and rrx < rrw.
+ 	template <typename Storage>
+@@ -31,8 +132,18 @@
+ 		const uint32* pageOffsets = CGsPixelFormats::CPixelIndexor<Storage>::GetPageOffsets();
+ 		bool dirty = false;
+ 		uint32 i = 0;
++		bool blockAligned = g_blockWrites && ((position.dsax % Storage::BLOCKWIDTH) == 0) && ((position.rrw % Storage::BLOCKWIDTH) == 0) &&
++		                    (position.dsax + position.rrw <= 2048);
+ 		while(i < count)
+ 		{
++			uint32 blockRowUnits = position.rrw * Storage::BLOCKHEIGHT;
++			if(blockAligned && (position.rrx == 0) && (count - i >= blockRowUnits) && (((position.rry + position.dsay) % Storage::BLOCKHEIGHT) == 0) &&
++			   WriteUnitBlockRow<Storage>(ram, ramSize, pointer, bufferWidth, position.dsax, (position.rry + position.dsay) % 2048, position.rrw, source + i, dirty))
++			{
++				i += blockRowUnits;
++				position.rry += Storage::BLOCKHEIGHT;
++				continue;
++			}
+ 			uint32 run = std::min(position.rrw - position.rrx, count - i);
+ 			uint32 y = (position.rry + position.dsay) % 2048;
+ 			const uint32* rowOffsets = pageOffsets + (y % Storage::PAGEHEIGHT) * Storage::PAGEWIDTH;
+@@ -131,6 +242,8 @@
+ 		// 2's title screen streams a 512x512 image every frame).
+ 		bool pageAligned = ((position.dsax % Storage::PAGEWIDTH) == 0) && ((position.rrw % Storage::PAGEWIDTH) == 0) &&
+ 		                   (position.dsax + position.rrw <= 2048);
++		bool blockAligned = ((position.dsax % Storage::BLOCKWIDTH) == 0) && ((position.rrw % Storage::BLOCKWIDTH) == 0) &&
++		                    (position.dsax + position.rrw <= 2048);
+ 		while(i < count)
+ 		{
+ 			uint32 pageRowNibbles = position.rrw * Storage::PAGEHEIGHT;
+@@ -142,6 +255,15 @@
+ 				position.rry += Storage::PAGEHEIGHT;
+ 				continue;
+ 			}
++			uint32 blockRowNibbles = position.rrw * Storage::BLOCKHEIGHT;
++			if(g_blockWrites && blockAligned && (position.rrx == 0) && ((i & 1) == 0) && (count - i >= blockRowNibbles) &&
++			   (((position.rry + position.dsay) % Storage::BLOCKHEIGHT) == 0) &&
++			   WritePsmt4BlockRow<Storage>(ram, ramSize, pointer, bufferWidth, position.dsax, (position.rry + position.dsay) % 2048, position.rrw, source, i, dirty))
++			{
++				i += blockRowNibbles;
++				position.rry += Storage::BLOCKHEIGHT;
++				continue;
++			}
+ 			uint32 run = std::min(position.rrw - position.rrx, count - i);
+ 			uint32 y = (position.rry + position.dsay) % 2048;
+ 			const uint32* rowOffsets = pageOffsets + (y % Storage::PAGEHEIGHT) * Storage::PAGEWIDTH;

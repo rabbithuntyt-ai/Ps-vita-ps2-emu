@@ -6,6 +6,7 @@
 #include "GsSurface.h"
 #include "gs/GsTransferRange.h"
 #include "xxhash.h"
+#include "GsProfile.h"
 
 #ifdef __vita__
 #include <psp2/gxm.h>
@@ -282,7 +283,11 @@ CGSHandler::FactoryFunction CGSH_Hardware::GetFactoryFunction(const OPTIONS& opt
 
 bool CGSH_Hardware::Pump(uint32 timeoutMs)
 {
-	m_mailBox.WaitForCall(timeoutMs);
+	{
+		GsProfile::CScope gsIdle(GsProfile::SECTION_IDLE);
+		m_mailBox.WaitForCall(timeoutMs);
+	}
+	GsProfile::CScope gsSection(GsProfile::SECTION_OTHER);
 	uint64 pumpStart = NowUs();
 	// The frontend draws on the same context between pumps.
 	m_stateApplied = false;
@@ -559,6 +564,7 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 		}
 	}
 	if(!create) return nullptr;
+	GsProfile::CScope gsSection(GsProfile::SECTION_TARGET);
 
 	SettleStripCover(); //W1
 	FlushBatch();
@@ -729,6 +735,7 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 
 void CGSH_Hardware::TrimTargetFront(TARGET& target, uint32 rows)
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_TARGET);
 	// W1: the first 'rows' rows (whole page rows) leave the target: it starts after them,
 	// its other rows move up on the GPU (callers: no depth, no stale rows)
 	FlushBatch();
@@ -840,6 +847,7 @@ bool CGSH_Hardware::CanRelayout(const TARGET& old, const TARGET& target, uint32 
 
 void CGSH_Hardware::RelayoutTarget(TARGET& old, TARGET& target)
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_TARGET);
 	CPartTimer timer(GPU_PART_RELAYOUT);
 	GS_SURFACE oldSurface, newSurface;
 	oldSurface.Init(old.psm, old.fbp, old.fbw);
@@ -948,6 +956,7 @@ void CGSH_Hardware::RelayoutTarget(TARGET& old, TARGET& target)
 
 void CGSH_Hardware::AllocateTargetGl(TARGET& target)
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_TARGET);
 	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	CPartTimer timer(GPU_PART_TARGET_CREATE);
 	for(auto it = m_targetPool.begin(); it != m_targetPool.end(); ++it)
@@ -1095,6 +1104,7 @@ void CGSH_Hardware::EnsureValidRows(TARGET& target, uint32 rows)
 
 void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 width, uint32 height)
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_UPLOAD);
 	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
 	x0 = std::min(x0, target.width);
@@ -1182,6 +1192,7 @@ void CGSH_Hardware::MarkTargetDirty(TARGET& target, int32 x0, int32 y0, int32 x1
 
 void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEnd)
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_DOWNLOAD);
 	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	if(m_stripCover.target == &target) SettleStripCover(); //W1: its columns not drawn yet come from GS memory first
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
@@ -1380,6 +1391,7 @@ void CGSH_Hardware::BeginTransferWrite()
 
 void CGSH_Hardware::ProcessHostToLocalTransfer()
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_TRANSFER);
 	SettleStripCover(); //W1: a strip clear in progress ends here
 	if(g_gsCeiling) return; //G1 ceiling run: no GPU side
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
@@ -1532,6 +1544,7 @@ void CGSH_Hardware::OnStateChanged()
 
 void CGSH_Hardware::BindTexture()
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_TEXTURE);
 	CStageTimer stageTimer(GPU_STAGE_TEXTURE);
 	const auto& s = m_state;
 	glActiveTexture(GL_TEXTURE0);
@@ -2525,6 +2538,7 @@ bool CGSH_Hardware::BuildWorldProgram()
 
 void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_WORLD);
 	SettleStripCover(); //W1: a strip clear in progress ends here
 	if(!g_gpuWorld || (batch.count == 0) || g_gsCeiling)
 	{
@@ -2739,6 +2753,7 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 
 void CGSH_Hardware::FlushWorld()
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_FLUSH);
 	if(m_worldSlots == 0) return;
 	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	if(m_worldIndices.empty() || !m_currentTarget)
@@ -3247,6 +3262,7 @@ bool CGSH_Hardware::WouldSkipDraw() const
 
 void CGSH_Hardware::ApplyState()
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_STATE);
 	struct REG_TIMER
 	{
 		uint64& total;
@@ -3582,6 +3598,7 @@ void CGSH_Hardware::SetupAlphaCombiner(bool fix)
 
 void CGSH_Hardware::AddVertex(const CSoftwareRasterizer::VERTEX& v)
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_ADD_VERTEX);
 	const auto& s = m_state;
 	const TARGET& target = *m_currentTarget;
 	// Reciprocals kept while the target size, Z format and texture size stay (divides are
@@ -3752,6 +3769,7 @@ bool CGSH_Hardware::SkipOverwrittenRows(const CSoftwareRasterizer::VERTEX& a, co
 
 void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoftwareRasterizer::VERTEX* vertices)
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_PRIMITIVE);
 	struct REG_TIMER
 	{
 		uint64& total;
@@ -3914,6 +3932,7 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 
 void CGSH_Hardware::OnDrawStripTriangle(const CSoftwareRasterizer::VERTEX* vertices, bool continues)
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_PRIMITIVE);
 	struct REG_TIMER
 	{
 		uint64& total;
@@ -4045,6 +4064,7 @@ void CGSH_Hardware::FlushPoints()
 
 void CGSH_Hardware::FlushBatch()
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_FLUSH);
 	struct REG_TIMER
 	{
 		uint64& total;
@@ -4202,6 +4222,7 @@ void CGSH_Hardware::WriteFrameDump(const uint32* pixels, uint32 width, uint32 he
 
 void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_DISPLAY);
 	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	SettleStripCover(); //W1: a strip clear in progress ends here
 	CStageTimer stageTimer(GPU_STAGE_DISPLAY);

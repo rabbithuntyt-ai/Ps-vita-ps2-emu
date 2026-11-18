@@ -1,4 +1,5 @@
 #include "EmuSession.h"
+#include "GsProfile.h"
 
 #include <algorithm>
 #include <vector>
@@ -363,6 +364,7 @@ void CEmuSession::ProfilerProc()
 	while(!m_stopProfiler)
 	{
 		std::this_thread::sleep_for(std::chrono::microseconds(1000));
+		GsProfile::Sample(); //the GS thread's section (GsProfile.h)
 		unsigned int section = EmuProfile::g_section.load(std::memory_order_relaxed);
 		if(section < EmuProfile::SECTION_COUNT) m_profileCounts[section]++;
 		unsigned int iopSection = EmuProfile::g_iopSection.load(std::memory_order_relaxed);

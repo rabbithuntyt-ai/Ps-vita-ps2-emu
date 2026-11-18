@@ -243,6 +243,10 @@ else()
 	target_link_libraries(vu_arm_dump PRIVATE PlayCore)
 	target_link_libraries(jit_arm_dump PRIVATE PlayCore)
 
+	add_executable(gs_block_transfer_tests tests/gs_block_transfer_tests.cpp)
+	target_link_libraries(gs_block_transfer_tests PRIVATE PlayCore)
+	add_test(NAME gs_block_transfer_tests COMMAND gs_block_transfer_tests)
+
 	add_executable(jit_cache_tests tests/jit_cache_tests.cpp)
 	target_link_libraries(jit_cache_tests PRIVATE PlayCore)
 	add_test(NAME jit_cache_tests COMMAND jit_cache_tests)
