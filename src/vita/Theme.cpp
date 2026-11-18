@@ -169,8 +169,10 @@ void Theme::Browser(const std::vector<std::string>& games, int selected, int scr
 		float y = listTop + (i - scroll) * rowHeight;
 		bool isSelected = (i == selected);
 		Row(28, y, 904, rowHeight - 4, isSelected, seconds);
-		// Name without the extension; the format as a small tag on the right.
+		// Name without its folder or extension; the format as a small tag on the right.
 		std::string name = games[i];
+		auto slash = name.find_last_of('/');
+		if(slash != std::string::npos) name = name.substr(slash + 1);
 		std::string format;
 		auto dot = name.find_last_of('.');
 		if((dot != std::string::npos) && (name.size() - dot <= 5))

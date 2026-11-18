@@ -194,7 +194,10 @@ scene repeatable, so a change can be measured on the exact same frames.
    explanation screen if it is missing.
 3. Install `VitaPS2.vpk` (from the CI artifacts) with VitaShell.
 4. Copy games (`.iso`, `.cso`, `.chd`, `.isz`, `.cue`, `.mds`, `.bin`) or
-   homebrew (`.elf`) to `ux0:data/VitaPS2/games/`.
+   homebrew (`.elf`) to `ux0:data/VitaPS2/games/`, directly or one folder down
+   (`games/Some Game/Some Game.cue`). A BIN/CUE pair shows once, as the `.cue`. A
+   `.bin` on its own also boots: raw 2352-byte CD sectors get a cue written for them in
+   `ux0:data/VitaPS2/cue/`.
 
 ### Controls
 

@@ -50,6 +50,7 @@
 #endif
 #include "CpuScreen.h"
 #include "Cores.h"
+#include "GameScan.h"
 #include "GsProfile.h"
 #include "ee/Vif1.h"
 #include "xxhash.h"
@@ -576,21 +577,10 @@ namespace
 
 	std::vector<std::string> ScanGames()
 	{
-		std::vector<std::string> games;
-		if(DIR* dir = opendir(GAMES_PATH))
-		{
-			while(dirent* entry = readdir(dir))
-			{
-				std::string name = entry->d_name;
-				std::string path = std::string(GAMES_PATH) + "/" + name;
-				if(CEmuSession::IsBootableExecutable(path) || CEmuSession::IsBootableDiscImage(path))
-				{
-					games.push_back(name);
-				}
-			}
-			closedir(dir);
-		}
-		std::sort(games.begin(), games.end());
+		// The games folder and one level of subfolders; a .bin with a .cue is listed once (the .cue)
+		auto games = GameScan::Scan(GAMES_PATH, [](const std::string& path) {
+			return CEmuSession::IsBootableExecutable(path) || CEmuSession::IsBootableDiscImage(path);
+		});
 		games.insert(games.begin(), BUILTIN_TEST_NAME);
 		return games;
 	}
@@ -771,8 +761,10 @@ namespace
 		return profiles;
 	}
 
-	void RunGame(const std::string& path, const AUTOSTART* autostart = nullptr)
+	void RunGame(const std::string& gamePath, const AUTOSTART* autostart = nullptr)
 	{
+		// A lone .bin of raw CD sectors boots through a cue sheet written for it
+		const std::string path = GameScan::PrepareDiscPath(gamePath, std::string(DATA_PATH) + "/cue");
 		const std::string discSerial = CEmuSession::GetDiscSerial(path);
 		const auto* profile = discSerial.empty() ? nullptr : GetGameProfiles().Find(discSerial);
 		std::string gameName;
