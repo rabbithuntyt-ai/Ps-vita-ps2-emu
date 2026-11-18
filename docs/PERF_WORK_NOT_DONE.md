@@ -301,6 +301,18 @@ vitaGL's state handling is cheap, and rebinding the same framebuffer costs nothi
 cost is render target and texture management: the W1 remainder and texture lookups.
 perf.csv `apply_calls`, `apply_split` (fine_timers).
 
+### Suggestions from readers (Reddit, 17 Nov 2026), with their status
+
+A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an
+aggressive ARM NEON JIT and aggressive multithreading. Each against what is measured:
+
+| Suggestion | Where it is on the list | Status and evidence |
+|---|---|---|
+| Bypass vitaGL, draw through GXM directly | W6 in PATH_TO_30FPS.md (a fast draw path; G4 decides when) | Not yet worth it: a vitaGL draw call costs about 7.4 µs and vitaGL's GL state calls 3.5 ms per game frame, against about 450 ms of GPU thread time per game frame. Most of that time is the GS emulated on the CPU (about 3.9 µs per primitive in the register path, 33,000 primitives a game frame) and render target management. W6 comes once those are cut and draw count is what is left. |
+| CapUnlocker, the fourth core | P3: done, with the app's own kernel module (the fourth-core hook only) | Measured: audio output and profiler on core 3, 153 game frames per 120 s against 150; the SPU2 mixer on core 3 slower (143: core 3 is shared with the system); the IOP thread on core 3 +4% in movies, -12% in gameplay. Helps light threads only. |
+| Aggressive ARM NEON JIT | V2 (a new VU recompiler), C1-C3, E3 | VU1: RE4's vertex loop 1,436 -> 1,019 ARM instructions per iteration with the existing recompiler; the new recompiler is still to build. EE: game code is only 10-18% of the emulation thread (E3 measurement), so a faster EE JIT alone moves little; native overlays of library functions gave no measurable gain. |
+| Aggressive multithreading | P1 done (asynchronous VU1), E1 next on the EE side | The EE, VU1 and GPU work each have a core. With all GPU work dropped, the emulation thread alone allows about 3.2 game fps (G1); half of it relays VU1 and VIF1 output (E3 measurement), which E1 moves to the VU1 thread. More threads than cores do not help: three cores for apps, the fourth shared. |
+
 P1 as built: `CVif1::ReceiveDMA` copies the DMA data into a queue and returns at once (small
 chunks without a tag are merged, buffers are reused). The VU1 worker runs `ProcessPacket` on it
 and runs each program inline. DIRECT data and MSKPATH3 go into the XGKICK queue, so PATH1 and
