@@ -301,6 +301,46 @@ vitaGL's state handling is cheap, and rebinding the same framebuffer costs nothi
 cost is render target and texture management: the W1 remainder and texture lookups.
 perf.csv `apply_calls`, `apply_split` (fine_timers).
 
+### The GS thread by section (sampled, 17 Nov 2026)
+
+`src/common/GsProfile.h`: the GS thread stores the section it is in (one relaxed store on
+entry and exit, no clock reads); the session's 1 ms profiler counts samples (perf.csv
+`gs_sections`). This replaced the inclusive timers, which double-counted nested work and paid
+for their own clock reads. RE4 gameplay on the Vita, warm, ms per game frame:
+
+| Section | With frame dumps (2.00 fps) | Dumps off (2.13 fps) | Dumps off, block transfers (2.21 fps) |
+|---|---|---|---|
+| idle (waiting for work) | 69 | 81 | 71 |
+| other (mostly image data written into GS memory) | 97 | 93 | 71 |
+| world | 40 | 38 | 44 |
+| flush (GL draw calls) | 30 | 28 | 32 |
+| read-backs | 23 | 25 | 25 |
+| uploads | 22 | 21 | 22 |
+| render targets | 20 | 20 | 21 |
+| addvertex + vertex + registers + primitive | 52 | 45 | 55 |
+| texture binding | 15 | 14 | 15 |
+| state | 4 | 3 | 4 |
+| display (the flip) | 53 | 0 | 0 |
+
+- **The register and vertex path is small** (about 50 ms per game frame), not the 200+ ms the
+  inclusive timers showed. Characters (W3) are therefore not the GPU thread's main cost; W3
+  matters for the VU1 thread and is parked behind the items above.
+- **The flip's 53 ms was the benchmark's own frame dumps** (`frame_dump_every=10`: a full GPU
+  sync and a 700 KB file each). With them off RE4 makes 209 game frames per 120 s instead of
+  174. `runs/re4/gp.sh` now dumps frames only with `DUMP=N`. Earlier comparisons stay valid
+  (every run paid the same), but absolute speed was understated by about 15%.
+- **Image data into GS memory (patch 0102):** RE4 streams about 365 textures per game frame
+  smaller than a page (4 bit 128x64 and 64x64, 32 bit palettes), and the transfer writer went
+  a pixel at a time below whole pages. It now writes whole GS blocks (256 contiguous bytes,
+  one layout in every page) from a per-block source table: image data 95 -> 56 ms per game
+  frame, **2.21 game fps** (218 game frames per 120 s). `tests/gs_block_transfer_tests`
+  checks the block path against the per pixel path; `gs_transfer_tests` against Play's
+  reference. No transfer leaves its slot unchanged (the game streams different textures
+  through the same slots), so skipping by slot cannot work; the full W4 (textures found by
+  payload, GS memory written only when read another way) is the next transfer step.
+- **Idle is now 20%:** the GS thread waits for work a fifth of the time, so the emulation and
+  VU1 threads limit the frame rate too.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an
