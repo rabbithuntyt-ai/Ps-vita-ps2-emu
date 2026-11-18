@@ -3250,8 +3250,8 @@ void CGSH_Hardware::ApplyState()
 	struct REG_TIMER
 	{
 		uint64& total;
-		uint64 start = g_fineTimers ? NowUs() : 0;
-		~REG_TIMER() { if(g_fineTimers) total += NowUs() - start; }
+		uint64 start = NowUs();
+		~REG_TIMER() { total += NowUs() - start; }
 	} regTimer{g_regSplitUs[0]}; //register path split (perf.csv reg_split)
 	g_applyStateCalls++;
 	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
@@ -3758,6 +3758,7 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 		uint64 start = g_fineTimers ? NowUs() : 0;
 		~REG_TIMER() { if(g_fineTimers) total += NowUs() - start; }
 	} regTimer{g_regSplitUs[2]}; //register path split (perf.csv reg_split)
+	g_primitiveCalls++;
 	if(m_diagFile) m_diagKinds[kind & 3]++;
 	if(!m_stateApplied)
 	{
@@ -3919,6 +3920,7 @@ void CGSH_Hardware::OnDrawStripTriangle(const CSoftwareRasterizer::VERTEX* verti
 		uint64 start = g_fineTimers ? NowUs() : 0;
 		~REG_TIMER() { if(g_fineTimers) total += NowUs() - start; }
 	} regTimer{g_regSplitUs[3]}; //register path split (perf.csv reg_split)
+	g_primitiveCalls++;
 	if(m_stripCover.target) SettleStripCover(); //W1
 	g_stripCalls++;
 	if(continues) g_stripContinues++;
@@ -4046,8 +4048,8 @@ void CGSH_Hardware::FlushBatch()
 	struct REG_TIMER
 	{
 		uint64& total;
-		uint64 start = g_fineTimers ? NowUs() : 0;
-		~REG_TIMER() { if(g_fineTimers) total += NowUs() - start; }
+		uint64 start = NowUs();
+		~REG_TIMER() { total += NowUs() - start; }
 	} regTimer{g_regSplitUs[1]}; //register path split (perf.csv reg_split)
 	CStageTimer stageTimer(GPU_STAGE_GL);
 	FlushWorld();
