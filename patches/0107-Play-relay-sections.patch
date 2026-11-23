@@ -1,0 +1,38 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -44,12 +44,14 @@
+ 		SECTION_VIF_QUEUE, //EE thread: VIF1 DMA data copied into the worker's queue
+ 		SECTION_VU1_NATIVE, //VU1 program run as native code (CVpu::g_nativeProgram)
+ 		SECTION_VU1_KICK, //VU1 worker: XGKICK packet copied into the queue for the EE thread
++		SECTION_RELAY_DIRECT, //EE thread, relay: VIF1 DIRECT data (PATH2) into the GIF
++		SECTION_RELAY_CUSTOM, //EE thread, relay: replaced programs' output (RE4 world batches)
+ 		SECTION_COUNT
+ 	};
+ 
+ 	inline const char* GetSectionName(unsigned int section)
+ 	{
+-		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle", "SPUsync", "SPUread", "VIFdirect", "VIFunpack", "EEio", "EEkernel", "EEticks", "IOPio", "IOPkernel", "IOPticks", "IOPcounters", "IOPbios", "IOPdma", "IOPwait", "IOPdrain", "IOPlag", "IOPpark", "VU1relay", "VIFqueue", "VU1native", "VU1kick"};
++		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle", "SPUsync", "SPUread", "VIFdirect", "VIFunpack", "EEio", "EEkernel", "EEticks", "IOPio", "IOPkernel", "IOPticks", "IOPcounters", "IOPbios", "IOPdma", "IOPwait", "IOPdrain", "IOPlag", "IOPpark", "VU1relay", "VIFqueue", "VU1native", "VU1kick", "relayDirect", "relayWorld"};
+ 		return (section < SECTION_COUNT) ? names[section] : "?";
+ 	}
+ 
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -430,6 +430,7 @@
+ 		if(kick->path == 2)
+ 		{
+ 			//VIF1 DIRECT data (asynchronous VIF1)
++			EmuProfile::CScope directScope(EmuProfile::SECTION_RELAY_DIRECT);
+ 			CGsPacketMetadata directMetadata(2);
+ 			uint32 size = static_cast<uint32>(kick->packet.size());
+ 			if(m_kickOffset < size)
+@@ -445,6 +446,7 @@
+ 		if(kick->custom)
+ 		{
+ 			if(activePath != 0) return;
++			EmuProfile::CScope customScope(EmuProfile::SECTION_RELAY_CUSTOM);
+ 			g_customKickSubmit(m_gif, kick->custom);
+ 			std::lock_guard<std::mutex> lock(m_kickMutex);
+ 			m_pendingKicks.pop_front();
