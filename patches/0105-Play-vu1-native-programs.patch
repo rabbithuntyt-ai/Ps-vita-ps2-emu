@@ -1,0 +1,56 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -42,12 +42,14 @@
+ 		SECTION_IOP_PARK, //parked while the IOP thread crosses
+ 		SECTION_VU1_RELAY, //EE thread: VU1 worker output (XGKICK, VIF1 DIRECT) sent to the GIF
+ 		SECTION_VIF_QUEUE, //EE thread: VIF1 DMA data copied into the worker's queue
++		SECTION_VU1_NATIVE, //VU1 program run as native code (CVpu::g_nativeProgram)
++		SECTION_VU1_KICK, //VU1 worker: XGKICK packet copied into the queue for the EE thread
+ 		SECTION_COUNT
+ 	};
+ 
+ 	inline const char* GetSectionName(unsigned int section)
+ 	{
+-		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle", "SPUsync", "SPUread", "VIFdirect", "VIFunpack", "EEio", "EEkernel", "EEticks", "IOPio", "IOPkernel", "IOPticks", "IOPcounters", "IOPbios", "IOPdma", "IOPwait", "IOPdrain", "IOPlag", "IOPpark", "VU1relay", "VIFqueue"};
++		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle", "SPUsync", "SPUread", "VIFdirect", "VIFunpack", "EEio", "EEkernel", "EEticks", "IOPio", "IOPkernel", "IOPticks", "IOPcounters", "IOPbios", "IOPdma", "IOPwait", "IOPdrain", "IOPlag", "IOPpark", "VU1relay", "VIFqueue", "VU1native", "VU1kick"};
+ 		return (section < SECTION_COUNT) ? names[section] : "?";
+ 	}
+ 
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -473,6 +473,7 @@
+ 
+ void CVpu::QueueXgKick(uint32 address)
+ {
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_VU1_KICK);
+ 	//Copy the whole GIF packet (tags until EOP) out of VU memory now: the
+ 	//program keeps running and may overwrite it.
+ 	uint32 memoryMask = m_vuMemSize - 1;
+@@ -678,6 +679,11 @@
+ 			return;
+ 		}
+ 	}
++	if(g_nativeProgram && (m_number == 1) && (!m_threaded || IsWorkerThread()))
++	{
++		EmuProfile::CScope profileScope(EmuProfile::SECTION_VU1_NATIVE);
++		if(g_nativeProgram(*this, nAddress)) return;
++	}
+ 	m_vuState = VU_STATE_RUNNING;
+ 	if(IsWorkerThread())
+ 	{
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -160,6 +160,10 @@
+ 	//g_customKickSubmit in order with the XGKICK packets, as the program's output would.
+ 	static inline std::function<std::shared_ptr<void>(CVpu&, uint32 address)> g_programReplacement;
+ 	static inline std::function<void(CGIF&, const std::shared_ptr<void>&)> g_customKickSubmit;
++	//Native programs (VU1): called where the program would run (inline, or on the worker with
++	//asynchronous VIF1). Returns true when it ran the program itself: it left the VU registers
++	//and memory as the program does and kicked its GIF packets with ProcessXgKick.
++	static inline std::function<bool(CVpu&, uint32 address)> g_nativeProgram;
+ 	bool IsThreaded() const
+ 	{
+ 		return m_threaded;

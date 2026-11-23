@@ -133,6 +133,10 @@ endif()
 add_library(vitaps2_common STATIC
 	src/common/EmuSession.cpp
 	src/common/GameScan.cpp
+	src/common/Re4Skin.cpp
+	src/common/Re4Skin.gen.cpp
+	src/common/Re4Skin.h
+	src/common/VuAot.h
 	src/common/GameScan.h
 	src/common/JitCacheSetup.cpp
 	src/common/JitCacheSetup.h
@@ -151,6 +155,8 @@ add_library(vitaps2_common STATIC
 )
 target_include_directories(vitaps2_common PUBLIC src/common)
 target_link_libraries(vitaps2_common PUBLIC gsh_software PlayCore)
+# Translated VU code: no fused multiply-add (the VU rounds the product and the sum apart)
+set_source_files_properties(src/common/Re4Skin.gen.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-O2")
 
 if(VITA)
 	include(cmake/VitaApp.cmake)

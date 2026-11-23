@@ -1,0 +1,89 @@
+diff --git a/Source/gs/GSHandler.cpp b/Source/gs/GSHandler.cpp
+--- a/Source/gs/GSHandler.cpp
++++ b/Source/gs/GSHandler.cpp
+@@ -1,5 +1,6 @@
+ #include <stdio.h>
+ #include <string.h>
++#include <algorithm>
+ #include <functional>
+ #include "AppConfig.h"
+ #include "Log.h"
+@@ -72,7 +73,8 @@
+ 
+ 	m_pRAM = new uint8[RAMSIZE];
+ 	m_pCLUT = new uint16[CLUTENTRYCOUNT];
+-	for(int i = 0; i < MAX_INFLIGHT_FRAMES; i++)
++	g_framesAhead = std::max(2, std::min(g_framesAhead, static_cast<int>(MAX_INFLIGHT_FRAMES)));
++	for(int i = 0; i < g_framesAhead; i++)
+ 	{
+ 		m_writeBuffers[i] = new RegisterWrite[REGISTERWRITEBUFFER_SIZE];
+ 	}
+@@ -553,7 +555,7 @@
+ {
+ 	FlushWriteBuffer();
+ 	SendGSCall(std::bind(&CGSHandler::MarkNewFrame, this));
+-	bool wait = (++m_framesInFlight == MAX_INFLIGHT_FRAMES);
++	bool wait = (++m_framesInFlight >= g_framesAhead);
+ 	wait |= forceWait;
+ 	SendGSCall(
+ 	    [this]() {
+@@ -781,11 +783,12 @@
+ 	assert(m_writeBufferProcessIndex == m_writeBufferSize);
+ 	//Make sure everything is submitted
+ 	SubmitWriteBuffer();
++	g_writeBufferPeak = std::max(g_writeBufferPeak, m_writeBufferSize);
+ 	m_writeBufferSize = 0;
+ 	m_writeBufferProcessIndex = 0;
+ 	m_writeBufferSubmitIndex = 0;
+ 	m_writeBufferIndex++;
+-	m_writeBufferIndex %= MAX_INFLIGHT_FRAMES;
++	m_writeBufferIndex %= g_framesAhead;
+ 	m_currentWriteBuffer = m_writeBuffers[m_writeBufferIndex];
+ 	//Nothing should be written to the buffer after that
+ }
+diff --git a/Source/gs/GSHandler.h b/Source/gs/GSHandler.h
+--- a/Source/gs/GSHandler.h
++++ b/Source/gs/GSHandler.h
+@@ -885,7 +885,11 @@
+ 	inline void WriteRegister(const RegisterWrite& write)
+ 	{
+ 		assert(m_writeBufferSize < REGISTERWRITEBUFFER_SIZE);
+-		if(m_writeBufferSize == REGISTERWRITEBUFFER_SIZE) return;
++		if(m_writeBufferSize == REGISTERWRITEBUFFER_SIZE)
++		{
++			g_writeBufferOverflows++;
++			return;
++		}
+ 		m_currentWriteBuffer[m_writeBufferSize++] = write;
+ 	}
+ 
+@@ -943,7 +947,7 @@
+ 
+ 	enum
+ 	{
+-		REGISTERWRITEBUFFER_SIZE = 0x140000,
++		REGISTERWRITEBUFFER_SIZE = 0x80000, //entries per vblank (Resident Evil 4 gameplay: about 60,000)
+ 		REGISTERWRITEBUFFER_SUBMIT_THRESHOLD = 0x100
+ 	};
+ 
+@@ -1141,9 +1145,19 @@
+ 
+ 	uint32 m_drawCallCount = 0;
+ 
+-	static constexpr int MAX_INFLIGHT_FRAMES = 2;
++	static constexpr int MAX_INFLIGHT_FRAMES = 4; //write buffers (g_framesAhead of them in use)
+ 	RegisterWrite* m_writeBuffers[MAX_INFLIGHT_FRAMES] = {};
+ 
++public:
++	//Vblanks the emulation thread may run ahead of the GS thread (2 to MAX_INFLIGHT_FRAMES; set
++	//before the GS handler is created). Each one has its own register write buffer.
++	static inline int g_framesAhead = 2;
++	//Diagnostics: the most register writes in one vblank, and writes dropped on a full buffer
++	static inline uint32 g_writeBufferPeak = 0;
++	static inline uint64 g_writeBufferOverflows = 0;
++
++protected:
++
+ 	RegisterWrite* m_currentWriteBuffer = nullptr;
+ 	uint32 m_writeBufferIndex = 0;
+ 	uint32 m_writeBufferSize = 0;

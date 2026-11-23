@@ -49,6 +49,7 @@
 #include "ee/Vif.h"
 #include "Vu1Stats.h"
 #include "Vu1Verify.h"
+#include "Re4Skin.h"
 #include "Re4Vu1Hle.h"
 #include <algorithm>
 #include <atomic>
@@ -269,6 +270,9 @@ int main(int argc, char** argv)
 		}
 		else if(!std::strcmp(argv[i], "--vu1-verify")) CVpu::g_programHook = Vu1Verify::Hook; //vu1verify.txt
 		else if(!std::strcmp(argv[i], "--vu1-hle")) Re4Vu1Hle::Enable(true); //RE4 world program without VU1
+		else if(!std::strcmp(argv[i], "--gs-frames-ahead") && (i + 1 < argc)) CGSHandler::g_framesAhead = std::atoi(argv[++i]); //gs_frames_ahead
+		else if(!std::strcmp(argv[i], "--re4-skin")) CVpu::g_nativeProgram = Re4Skin::Run; //RE4 skinning programs natively (re4_skin)
+		else if(!std::strcmp(argv[i], "--skin-verify")) CVpu::g_programHook = Re4Skin::VerifyHook; //skinverify.txt (inline VU1)
 		else if(!std::strcmp(argv[i], "--vu-scalar-opmul")) VUShared::g_vectorOuterProduct = false; //old OPMULA/OPMSUB
 		else if(!std::strcmp(argv[i], "--vu-no-loop-variant")) CVuBasicBlock::g_loopVariant = false;      //no loop copy of self-looping VU blocks
 		else if(!std::strcmp(argv[i], "--vu-no-clamp")) CVuBasicBlock::g_extraCompileHints |= VUShared::COMPILEHINT_NO_CLAMPING; //vu_no_clamp
@@ -471,7 +475,9 @@ int main(int argc, char** argv)
 		}
 		if(statsFile) std::fclose(statsFile);
 		mpegHle.Disable();
-		if(CVpu::g_programHook) Vu1Verify::Write("vu1verify.txt");
+		if(Re4Skin::g_stats.verified != 0) Re4Skin::WriteReport("skinverify.txt");
+		else if(CVpu::g_programHook) Vu1Verify::Write("vu1verify.txt");
+		if(CVpu::g_nativeProgram) std::printf("re4 skin: %llu native runs, %llu refused\n", (unsigned long long)Re4Skin::g_stats.runs, (unsigned long long)Re4Skin::g_stats.refused);
 		if(EmuProfile::g_vu1Programs.enabled)
 		{
 			if(std::FILE* file = std::fopen("vu1prog.txt", "w"))

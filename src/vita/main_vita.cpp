@@ -51,6 +51,7 @@
 #include "CpuScreen.h"
 #include "Cores.h"
 #include "GameScan.h"
+#include "Re4Skin.h"
 #include "GsProfile.h"
 #include "ee/Vif1.h"
 #include "xxhash.h"
@@ -381,6 +382,8 @@ namespace
 		else if(key == "vu1_async") CVpu::g_asyncVif1 = value != 0;                //VIF1 work on the VU1 thread (needs threaded_vu1)
 		else if(key == "vu1_async_path3_sync") CVpu::g_asyncPath3Sync = value != 0; //PATH3 waits for queued VIF1 work (on)
 		else if(key == "re4_vu1_hle") Re4Vu1Hle::Enable(value != 0); //RE4: world vertex program without VU1
+		else if(key == "gs_frames_ahead") CGSHandler::g_framesAhead = value; //vblanks the emulation thread may lead the GS thread (2-4)
+		else if(key == "re4_skin") CVpu::g_nativeProgram = (value != 0) ? std::function<bool(CVpu&, uint32)>(Re4Skin::Run) : nullptr; //RE4: skinning programs natively
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
 	}
@@ -798,7 +801,7 @@ namespace
 				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop");
 				//The IOP thread's sections (iop_thread)
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",iopt_%s", EmuProfile::GetSectionName(i));
-				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3,gs_feed_ms,gs_feed_calls,gs_feed_kb,gs_regs_ms,gs_reg_calls,gs_reg_writes,gs_mail_calls,world_ms,targets_pooled,gs_send_ms,gs_send_calls,vif1_readback_ms,vif1_readbacks,vif1_readback_kb,gs_wait_ms,gs_wait_calls,world_hits,world_misses,world_cache_mb,world_runs,world_seg,world_slot_ms,reg_split,apply_calls,draw_calls,apply_split,prim_calls,gs_sections,vu1_sections");
+				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3,gs_feed_ms,gs_feed_calls,gs_feed_kb,gs_regs_ms,gs_reg_calls,gs_reg_writes,gs_mail_calls,world_ms,targets_pooled,gs_send_ms,gs_send_calls,vif1_readback_ms,vif1_readbacks,vif1_readback_kb,gs_wait_ms,gs_wait_calls,world_hits,world_misses,world_cache_mb,world_runs,world_seg,world_slot_ms,reg_split,apply_calls,draw_calls,apply_split,prim_calls,gs_sections,vu1_sections,gs_wb_peak,gs_wb_overflows");
 				std::fprintf(perfFile, "\n");
 			}
 		}
@@ -1635,6 +1638,8 @@ namespace
 								// The VU1 worker's sections (EmuProfile order), shares
 								auto vu1Profile = session->TakeProfile(2);
 								for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, "%c%.3f", (i == 0) ? ',' : ';', vu1Profile.share[i]);
+								std::fprintf(perfFile, ",%u,%llu", CGSHandler::g_writeBufferPeak, (unsigned long long)CGSHandler::g_writeBufferOverflows);
+								CGSHandler::g_writeBufferPeak = 0;
 							}
 						}
 						std::fprintf(perfFile, "\n");
