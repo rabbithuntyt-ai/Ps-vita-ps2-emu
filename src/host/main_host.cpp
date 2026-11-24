@@ -279,7 +279,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-fast-packed")) CGIF::g_fastPacked = false; //gif_fast_packed=0
 		else if(!std::strcmp(argv[i], "--no-bulk-unpack")) CVif::g_bulkUnpack = false; //bulk_unpack=0
 		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
-		else if(!std::strcmp(argv[i], "--reuse-scan")) CVpu::g_reuseScan = true; //relayed GIF data repeated across frames
+		else if(!std::strcmp(argv[i], "--reuse-scan")) CVpu::g_reuseScan = CGSHandler::g_shadowRegs = true; //relayed GIF data repeated across frames
 		else if(!std::strcmp(argv[i], "--no-merged-submit")) CGSHandler::g_mergedSubmit = false; //gs_merged_submit=0
 		else if(!std::strcmp(argv[i], "--no-fast-registers")) CGSH_Primitives::g_fastRegisters = false; //gs_fast_registers=0
 		else if(!std::strcmp(argv[i], "--re4-skin")) CVpu::g_nativeProgram = Re4Skin::Run; //RE4 skinning programs natively (re4_skin)
@@ -647,6 +647,16 @@ int main(int argc, char** argv)
 			if(CVpu::g_reuseScan)
 				for(int m = 0; m < 4; m++)
 					std::printf("reuse DIRECT mode %d: %.1f MB, %.1f MB repeated\n", m, CVpu::g_reuseDirectMode[m][0] / 1048576.0, CVpu::g_reuseDirectMode[m][1] / 1048576.0);
+			if(CVpu::g_reuseScan)
+			{
+				std::printf("reuse DIRECT with the same GS register state: %llu packets, %.1f MB\n", (unsigned long long)CVpu::g_reuseWithState[0], CVpu::g_reuseWithState[1] / 1048576.0);
+				std::printf("XGKICK bytes by program:");
+				for(const auto& [program, counts] : CVpu::g_kicksByProgram)
+					if(counts.second > 1048576) std::printf(" %04X:%llu packets/%.1f MB", program, (unsigned long long)counts.first, counts.second / 1048576.0);
+				std::printf("\n");
+				std::printf("register writes by path: other %llu, PATH1 %llu, PATH2 %llu, PATH3 %llu\n", (unsigned long long)CGSHandler::g_writesByPath[0], (unsigned long long)CGSHandler::g_writesByPath[1],
+				            (unsigned long long)CGSHandler::g_writesByPath[2], (unsigned long long)CGSHandler::g_writesByPath[3]);
+			}
 			if(Ee::CSubSystem::g_ioCounts)
 			{
 				//The 20 busiest EE I/O register slots

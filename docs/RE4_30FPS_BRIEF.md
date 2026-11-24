@@ -84,10 +84,49 @@ PC runner, RE4 walk, 420 vblanks, every GIF packet the relay hands to the GS has
   copies it out of the queue (DIRECT, 17-19 ms); the GS thread decodes, assembles primitives,
   converts vertices and batches them (registers, vertices, primitives, vertex conversion, part of
   flush: roughly 60-90 ms) and writes the images into GS memory (40 ms).
-- **What it suggests:** caching by content, keyed by the packet's hash plus the GS state it
-  depends on (registers at its start, the textures and CLUTs it samples, the target it draws
-  into), with the result kept as ready GL batches. Not built; the hit rate after those extra keys,
-  and what the cache costs to check, are the next measurements.
+- **With the GS register state at the packet's start in the key** (patch 0124): 236,640 of the
+  260,995 DIRECT packets (225 of 246 MB) still repeat.
+- **But the register path is not DIRECT's:** register writes by GIF path over the same run are
+  PATH1 11.5 million (89%), PATH2 (DIRECT) 1.2 million (9.4%), other 0.2 million. DIRECT packets
+  are mostly texture uploads (a few register setups, then image data: their first tag reads as
+  PACKED). The register path is VU1 output, which does not repeat.
+- **And all VU1 output is skinning:** XGKICK bytes by the program that made them: 0x0000 87.0 MB
+  (46,858 packets) and 0x0050 88.4 MB (47,443), nothing else above 1 MB.
+- **So a GS command cache (the roadmap's Priority 1) is not viable for RE4:** the commands that
+  cost GS thread time are skinned vertices, new every frame; the repeated ones are texture
+  uploads, which cannot be skipped because RE4 reuses each texture slot for other shapes (W4,
+  tried 17 Nov: 8% saved).
+
+## The roadmap's items, measured (24 Nov)
+
+Status of each item of the external review ("PS Vita PS2 Emulator Performance Roadmap",
+24 Nov) after measuring:
+
+| Roadmap item | Status | Evidence |
+|---|---|---|
+| Priority 0: frame counter, timer window, profiler buckets | Done | Rates corrected (rows are 1.10 s apart); sections exclusive and summing to wall time (`tools/perf_audit.py`) |
+| Priority 1: GS command caching | Not viable for RE4 | 89% of register writes are skinned vertices, 0.2% repeated; the repeated DIRECT data is texture uploads |
+| Priority 1: GPU-resident GS memory | Tried earlier in three forms, not kept | Dirty bands, stale-row uploads, stale-row GPU copies: read-backs move rather than vanish (RE4 reuses its blur buffer memory in another layout each frame), one form crashed, one drew wrong rows |
+| Priority 2: VU1 to GPU | Viable, the largest lever measured | All VU1 output is the skinning program; a vertex shader version would remove the worker's skinning (~57 ms per game frame), XGKICK copies (~8), the PATH1 relay on the emulation thread (~18) and most of the GS thread's register, vertex and primitive work (~55-60) |
+| Priority 3: EE trace compilation | Partly measured | 23 ARM instructions per EE instruction, 77% the instructions' own work; LQC2/SQC2 fused with no measurable change; cross-block register retention not built |
+| Priority 4: dependency scheduling | Not promising now | The VU1 worker is idle 133-152 ms per game frame and the emulation thread is the limit; moving work between threads was tried twice (E1, IOP on core 3) and lost |
+| Priority 5: reduced precision, title-specific | Used where exact enough | RE4's world (0.10-0.15% pixels differ) and skinning (bit exact) are already title-specific |
+
+**The skinning program, as read from VU1 microcode (entries 0x0000/0x0050, loop 0x02C8-0x0478):**
+setup loads a projection matrix and a clip matrix (VU1 memory 0-7), a light direction and colour,
+an ambient colour and a material colour. Each vertex is 3 qwords: integer position (with a scale
+from the batch header) and a pointer to its bone list, integer normal and a strip restart flag,
+integer texture coordinates. The bone list gives 1-N bone indices and weights; their matrices are
+blended, then the position and normal are transformed; one directional light plus ambient, times
+the material colour, clamped to 255; the position is projected (1/w, 12.4 fixed point) and the
+texture coordinates scaled by Q. Output is ST, RGBA, XYZ2 per vertex under one GIF tag; a
+triangle is skipped (ADC) when any of its three vertices is outside the clip box or where the input
+restarts the strip.
+
+**Risks of a GPU version:** the PS2 skips triangles that leave the clip box, the GPU would clip them
+(different only at the guard band, as the GPU world already accepts); bone matrices indexed per
+vertex in the shader (vitaGL's GLSL translation got a dynamic uniform index wrong for the world
+shader on the Vita, so this likely needs a Cg shader); float rounding in the lighting.
 
 ## Work done and kept
 
