@@ -1,0 +1,44 @@
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -179,6 +179,10 @@
+ 	//g_customKickSubmit in order with the XGKICK packets, as the program's output would.
+ 	static inline std::function<std::shared_ptr<void>(CVpu&, uint32 address)> g_programReplacement;
+ 	static inline std::function<void(CGIF&, const std::shared_ptr<void>&)> g_customKickSubmit;
++	//For a native program (g_nativeProgram) that hands its output over in g_customKickSubmit's
++	//form instead of XGKICK packets: queued in order with the packets (VU1 worker), or submitted
++	//at once (inline VU1)
++	void QueueCustomKick(std::shared_ptr<void>);
+ 	//Native programs (VU1): called where the program would run (inline, or on the worker with
+ 	//asynchronous VIF1). Returns true when it ran the program itself: it left the VU registers
+ 	//and memory as the program does and kicked its GIF packets with ProcessXgKick.
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -609,6 +609,26 @@
+ 	}
+ }
+ 
++void CVpu::QueueCustomKick(std::shared_ptr<void> custom)
++{
++	if(m_threaded)
++	{
++		{
++			std::lock_guard<std::mutex> lock(m_kickMutex);
++			PENDING_KICK kick;
++			kick.custom = std::move(custom);
++			g_asyncStats.customs.fetch_add(1, std::memory_order_relaxed);
++			m_pendingKicks.push_back(std::move(kick));
++			m_hasPendingKicks = true;
++		}
++		FlushPendingXgKicks();
++	}
++	else
++	{
++		g_customKickSubmit(m_gif, custom);
++	}
++}
++
+ void CVpu::QueueXgKick(uint32 address)
+ {
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_VU1_KICK);

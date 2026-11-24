@@ -285,6 +285,8 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--re4-skin")) CVpu::g_nativeProgram = Re4Skin::Run; //RE4 skinning programs natively (re4_skin)
 		else if(!std::strcmp(argv[i], "--skin-verify")) CVpu::g_programHook = Re4Skin::VerifyHook; //skinverify.txt (inline VU1)
 		else if(!std::strcmp(argv[i], "--skin-model")) Re4Skin::g_modelCheck = true; //native skinning against a plain float model
+		else if(!std::strcmp(argv[i], "--skin-sparse-state")) Re4Skin::g_sparseState = true; //experiment: skinning leaves only cheap registers
+		else if(!std::strcmp(argv[i], "--gpu-skin")) Re4Skin::g_gpuSkin = true; //one-matrix skinning batches through the GPU world path (gpu_skin)
 		else if(!std::strcmp(argv[i], "--vu-scalar-opmul")) VUShared::g_vectorOuterProduct = false; //old OPMULA/OPMSUB
 		else if(!std::strcmp(argv[i], "--vu-no-loop-variant")) CVuBasicBlock::g_loopVariant = false;      //no loop copy of self-looping VU blocks
 		else if(!std::strcmp(argv[i], "--vu-no-clamp")) CVuBasicBlock::g_extraCompileHints |= VUShared::COMPILEHINT_NO_CLAMPING; //vu_no_clamp
@@ -649,6 +651,7 @@ int main(int argc, char** argv)
 				for(int m = 0; m < 4; m++)
 					std::printf("reuse DIRECT mode %d: %.1f MB, %.1f MB repeated\n", m, CVpu::g_reuseDirectMode[m][0] / 1048576.0, CVpu::g_reuseDirectMode[m][1] / 1048576.0);
 			if(Re4Skin::g_modelCheck) Re4Skin::PrintModelStats();
+			if(Re4Skin::g_gpuSkin) std::printf("gpu skin: %llu batches (%llu vertices) on the GPU, %llu native\n", (unsigned long long)Re4Skin::g_gpuBatches, (unsigned long long)Re4Skin::g_gpuVertices, (unsigned long long)Re4Skin::g_nativeBatches);
 			if(CVpu::g_reuseScan)
 			{
 				std::printf("reuse DIRECT with the same GS register state: %llu packets, %.1f MB\n", (unsigned long long)CVpu::g_reuseWithState[0], CVpu::g_reuseWithState[1] / 1048576.0);

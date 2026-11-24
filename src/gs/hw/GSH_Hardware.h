@@ -409,6 +409,7 @@ private:
 	float m_worldMatrix[WORLD_SLOTS * 16] = {};
 	float m_worldColorOffset[WORLD_SLOTS * 4] = {}, m_worldColorScale[WORLD_SLOTS * 4] = {}, m_worldTexOffset[WORLD_SLOTS * 4] = {};
 	uint32 m_worldSlots = 0;
+	bool m_worldSlotProjected = false; //the last slot holds projected skinning batches (gpu_skin)
 	GLuint m_worldProgram = 0;
 	bool m_worldProgramFailed = false;
 	GLint m_worldLocations[16] = {};

@@ -28,8 +28,8 @@ own notes (`docs/PERF_WORK_NOT_DONE.md`, `docs/PATH_TO_30FPS.md`).
 
 ## Where RE4 stands (24 Nov 2026)
 
-- **About 3.0 game fps in steady gameplay** (2.84-3.25 in four recent runs, measured from the
-  perf.csv timestamps from 25 s on), **2.6-2.9 over a whole run** (290-323 game frames in about
+- **About 3.3 game fps in steady gameplay since GPU skinning** (3.28-3.34; 2.81-3.25 before it,
+  measured from the perf.csv timestamps from 25 s on), **2.6-2.9 over a whole run** (290-323 game frames in about
   111 s of rows, including about 14 s of state loading with no game frames). The game targets 30:
   about 10x. The emulated machine runs at about 9 of 60 vblanks a second.
 - **Audit note (24 Nov):** earlier figures (3.2-3.6 game fps, and ms per game frame about 8% low)
@@ -107,7 +107,7 @@ Status of each item of the external review ("PS Vita PS2 Emulator Performance Ro
 | Priority 0: frame counter, timer window, profiler buckets | Done | Rates corrected (rows are 1.10 s apart); sections exclusive and summing to wall time (`tools/perf_audit.py`) |
 | Priority 1: GS command caching | Not viable for RE4 | 89% of register writes are skinned vertices, 0.2% repeated; the repeated DIRECT data is texture uploads |
 | Priority 1: GPU-resident GS memory | Tried earlier in three forms, not kept | Dirty bands, stale-row uploads, stale-row GPU copies: read-backs move rather than vanish (RE4 reuses its blur buffer memory in another layout each frame), one form crashed, one drew wrong rows |
-| Priority 2: VU1 to GPU | Viable, the largest lever measured | All VU1 output is the skinning program; a vertex shader version would remove the worker's skinning (~57 ms per game frame), XGKICK copies (~8), the PATH1 relay on the emulation thread (~18) and most of the GS thread's register, vertex and primitive work (~55-60) |
+| Priority 2: VU1 to GPU | **Built for RE4's skinning (`gpu_skin`, on in RE4's profile): +15%** | See "GPU skinning" below: 3.28-3.34 game fps against 2.81-2.90 |
 | Priority 3: EE trace compilation | Partly measured | 23 ARM instructions per EE instruction, 77% the instructions' own work; LQC2/SQC2 fused with no measurable change; cross-block register retention not built |
 | Priority 4: dependency scheduling | Not promising now | The VU1 worker is idle 133-152 ms per game frame and the emulation thread is the limit; moving work between threads was tried twice (E1, IOP on core 3) and lost |
 | Priority 5: reduced precision, title-specific | Used where exact enough | RE4's world (0.10-0.15% pixels differ) and skinning (bit exact) are already title-specific |
@@ -135,6 +135,30 @@ version would differ only by the GPU's own float rounding.
 (different only at the guard band, as the GPU world already accepts); bone matrices indexed per
 vertex in the shader (vitaGL's GLSL translation got a dynamic uniform index wrong for the world
 shader on the Vita, so this likely needs a Cg shader); float rounding in the lighting.
+
+## GPU skinning (24 Nov, `gpu_skin`, patch 0125)
+
+- **How:** the VU1 worker no longer runs the skinning program's output stage. For each batch it
+  computes every vertex with the program's own arithmetic (bone blend, projection, lighting,
+  texture numerators, the skip bit: the same code as the bit-exact model) and hands the batch
+  to the GS thread in the RE4 world path's form, already projected (`WORLD_BATCH::clipSpace`).
+  The GS thread draws it with the world shader (one switch: the position is taken as given), and
+  consecutive skinning batches share one draw. No XGKICK packet, no relay parse, no GS register,
+  vertex or primitive work for characters. The VU registers the program would leave are set from
+  its setup (the vertex loop's leftovers matter to nothing after it: PC pictures identical
+  without them).
+- **PC (RE4 walk, 420 vblanks):** all 94,301 skinning batches on the new path; GS register writes
+  12.9 to 1.56 million; relayed XGKICK packets 97,750 to 3,449; about 10,000 extra draws for
+  94,000 batches. Pictures: 6-9% of pixels differ, nearly all by 8 levels or less (99-214 pixels a
+  shot by more, at most 69): GPU rasterization of the same triangles; no visible difference.
+- **Vita (same build, alternating, 120 s):** 3.34 and 3.28 game fps with it, 2.90 and 2.81
+  without (332 and 327 game frames against 289 and 279). The emulation thread's wait on the GS
+  thread 86 to 33-38 ms per game frame; the GS thread's vertex, primitive and vertex conversion
+  work for characters ~47 to ~2 ms; the VU1 worker does the vertex work instead (skinning 58 to
+  88-92 ms) and is still idle 77-79 ms. No crash dumps; Vita frame dumps look right.
+- **First version, kept off:** batches with one bone matrix only, each drawn with its own matrix
+  uniform: +2%, because every batch became its own GL draw on the Vita (one matrix slot per
+  draw there).
 
 ## Work done and kept
 

@@ -633,6 +633,13 @@ for their own clock reads. RE4 gameplay on the Vita, warm, ms per game frame:
   vblanks). The register data sent by DIRECT is most of the GS register writes. Details and what
   it suggests: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md).
 
+### GPU skinning (24 Nov 2026, patch 0125, `gpu_skin`)
+
+RE4's skinning batches are computed on the VU1 worker with the program's own arithmetic and drawn
+by the GPU world path, already projected; consecutive batches share a draw. Vita: 3.28-3.34 game
+fps against 2.81-2.90 (+15%); the emulation thread's wait on the GS thread 86 to 33-38 ms per game
+frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "GPU skinning".
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an

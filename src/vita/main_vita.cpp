@@ -395,6 +395,7 @@ namespace
 		else if(key == "re4_vu1_hle") Re4Vu1Hle::Enable(value != 0); //RE4: world vertex program without VU1
 		else if(key == "gs_frames_ahead") CGSHandler::g_framesAhead = value; //vblanks the emulation thread may lead the GS thread (2-4)
 		else if(key == "re4_skin") CVpu::g_nativeProgram = (value != 0) ? std::function<bool(CVpu&, uint32)>(Re4Skin::Run) : nullptr; //RE4: skinning programs natively
+		else if(key == "gpu_skin") Re4Skin::g_gpuSkin = value != 0; //RE4: one-matrix skinning batches drawn by the GPU world path (off)
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
 	}

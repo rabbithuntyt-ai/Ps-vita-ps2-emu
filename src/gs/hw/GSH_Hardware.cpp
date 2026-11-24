@@ -2071,7 +2071,8 @@ namespace
 	    "{\n"
 	    "	int s = int(aSlot + 0.5);\n"
 	    "	int m = s * 4;\n"
-	    "	vec4 v = uM[m] * aP.x + uM[m + 1] * aP.y + uM[m + 2] * aP.z + uM[m + 3];\n"
+	    // uTO.w set: the position is already projected (RE4 skinning batches, gpu_skin)
+	    "	vec4 v = (uTO[s].w > 0.5) ? aP : (uM[m] * aP.x + uM[m + 1] * aP.y + uM[m + 2] * aP.z + uM[m + 3]);\n"
 	    // The program divides by w itself and sends 12.4 fixed point X and Y, which the GS takes
 	    // modulo 4096 pixels: RE4's projection puts the screen centre at -2048 with a negative w.
 	    // So: divide, wrap, and give GL the position with a positive w (|w| keeps the
@@ -2560,7 +2561,7 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 		CGSH_Primitives::DrawWorldBatch(batch);
 		return;
 	}
-	if(g_gpuWorldRetained && DrawRetainedWorld(batch))
+	if(g_gpuWorldRetained && !batch.skin && DrawRetainedWorld(batch))
 	{
 		g_gpuWorldBatches++;
 		MarkTargetDirty(*m_currentTarget, 0, 0, m_currentTarget->width, m_currentTarget->height);
@@ -2582,9 +2583,14 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 	} slotTimer;
 	// Triangles of this state waiting in m_batch (clipped ones) are drawn with the world draw
 	// (FlushBatch draws both): same state, so their order does not matter.
-	if(m_worldSlots >= std::min<uint32>(std::max<uint32>(g_gpuWorldSlots, 1), WORLD_SLOTS)) FlushWorld();
+	// Projected skinning batches share one slot: their constants do not depend on the batch
+	// (only the fog factor), so consecutive ones are one draw as their packets were one batch
+	float fogFactor = s.fog ? static_cast<float>((m_nReg[GS_REG_FOG] >> 56) & 0xFF) / 255.0f : 1.0f;
+	bool shareSlot = batch.clipSpace && (m_worldSlots != 0) && m_worldSlotProjected && (m_worldTexOffset[(m_worldSlots - 1) * 4 + 2] == fogFactor);
+	if(!shareSlot && (m_worldSlots >= std::min<uint32>(std::max<uint32>(g_gpuWorldSlots, 1), WORLD_SLOTS))) FlushWorld();
 	g_gpuWorldBatches++;
-	uint32 slot = m_worldSlots++;
+	uint32 slot = shareSlot ? (m_worldSlots - 1) : m_worldSlots++;
+	m_worldSlotProjected = batch.clipSpace;
 	// Constants: the matrix with the position scale folded in, colour offset and scale
 	float* m = m_worldMatrix + slot * 16;
 	for(int r = 0; r < 4; r++)
@@ -2610,8 +2616,8 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 	to[0] = batch.vf31.x;
 	to[1] = batch.vf31.y;
 	// The FOG register at the batch's kicks (the packet does not set it; games set it per object)
-	to[2] = s.fog ? static_cast<float>((m_nReg[GS_REG_FOG] >> 56) & 0xFF) / 255.0f : 1.0f;
-	to[3] = 0;
+	to[2] = fogFactor;
+	to[3] = batch.clipSpace ? 1.0f : 0.0f;
 	// Vertices, and triangles where the program does not set ADC for a restart. Culling and
 	// clipping are the GPU's: each triangle's order follows its winding sign so that GL_FRONT
 	// culling drops what the program's back face test drops.
@@ -2645,6 +2651,11 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 	const uint32 guardFlag = 0x100;
 	for(uint32 i = 0; i < batch.count; i++, raw += 12)
 	{
+		if(batch.clipSpace)
+		{
+			flags[0] = flags[1] = flags[2] = 0; //the skip bit is raw[7]
+		}
+		else
 		{
 			float px = static_cast<float>(raw[0]), py = static_cast<float>(raw[1]), pz = static_cast<float>(raw[2]);
 			Re4Vu1::VEC4 k = {clip[0].x * px + clip[1].x * py + clip[2].x * pz + clip[3].x, clip[0].y * px + clip[1].y * py + clip[2].y * pz + clip[3].y,
@@ -2669,16 +2680,20 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 			}
 		}
 		auto& out = m_worldVertices[base + i];
+		if(batch.clipSpace) std::memcpy(out.p, raw, 16);
 		for(int k = 0; k < 4; k++)
 		{
-			out.p[k] = static_cast<float>(raw[k]);
+			if(!batch.clipSpace) out.p[k] = static_cast<float>(raw[k]);
 			out.t[k] = static_cast<float>(raw[4 + k]);
 			out.c[k] = static_cast<float>(raw[8 + k]);
 		}
 		out.slot = static_cast<float>(slot);
 		bool clipped = (i >= 2) && ((flags[0] | flags[1] | flags[2]) != 0);
+		//Skinning batches: a triangle inside the clip volume is drawn even when far off screen
+		//(the program draws it), one touching the clip volume is skipped (the program does not clip)
+		if(batch.skin && clipped && !((flags[0] | flags[1] | flags[2]) & ~guardFlag)) clipped = false;
 		if(clipped && !((flags[0] | flags[1] | flags[2]) & ~guardFlag)) g_gpuWorldGuarded++;
-		if(clipped && (raw[7] == 0) && !(g_gpuWorldDebug & 1))
+		if(clipped && (raw[7] == 0) && !batch.skin && !(g_gpuWorldDebug & 1))
 		{
 			Re4Vu1::WORLD_VERTEX last3[3] = {Re4Vu1::ReadWorldVertex(batch, i - 2), Re4Vu1::ReadWorldVertex(batch, i - 1), Re4Vu1::ReadWorldVertex(batch, i)};
 			DrawClippedWorldTriangle(last3);

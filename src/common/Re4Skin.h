@@ -34,6 +34,15 @@ namespace Re4Skin
 	// PC runner --skin-model (Re4SkinModel.cpp): each native run is also computed as plain float
 	// math, the way a GPU vertex shader would, and its output vertices compared
 	inline bool g_modelCheck = false;
+	// PC experiment (--skin-sparse-state): after a native run, keep only the end registers a
+	// replacement could set without running the vertex loop (setup loads, VF31, base registers)
+	inline bool g_sparseState = false;
+	// GPU skinning (gpu_skin, PC --gpu-skin): batches whose vertices all use one bone matrix go to
+	// the GS thread as world-path batches (projection and clip times the matrix, final colours)
+	// instead of running the program; the others run natively. Needs the RE4 world path's
+	// submit (re4_vu1_hle)
+	inline bool g_gpuSkin = false;
+	inline uint64_t g_gpuBatches = 0, g_gpuVertices = 0, g_nativeBatches = 0;
 	void CheckModel(const uint8_t* before, const uint8_t* after, const VU_AOT_REGS& start, uint32_t entry);
 	void PrintModelStats();
 }

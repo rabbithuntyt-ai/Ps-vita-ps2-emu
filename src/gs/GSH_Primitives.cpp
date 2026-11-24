@@ -372,7 +372,7 @@ void CGSH_Primitives::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 		                       (static_cast<uint64>(g.rgba[3]) << 24) | (floatBits(g.q) << 32);
 		uint64 xyz = static_cast<uint64>(static_cast<uint16>(g.x)) | (static_cast<uint64>(static_cast<uint16>(g.y)) << 16) | (static_cast<uint64>(g.z) << 32);
 		VertexKick(adc ? GS_REG_XYZ3 : GS_REG_XYZ2, xyz);
-		if(clipped && !v.restart) DrawClippedWorldTriangle(&vertices[i - 2]);
+		if(clipped && !v.restart && !batch.skin) DrawClippedWorldTriangle(&vertices[i - 2]);
 	}
 }
 

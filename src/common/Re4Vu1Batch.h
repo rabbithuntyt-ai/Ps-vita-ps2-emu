@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 #include "Re4Vu1.h"
 
@@ -23,6 +24,14 @@ namespace Re4Vu1
 		VEC4 vf31 = {};            //texture offset (xy), q scale (w)
 		std::vector<int32_t> raw;  //per vertex P, T, C: 12 integers
 		uint64_t hash = 0;         //XXH3 of raw, set where the batch is built (W2: off the GPU thread)
+		//A batch of RE4's skinning program in this form (Re4Skin, gpu_skin): projection and clip
+		//already include the bone matrix, colours are final, winding 0. The skinning program skips
+		//a triangle with a vertex outside the clip volume instead of clipping it, and its batches
+		//change every frame (not retained).
+		bool skin = false;
+		//raw[0..3] are the float bits of the projected position (the program's own arithmetic,
+		//done where the batch is built) and raw[7] the program's skip bit: no matrix, no clipping
+		bool clipSpace = false;
 	};
 
 	// A vertex before the perspective divide (for clipping) and its decisions.
@@ -73,6 +82,13 @@ namespace Re4Vu1
 		out.winding = out.t.w;
 		out.restart = (r[7] != 0);
 		out.clipFlags = ClipFlags(out.k);
+		if(batch.clipSpace)
+		{
+			std::memcpy(&out.v, r, 16);
+			out.p = out.v;
+			out.k = out.v;
+			out.clipFlags = 0;
+		}
 		return out;
 	}
 

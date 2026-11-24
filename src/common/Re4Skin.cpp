@@ -2,7 +2,10 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
+#include <memory>
 #include <vector>
+#include "Re4Vu1Batch.h"
 #include "MIPS.h"
 #include "VuAot.h"
 #include "ee/Vif.h"
@@ -67,6 +70,164 @@ namespace
 		state.nCOP2CF = r.clip;
 	}
 
+
+	// The registers the program leaves that do not depend on its vertices (the vertex loop's
+	// leftovers do not matter to anything after it: PC experiment --skin-sparse-state, RE4's walk
+	// pictures identical)
+	VU_AOT_REGS SparseEndState(const uint8_t* mem, uint32_t address, const VU_AOT_REGS& start)
+	{
+		VU_AOT_REGS sparse = start;
+		bool setup = (address == 0x0000) || (address == 0x0050);
+		auto loadVf = [&](int reg, uint32_t qword) { std::memcpy(sparse.vf[reg].u, mem + (qword & 0x3FF) * 16, 16); };
+		if(setup)
+		{
+			uint32_t vi5 = (address == 0x0000) ? 0x29B : 0x2E6;
+			sparse.vi[5] = vi5;
+			uint32_t word[4];
+			std::memcpy(word, mem + (vi5 - 3) * 16, 16);
+			sparse.vi[3] = word[1] & 0xFFFF;
+			sparse.vi[14] = word[2] & 0xFFFF;
+			sparse.vi[13] = word[3] & 0xFFFF;
+			loadVf(30, 0), loadVf(4, 1), loadVf(15, 2), loadVf(17, 3);
+			loadVf(1, 4), loadVf(2, 5), loadVf(5, 6), loadVf(6, 7);
+			loadVf(7, sparse.vi[3]), loadVf(13, sparse.vi[3] + 1);
+		}
+		sparse.vi[9] = start.top;
+		sparse.vi[2] = start.top + 0xB4;
+		float one = 1.0f;
+		uint32_t oneBits;
+		std::memcpy(&oneBits, &one, 4);
+		std::memcpy(sparse.vf[31].u, mem + ((start.top + 0x20) & 0x3FF) * 16, 16);
+		sparse.vf[31].u[0] = sparse.vf[31].u[1] = sparse.vf[31].u[2] = oneBits;
+		return sparse;
+	}
+
+	Re4Vu1::VEC4 LoadVec(const uint8_t* mem, uint32_t qword)
+	{
+		Re4Vu1::VEC4 v;
+		std::memcpy(&v, mem + (qword & 0x3FF) * 16, 16);
+		return v;
+	}
+
+	void LoadInts(const uint8_t* mem, uint32_t qword, int32_t out[4])
+	{
+		std::memcpy(out, mem + (qword & 0x3FF) * 16, 16);
+	}
+
+	// gpu_skin: the batch as a world-path batch, every vertex computed here with the program's
+	// own arithmetic (Re4SkinModel.cpp: bit exact against the native program): the projected
+	// position (float bits), the final colour, the texture numerators and the skip bit
+	std::shared_ptr<Re4Vu1::WORLD_BATCH> BuildGpuBatch(const uint8_t* mem, uint32_t address, const VU_AOT_REGS& r)
+	{
+		bool setup = (address == 0x0000) || (address == 0x0050);
+		uint32_t vi5 = (address == 0x0000) ? 0x29B : (address == 0x0050) ? 0x2E6 : (r.vi[5] & 0x3FF);
+		int32_t setupWord[4];
+		LoadInts(mem, vi5 - 3, setupWord);
+		uint32_t vi3 = setup ? (static_cast<uint32_t>(setupWord[1]) & 0xFFFF) : (r.vi[3] & 0x3FF);
+		bool swapped = setup ? (setupWord[0] != 0) : (address == 0x07C8);
+		uint32_t top = r.top;
+		int32_t header[4];
+		LoadInts(mem, top + 0x20, header);
+		uint32_t count = static_cast<uint32_t>(header[0]) & 0x7FFF;
+		uint32_t nreg = (static_cast<uint32_t>(header[1]) >> 28) & 0xF;
+		uint32_t flg = (static_cast<uint32_t>(header[1]) >> 26) & 3;
+		if((count == 0) || (nreg != 3) || (flg != 0) || ((static_cast<uint32_t>(header[2]) & 0xFFF) != 0x512)) return nullptr;
+		Re4Vu1::VEC4 proj[4], clip[4], lightDir, lightColor;
+		auto reg = [&r](int i) {
+			Re4Vu1::VEC4 v;
+			std::memcpy(&v, r.vf[i].u, 16);
+			return v;
+		};
+		if(setup)
+		{
+			for(int i = 0; i < 4; i++)
+			{
+				proj[i] = LoadVec(mem, i);
+				clip[i] = LoadVec(mem, 4 + i);
+			}
+			lightDir = LoadVec(mem, vi3);
+			lightColor = LoadVec(mem, vi3 + 1);
+		}
+		else
+		{
+			proj[0] = reg(30), proj[1] = reg(4), proj[2] = reg(15), proj[3] = reg(17);
+			clip[0] = reg(1), clip[1] = reg(2), clip[2] = reg(5), clip[3] = reg(6);
+			lightDir = reg(7), lightColor = reg(13);
+		}
+		Re4Vu1::VEC4 ambient = LoadVec(mem, vi5 - 2);
+		ambient.w = 128.0f;
+		Re4Vu1::VEC4 material = LoadVec(mem, vi5 - 1);
+		float scale = LoadVec(mem, top + 0x20).w;
+		float normalScale;
+		const uint32_t normalScaleBits = 0x3C0101FE; //the program's I constant (1/127)
+		std::memcpy(&normalScale, &normalScaleBits, 4);
+
+		auto batch = std::make_shared<Re4Vu1::WORLD_BATCH>();
+		batch->skin = true;
+		batch->clipSpace = true;
+		batch->tagLow = static_cast<uint64_t>(static_cast<uint32_t>(header[0])) | (static_cast<uint64_t>(static_cast<uint32_t>(header[1])) << 32);
+		batch->count = count;
+		batch->scale = 1.0f;
+		for(int c = 0; c < 4; c++)
+		{
+			batch->projection[c] = {(c == 0) ? 1.0f : 0.0f, (c == 1) ? 1.0f : 0.0f, (c == 2) ? 1.0f : 0.0f, (c == 3) ? 1.0f : 0.0f};
+			batch->clip[c] = batch->projection[c];
+		}
+		batch->colorOffset = {0, 0, 0, 1};
+		batch->colorScale = {1, 1, 1, 1};
+		batch->vf31 = {0, 0, 0, 0};
+		batch->raw.resize(count * 12);
+		uint32_t clipHistory = r.clip;
+		for(uint32_t k = 0; k < count; k++)
+		{
+			int32_t in0[4], in1[4], in2[4];
+			LoadInts(mem, top + 0x21 + 3 * k, in0);
+			LoadInts(mem, top + 0x22 + 3 * k, in1);
+			LoadInts(mem, top + 0x23 + 3 * k, in2);
+			// Bone blend
+			uint32_t record = top + (static_cast<uint32_t>(in0[3]) & 0xFFFF);
+			int32_t indices[4];
+			LoadInts(mem, record, indices);
+			Re4Vu1::VEC4 w = LoadVec(mem, record + 1);
+			float weights[4] = {w.x, w.y, w.z, w.w};
+			uint32_t bones = std::min<uint32_t>(static_cast<uint32_t>(indices[3]) & 0xFFFF, 3);
+			Re4Vu1::VEC4 mat[4] = {};
+			for(uint32_t b = 0; b < bones; b++)
+			{
+				uint32_t base = vi5 + (static_cast<uint32_t>(indices[b]) & 0xFFFF);
+				for(int c = 0; c < 4; c++)
+				{
+					Re4Vu1::VEC4 col = LoadVec(mem, base + c);
+					mat[c].x += col.x * weights[b];
+					mat[c].y += col.y * weights[b];
+					mat[c].z += col.z * weights[b];
+					mat[c].w += col.w * weights[b];
+				}
+			}
+			Re4Vu1::VEC4 pos = {static_cast<float>(in0[0]) * scale, static_cast<float>(in0[1]) * scale, static_cast<float>(in0[2]) * scale, 1.0f};
+			Re4Vu1::VEC4 world = Re4Vu1::Transform(mat, pos);
+			Re4Vu1::VEC4 v = Re4Vu1::Transform(proj, world);
+			Re4Vu1::VEC4 kc = Re4Vu1::Transform(clip, world);
+			clipHistory = ((clipHistory << 6) | Re4Vu1::ClipFlags(kc)) & 0xFFFFFF;
+			bool skip = ((clipHistory & 0x3FFFF) != 0) || (in1[3] != 0);
+			int32_t* out = batch->raw.data() + k * 12;
+			std::memcpy(out, &v, 16);
+			if(swapped)
+				out[4] = in2[1], out[5] = in2[0], out[6] = 1;
+			else
+				out[4] = in2[0], out[5] = in2[1], out[6] = in2[2];
+			out[7] = skip ? 1 : 0;
+			Re4Vu1::VEC4 nrm = {static_cast<float>(in1[0]) * normalScale, static_cast<float>(in1[1]) * normalScale, static_cast<float>(in1[2]) * normalScale, 0.0f};
+			Re4Vu1::VEC4 n = Re4Vu1::Transform(mat, nrm);
+			float d = (lightDir.x * n.x + lightDir.y * n.y) + lightDir.z * n.z;
+			if(!(d > 0.0f)) d = 0.0f;
+			float color[4] = {(lightColor.x * d + ambient.x) * material.x, (lightColor.y * d + ambient.y) * material.y,
+			                  (lightColor.z * d + ambient.z) * material.z, ambient.w * material.w};
+			for(int i = 0; i < 4; i++) out[8 + i] = Re4Vu1::Ftoi(std::fmin(color[i], 255.0f), 1.0f);
+		}
+		return batch;
+	}
+
 	void Kick(void* ctx, uint32_t address)
 	{
 		static_cast<CVpu*>(ctx)->ProcessXgKick(address);
@@ -120,6 +281,19 @@ bool Re4Skin::Run(CVpu& vpu, uint32_t address)
 	auto& state = vpu.GetContext().m_State;
 	VU_AOT_REGS r;
 	Load(state, vpu.GetVif().GetTOP(), r);
+	if(g_gpuSkin && CVpu::g_customKickSubmit && !g_modelCheck)
+	{
+		if(auto batch = BuildGpuBatch(vpu.GetVuMemory(), address, r))
+		{
+			Store(SparseEndState(vpu.GetVuMemory(), address, r), state);
+			g_gpuBatches++;
+			g_gpuVertices += batch->count;
+			vpu.QueueCustomKick(std::move(batch));
+			g_stats.runs++;
+			return true;
+		}
+		g_nativeBatches++;
+	}
 	std::vector<uint8_t> before;
 	VU_AOT_REGS start;
 	if(g_modelCheck)
@@ -129,7 +303,10 @@ bool Re4Skin::Run(CVpu& vpu, uint32_t address)
 	}
 	if(!Re4SkinProgram(r, vpu.GetVuMemory(), address, Kick, &vpu)) return false;
 	if(g_modelCheck) CheckModel(before.data(), vpu.GetVuMemory(), start, address);
-	Store(r, state);
+	if(g_sparseState)
+		Store(SparseEndState(vpu.GetVuMemory(), address, start), state);
+	else
+		Store(r, state);
 	g_stats.runs++;
 	return true;
 }
