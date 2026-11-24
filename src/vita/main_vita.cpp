@@ -405,6 +405,7 @@ namespace
 		else if(key == "group_submit") Re4Vu1Hle::g_groupSubmit = value != 0; //consecutive world/skin batches as one GS call (on)
 		else if(key == "fast_scope") EmuProfile::g_fastScope = value != 0; //profiler scopes find their thread by the thread register (on)
 		else if(key == "gxm_drain_every") g_drainEvery = static_cast<uint32_t>(value); //timed sceGxmFinish after every Nth present (measuring only, 0)
+		else if(key == "feed_compare") GsTransferWrite::g_compare = value != 0; //transfer writes compare old bytes (skips unchanged transfers; on)
 		else if(key == "gpu_skin") Re4Skin::g_gpuSkin = value != 0; //RE4: one-matrix skinning batches drawn by the GPU world path (off)
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
@@ -819,6 +820,27 @@ namespace
 				//Code paths only this build runs (NEON): checked here against the plain ones
 				std::fprintf(selfTest, "psmt4 blocks: %u of 2000 differ\n", GsTransferWrite::SelfTestPsmt4Blocks(2000));
 				std::fprintf(selfTest, "target pixels: %u of 100 differ\n", TargetPixels::SelfTest(100));
+				{
+					//Host to local transfer writes into a 4 MB GS memory: compare-and-store against store
+					//only (feed_compare), and a plain memcpy of the same bytes, in ns per byte
+					std::vector<uint8> ram(0x400000 + 0x100, 0), source(128 * 64 * 4);
+					for(size_t i = 0; i < source.size(); i++) source[i] = static_cast<uint8>(i * 7 + 3);
+					auto clock = []() -> uint64 { return sceKernelGetProcessTimeWide(); };
+					const uint32 transfers = 400;
+					for(int pass = 0; pass < 2; pass++)
+					{
+						double ct32[2], t4[2];
+						for(int compare = 1; compare >= 0; compare--)
+						{
+							ct32[compare] = GsTransferWrite::TimeTransfers<CGsPixelFormats::STORAGEPSMCT32>(ram.data(), source.data(), 128, 64, transfers, compare != 0, clock) * 1000.0 / (transfers * 128.0 * 64 * 4);
+							t4[compare] = GsTransferWrite::TimeTransfers<CGsPixelFormats::STORAGEPSMT4>(ram.data(), source.data(), 128, 64, transfers, compare != 0, clock) * 1000.0 / (transfers * 128.0 * 64 / 2);
+						}
+						uint64 copyStart = sceKernelGetProcessTimeWide();
+						for(uint32 n = 0; n < transfers; n++) std::memcpy(ram.data() + (n * 0x8000) % (0x400000 - 0x40000), source.data(), 0x8000);
+						double copy = (sceKernelGetProcessTimeWide() - copyStart) * 1000.0 / (transfers * 32768.0);
+						std::fprintf(selfTest, "transfer writes ns/byte (pass %d): ct32 compare %.2f store %.2f, psmt4 compare %.2f store %.2f, memcpy %.2f\n", pass, ct32[1], ct32[0], t4[1], t4[0], copy);
+					}
+				}
 				{
 					//Profiler scope cost: thread_local (emulated on the Vita) against the thread register
 					uintptr_t savedKey = EmuProfile::g_eeThreadKey;

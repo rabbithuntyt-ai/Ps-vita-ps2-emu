@@ -29,7 +29,7 @@ Graphics Synthesizer renderers and a native vitaGL frontend.
 Screenshots taken on the Vita with the stats overlay on (top left: emulated and shown fps,
 CPU per thread, where the emulation thread's time goes).
 
-| Resident Evil 4, gameplay (about 3.4 game fps) | Silent Hill 2, title menu (about 13 of 30 game fps) |
+| Resident Evil 4, gameplay (about 3.8 game fps) | Silent Hill 2, title menu (about 13 of 30 game fps) |
 |---|---|
 | ![Resident Evil 4 gameplay on the Vita](docs/screens/re4_gameplay.png) | ![Silent Hill 2 title menu on the Vita](docs/screens/silent_hill_2_title.png) |
 | **TimeSplitters, title menu (about 27 of 60 game fps)** | **The app's game list** |
@@ -180,7 +180,7 @@ scene repeatable, so a change can be measured on the exact same frames.
 | Vita frontend (game list, display, controls, audio, save states) | Running on hardware |
 | Silent Hill 2 (SLUS-20228) | Boots through the menus (title menu at about 26 emulated fps, 13 of its 30 game fps) and plays the opening movie, below full speed |
 | TimeSplitters (SLUS-20090) | Boots to its title menu, drawn correctly (about 27 of 60 game fps); in early November it ran but showed nothing |
-| Resident Evil 4 (SLUS-21134) | Plays: title menu, movies with native decoding (about 15 of 30 pictures/s), New Game through the intro into real-time 3D, and gameplay at about 3.4 game fps with its game profile (3.36-3.45 in steady play with GPU skinning, measured with the perf.csv timestamps, 24 Nov) (Leon and the world drawn right in the tested walk) |
+| Resident Evil 4 (SLUS-21134) | Plays: title menu, movies with native decoding (about 15 of 30 pictures/s), New Game through the intro into real-time 3D, and gameplay at about 3.8 game fps with its game profile (3.70-3.88 in steady play, measured with the perf.csv timestamps, 24 Nov) (Leon and the world drawn right in the tested walk) |
 | Host build + automated tests | Passing |
 | VPK build | CI with the official VitaSDK Docker image |
 

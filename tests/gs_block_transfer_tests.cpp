@@ -1,7 +1,8 @@
 // Host to local transfer writes: the block path (GsTransferWrite::g_blockWrites) against the
 // per pixel path, for PSMCT32, PSMCT16, PSMT8 and PSMT4, on random transfers (positions,
 // sizes, buffer widths, initial memory), aligned to blocks and not. Memory and the "changed"
-// result must match exactly.
+// result must match exactly. The block path without comparing (g_compare = false) must leave the
+// same memory and report a change wherever the comparing path does.
 #include <cstdio>
 #include <cstring>
 #include <random>
@@ -62,8 +63,20 @@ namespace
 				std::memcpy(&a[i], &v, 4);
 			}
 			b = a;
+			std::vector<uint8> c = a;
 			bool dirtyBlocks = run(a, t, data, true);
 			bool dirtyPixels = run(b, t, data, false);
+			//Store only (feed_compare=0): the same memory, and a change reported whenever there is one
+			GsTransferWrite::g_compare = false;
+			bool dirtyStore = run(c, t, data, true);
+			GsTransferWrite::g_compare = true;
+			if((a != c) || (dirtyBlocks && !dirtyStore))
+			{
+				if(failures < 5)
+					std::printf("  FAIL %s store only: buffer width %u, at %u,%u size %ux%u (memory %s, dirty %d/%d)\n", name, t.bufferWidth, t.dsax, t.dsay, t.rrw, t.rrh,
+					            (a == c) ? "same" : "differs", dirtyBlocks ? 1 : 0, dirtyStore ? 1 : 0);
+				failures++;
+			}
 			if((a != b) || (dirtyBlocks != dirtyPixels))
 			{
 				if(failures < 5)

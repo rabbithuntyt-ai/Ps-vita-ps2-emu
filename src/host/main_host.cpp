@@ -278,6 +278,8 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-vu1-vblank-sync")) Ee::CSubSystem::g_vblankVu1Sync = false; //vu1_vblank_sync=0
 		else if(!std::strcmp(argv[i], "--no-fast-packed")) CGIF::g_fastPacked = false; //gif_fast_packed=0
 		else if(!std::strcmp(argv[i], "--no-bulk-unpack")) CVif::g_bulkUnpack = false; //bulk_unpack=0
+		else if(!std::strcmp(argv[i], "--no-feed-compare")) GsTransferWrite::g_compare = false; //transfer writes store without comparing
+		else if(!std::strcmp(argv[i], "--feed-shapes")) CGSH_Hardware::g_feedShapes = true; //host to local transfers by format, size and alignment
 		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
 		else if(!std::strcmp(argv[i], "--reuse-scan")) CVpu::g_reuseScan = CGSHandler::g_shadowRegs = true; //relayed GIF data repeated across frames
 		else if(!std::strcmp(argv[i], "--no-merged-submit")) CGSHandler::g_mergedSubmit = false; //gs_merged_submit=0
@@ -653,6 +655,20 @@ int main(int argc, char** argv)
 					std::printf("reuse DIRECT mode %d: %.1f MB, %.1f MB repeated\n", m, CVpu::g_reuseDirectMode[m][0] / 1048576.0, CVpu::g_reuseDirectMode[m][1] / 1048576.0);
 			if(Re4Skin::g_modelCheck) Re4Skin::PrintModelStats();
 			std::printf("host to local transfers: %llu, changing no byte of GS memory: %llu\n", (unsigned long long)CGSH_Hardware::g_transfersInTotal, (unsigned long long)CGSH_Hardware::g_unchangedTransfersTotal);
+			for(int psm = 0; psm < 64; psm++)
+			{
+				if(CGSH_Hardware::g_feedCallsByPsm[psm] == 0) continue;
+				std::printf("image data into psm %02X: %llu calls, %llu KB\n", psm, (unsigned long long)CGSH_Hardware::g_feedCallsByPsm[psm], (unsigned long long)(CGSH_Hardware::g_feedBytesByPsm[psm] / 1024));
+			}
+			if(CGSH_Hardware::g_feedShapes)
+			{
+				std::printf("transfer writes: %llu calls (%llu starting inside a block row), units by block rows %llu, one at a time %llu\n", (unsigned long long)GsTransferWrite::g_calls,
+				            (unsigned long long)GsTransferWrite::g_unalignedStarts, (unsigned long long)GsTransferWrite::g_blockUnits, (unsigned long long)GsTransferWrite::g_singleUnits);
+				std::vector<std::pair<uint64, std::string>> shapes;
+				for(const auto& [shape, count] : CGSH_Hardware::g_feedShapeCounts) shapes.emplace_back(count.second, shape + " : " + std::to_string(count.first) + " transfers");
+				std::sort(shapes.rbegin(), shapes.rend());
+				for(size_t i = 0; i < std::min<size_t>(shapes.size(), 25); i++) std::printf("feed shape %s, %llu KB\n", shapes[i].second.c_str(), (unsigned long long)(shapes[i].first / 1024));
+			}
 			if(Re4Skin::g_gpuSkin) std::printf("gpu skin: %llu batches (%llu vertices) on the GPU, %llu native\n", (unsigned long long)Re4Skin::g_gpuBatches, (unsigned long long)Re4Skin::g_gpuVertices, (unsigned long long)Re4Skin::g_nativeBatches);
 			if(CVpu::g_reuseScan)
 			{

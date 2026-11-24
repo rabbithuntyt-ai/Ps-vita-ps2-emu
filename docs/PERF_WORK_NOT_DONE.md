@@ -663,6 +663,18 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
     near 33 ms.
   - The waits cost about 6% (3.38 / 3.38 game fps against 3.57 / 3.60 without), so runs that
     measure speed keep this off.
+- **GS thread "other" split (R18/R19, patch 0127).** A `feedWrite` section (image data written
+  into GS memory) took 34-35 ms of "other"'s 51 ms per game frame; what remains of "other" is
+  14-17 ms.
+  - The block path already handles 99.6% of the units (PC count). The cost was reading the old
+    bytes for the "changed" report.
+  - `feed_compare=0` stores only, which is exact. It is on in RE4's profile.
+  - Vita: 3.70/3.88/3.80 against 3.59/3.52/3.58 steady game fps, interleaved.
+  - Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), item 16.
+  - What's left on the GS thread per game frame:
+    - flush 32, world 31 (+ retained 13, skinning 15)
+    - targets 28, read-backs 28, uploads 23, image data 22, textures 20
+    - other 15, idle 15
 - **R17 baseline (Vita, same build, drain off):** 3.57 and 3.60 steady game fps. R16a/c measured
   3.45/3.46 with the same code paths on another series. Run-to-run conditions move the result by
   about 4%, so no speedup is claimed from this.

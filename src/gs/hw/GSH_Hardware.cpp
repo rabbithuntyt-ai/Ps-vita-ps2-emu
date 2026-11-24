@@ -1368,6 +1368,15 @@ void CGSH_Hardware::BeginTransferWrite()
 	CGSH_Primitives::BeginTransferWrite();
 }
 
+void CGSH_Hardware::TransferWrite(const uint8* data, uint32 length)
+{
+	GsProfile::CScope gsSection(GsProfile::SECTION_FEED_WRITE);
+	auto bltBuf = make_convertible<BITBLTBUF>(m_nReg[GS_REG_BITBLTBUF]);
+	g_feedBytesByPsm[bltBuf.nDstPsm & 63] += length;
+	g_feedCallsByPsm[bltBuf.nDstPsm & 63]++;
+	CGSHandler::TransferWrite(data, length);
+}
+
 void CGSH_Hardware::ProcessHostToLocalTransfer()
 {
 	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 5);
@@ -1381,6 +1390,16 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
 	auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
 	auto [start, size] = GsTransfer::GetDstRange(bltBuf, trxReg, trxPos);
+	if(g_feedShapes)
+	{
+		char shape[96];
+		std::snprintf(shape, sizeof(shape), "psm %02X %ux%u x%%8=%u y%%8=%u x%%32=%u bw %u", static_cast<uint32>(bltBuf.nDstPsm), static_cast<uint32>(trxReg.nRRW),
+		              static_cast<uint32>(trxReg.nRRH), static_cast<uint32>(trxPos.nDSAX % 8), static_cast<uint32>(trxPos.nDSAY % 8), static_cast<uint32>(trxPos.nDSAX % 32),
+		              static_cast<uint32>(bltBuf.nDstWidth));
+		auto& count = g_feedShapeCounts[shape];
+		count.first++;
+		count.second += m_trxCtx.nRealSize;
+	}
 	if(!m_trxCtx.nDirty && !m_transferDiscards)
 	{
 		// Same bytes as already in memory (menus send the same images every

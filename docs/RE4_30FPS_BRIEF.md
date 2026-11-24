@@ -216,6 +216,24 @@ frame dumps) or results compared bit for bit.
     its current value no longer force a new state; reciprocals cached.
 15. **The GS thread's register path:** per-vertex registers stored and kicked by a direct loop
     (0120). GS thread "other" 60 to 50 ms.
+16. **Image transfers stored without comparing the old bytes (0127, `feed_compare=0`, on in
+    RE4's profile).**
+    - A new GS section (`feedWrite`) showed that writing image data into GS memory was 34-35 ms
+      of the GS thread's "other" per game frame, about 1.6 MB.
+    - On the PC, 99.6% of those units already went through the block path.
+    - The cost was reading the old bytes to report "changed". That report only lets a transfer
+      that changes nothing skip refreshing textures and targets, and in RE4 that is 16 of 52,779
+      transfers.
+    - Vita self-test: PSMCT32 blocks take 12.5 ns per byte with the compare and 4.8 without;
+      PSMT4 takes 14.6 and 7.9; memcpy takes 1.8.
+    - Exact: on the PC, the same RE4 walk gives identical screenshots and identical read-back and
+      upload counts. The host test checks memory against the comparing path.
+    - Vita, interleaved, 120 s each:
+      - store only: **3.70, 3.88, 3.80** steady game fps (mean 3.79)
+      - compare: **3.59, 3.52, 3.58** (mean 3.56)
+      - +6.5%; the two sets don't overlap.
+    - `feedWrite` went from 34 to 22-23 ms, and the frame from 281 to 264 ms. The default stays 1
+      for games that resend the same images (menus).
 
 ### VU recompiler (helps every game)
 

@@ -1,0 +1,155 @@
+diff --git a/Source/gs/GsTransferWrite.h b/Source/gs/GsTransferWrite.h
+--- a/Source/gs/GsTransferWrite.h
++++ b/Source/gs/GsTransferWrite.h
+@@ -8,6 +8,7 @@
+ 
+ #include <algorithm>
+ #include <cstring>
++#include <type_traits>
+ #include "Types.h"
+ #include "GsPixelFormats.h"
+ #if defined(__ARM_NEON) || defined(__ARM_NEON__)
+@@ -31,6 +32,13 @@
+ 	// 4 bit 128x64, 64x64 and 32 bit palettes) went a pixel at a time. g_blockWrites=false
+ 	// keeps the per pixel path (tests compare the two).
+ 	inline bool g_blockWrites = true;
++	// Units written by whole block rows / one at a time, and the calls (host --feed-shapes)
++	// Whole-block writes compare the old bytes to report whether memory changed (a transfer that
++	// changes nothing then leaves textures and targets alone). false: they only store and report a
++	// change, which is always exact, only that skip is lost (feed_compare=0: Resident Evil 4,
++	// where 0.03% of transfers change nothing and the reads of the old bytes cost memory time).
++	inline bool g_compare = true;
++	inline uint64 g_blockUnits = 0, g_singleUnits = 0, g_calls = 0, g_unalignedStarts = 0;
+ 
+ 	// For one block: the source unit of every unit of the block (in memory order), as an index
+ 	// from the block's first source unit in a transfer 'rrw' units wide. Units: pixels (CT32,
+@@ -128,6 +136,17 @@
+ 			//8 bytes at a time
+ 			uint32 offsets[CGsPixelFormats::BLOCKSIZE / 8];
+ 			for(uint32 c = 0; c < CGsPixelFormats::BLOCKSIZE / 8; c++) offsets[c] = chunks.y[c] * rrw + chunks.x[c];
++			if(!g_compare)
++			{
++				for(uint32 k = 0; k < blocks; k++)
++				{
++					uint8* block = ram + BlockAddress<Storage>(pointer, bufferWidth, (x + k * Storage::BLOCKWIDTH) % 2048, y, 1);
++					const Unit* base = source + k * Storage::BLOCKWIDTH;
++					for(uint32 c = 0; c < CGsPixelFormats::BLOCKSIZE / 8; c++) std::memcpy(block + c * 8, base + offsets[c], 8);
++				}
++				dirty = true;
++				return true;
++			}
+ 			uint64 changed = 0;
+ 			for(uint32 k = 0; k < blocks; k++)
+ 			{
+@@ -258,11 +277,15 @@
+ 				uint8x8_t a = vtbl4_u8(pairs[t.pair[column][chunk]], vld1_u8(t.index[column][chunk]));
+ 				uint8x8_t b = vtbl4_u8(pairs[t.pair[column][chunk + 1]], vld1_u8(t.index[column][chunk + 1]));
+ 				uint8x16_t value = vcombine_u8(a, b);
+-				uint8x16_t old = vld1q_u8(out + chunk * 8);
+-				changed = vorrq_u8(changed, veorq_u8(value, old));
++				if(g_compare)
++				{
++					uint8x16_t old = vld1q_u8(out + chunk * 8);
++					changed = vorrq_u8(changed, veorq_u8(value, old));
++				}
+ 				vst1q_u8(out + chunk * 8, value);
+ 			}
+ 		}
++		if(!g_compare) return true;
+ 		uint32x2_t folded = vorr_u32(vget_low_u32(vreinterpretq_u32_u8(changed)), vget_high_u32(vreinterpretq_u32_u8(changed)));
+ 		return (vget_lane_u32(folded, 0) | vget_lane_u32(folded, 1)) != 0;
+ #else
+@@ -289,7 +312,7 @@
+ 				for(uint32 b = 0; b < 8; b++)
+ 				{
+ 					uint8 value = pair[t.index[column][chunk][b]];
+-					if(out[chunk * 8 + b] != value)
++					if(!g_compare || (out[chunk * 8 + b] != value))
+ 					{
+ 						out[chunk * 8 + b] = value;
+ 						dirty = true;
+@@ -346,6 +369,11 @@
+ 		return failures;
+ 	}
+ 
++	// Self-test timing: 'transfers' block-aligned transfers of w x h units (CT32 or PSMT4) from one
++	// source buffer to successive places in 'ram' (4 MB), with g_compare as given. 'clock' gives us.
++	template <typename Storage>
++	uint64 TimeTransfers(uint8* ram, const uint8* source, uint32 w, uint32 h, uint32 transfers, bool compare, uint64 (*clock)());
++
+ 	// One row of whole PSMT4 blocks (16 transfer rows): each byte from its two source nibbles
+ 	template <typename Storage>
+ 	bool WritePsmt4BlockRow(uint8* ram, uint32 ramSize, uint32 pointer, uint32 bufferWidth, uint32 x, uint32 y, uint32 rrw,
+@@ -402,17 +430,21 @@
+ 		uint32 i = 0;
+ 		bool blockAligned = g_blockWrites && ((position.dsax % Storage::BLOCKWIDTH) == 0) && ((position.rrw % Storage::BLOCKWIDTH) == 0) &&
+ 		                    (position.dsax + position.rrw <= 2048);
++		g_calls++;
++		if((position.rrx != 0) || (((position.rry + position.dsay) % Storage::BLOCKHEIGHT) != 0)) g_unalignedStarts++;
+ 		while(i < count)
+ 		{
+ 			uint32 blockRowUnits = position.rrw * Storage::BLOCKHEIGHT;
+ 			if(blockAligned && (position.rrx == 0) && (count - i >= blockRowUnits) && (((position.rry + position.dsay) % Storage::BLOCKHEIGHT) == 0) &&
+ 			   WriteUnitBlockRow<Storage>(ram, ramSize, pointer, bufferWidth, position.dsax, (position.rry + position.dsay) % 2048, position.rrw, source + i, dirty))
+ 			{
++				g_blockUnits += blockRowUnits;
+ 				i += blockRowUnits;
+ 				position.rry += Storage::BLOCKHEIGHT;
+ 				continue;
+ 			}
+ 			uint32 run = std::min(position.rrw - position.rrx, count - i);
++			g_singleUnits += run;
+ 			uint32 y = (position.rry + position.dsay) % 2048;
+ 			const uint32* rowOffsets = pageOffsets + (y % Storage::PAGEHEIGHT) * Storage::PAGEWIDTH;
+ 			uint32 rowPage = ((y / Storage::PAGEHEIGHT) * (bufferWidth * 64)) / Storage::PAGEWIDTH;
+@@ -540,6 +572,7 @@
+ 			   (((position.rry + position.dsay) % Storage::PAGEHEIGHT) == 0) &&
+ 			   WritePsmt4PageRow(ram, ramSize, pointer, bufferWidth, position.dsax, (position.rry + position.dsay) % 2048, position.rrw, source + i / 2, dirty))
+ 			{
++				g_blockUnits += pageRowNibbles;
+ 				i += pageRowNibbles;
+ 				position.rry += Storage::PAGEHEIGHT;
+ 				continue;
+@@ -549,11 +582,13 @@
+ 			   (((position.rry + position.dsay) % Storage::BLOCKHEIGHT) == 0) &&
+ 			   WritePsmt4BlockRow<Storage>(ram, ramSize, pointer, bufferWidth, position.dsax, (position.rry + position.dsay) % 2048, position.rrw, source, i, dirty))
+ 			{
++				g_blockUnits += blockRowNibbles;
+ 				i += blockRowNibbles;
+ 				position.rry += Storage::BLOCKHEIGHT;
+ 				continue;
+ 			}
+ 			uint32 run = std::min(position.rrw - position.rrx, count - i);
++			g_singleUnits += run;
+ 			uint32 y = (position.rry + position.dsay) % 2048;
+ 			const uint32* rowOffsets = pageOffsets + (y % Storage::PAGEHEIGHT) * Storage::PAGEWIDTH;
+ 			uint32 rowPage = ((y / Storage::PAGEHEIGHT) * (bufferWidth * 64)) / Storage::PAGEWIDTH;
+@@ -582,4 +617,28 @@
+ 		}
+ 		return dirty;
+ 	}
++
++	template <typename Storage>
++	uint64 TimeTransfers(uint8* ram, const uint8* source, uint32 w, uint32 h, uint32 transfers, bool compare, uint64 (*clock)())
++	{
++		bool saved = g_compare;
++		g_compare = compare;
++		constexpr bool nibbles = std::is_same<Storage, CGsPixelFormats::STORAGEPSMT4>::value;
++		uint32 bytes = nibbles ? (w * h / 2) : (w * h * static_cast<uint32>(sizeof(typename Storage::Unit)));
++		uint32 bufferWidth = std::max<uint32>(1, w / 64);
++		uint64 start = clock();
++		for(uint32 n = 0; n < transfers; n++)
++		{
++			uint32 pointer = (n * ((bytes + CGsPixelFormats::PAGESIZE - 1) & ~(CGsPixelFormats::PAGESIZE - 1))) % (0x400000 - 0x40000);
++			uint32 rrx = 0, rry = 0;
++			POSITION position{rrx, rry, 0, 0, w};
++			if constexpr(nibbles)
++				WritePsmt4(ram, 0x400000, pointer, bufferWidth, position, source, bytes);
++			else
++				WriteUnits<Storage>(ram, 0x400000, pointer, bufferWidth, position, reinterpret_cast<const typename Storage::Unit*>(source), w * h);
++		}
++		uint64 elapsed = clock() - start;
++		g_compare = saved;
++		return elapsed;
++	}
+ }
