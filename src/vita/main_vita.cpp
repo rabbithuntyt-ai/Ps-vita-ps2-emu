@@ -163,6 +163,13 @@ namespace
 	constexpr const char* AUTOSTART_DONE_PATH = VITAPS2_DATA_DIR "/autostart.done";
 	constexpr const char* PERF_PATH = VITAPS2_DATA_DIR "/perf.csv";
 	uint64_t g_presentUs = 0; //frontend frame drawing + vglSwapBuffers (perf.csv)
+	// gxm_drain_every=N (0 = off): after every Nth present the UI thread waits in glFinish
+	// (sceGxmFinish: all submitted scenes done) and times it. A controlled measurement: it is an
+	// upper bound on GPU work still queued behind the CPU at that point, not GPU busy time, and
+	// the wait itself slows the run, so only measuring runs use it. Totals go to drain.txt.
+	uint32_t g_drainEvery = 0;
+	uint64_t g_drainUs = 0, g_drainMaxUs = 0, g_drains = 0, g_drainPresents = 0;
+	constexpr const char* DRAIN_PATH = VITAPS2_DATA_DIR "/drain.txt";
 
 	// autostart.txt boots a game directly, for scripted tests:
 	//   game=ux0:data/VitaPS2/games/game.iso
@@ -397,6 +404,7 @@ namespace
 		else if(key == "re4_skin") CVpu::g_nativeProgram = (value != 0) ? std::function<bool(CVpu&, uint32)>(Re4Skin::Run) : nullptr; //RE4: skinning programs natively
 		else if(key == "group_submit") Re4Vu1Hle::g_groupSubmit = value != 0; //consecutive world/skin batches as one GS call (on)
 		else if(key == "fast_scope") EmuProfile::g_fastScope = value != 0; //profiler scopes find their thread by the thread register (on)
+		else if(key == "gxm_drain_every") g_drainEvery = static_cast<uint32_t>(value); //timed sceGxmFinish after every Nth present (measuring only, 0)
 		else if(key == "gpu_skin") Re4Skin::g_gpuSkin = value != 0; //RE4: one-matrix skinning batches drawn by the GPU world path (off)
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
@@ -1923,6 +1931,25 @@ namespace
 			}
 			EndFrame();
 			g_presentUs += sceKernelGetProcessTimeWide() - presentStart;
+			if(g_drainEvery != 0 && (++g_drainPresents % g_drainEvery) == 0)
+			{
+				uint64_t drainStart = sceKernelGetProcessTimeWide();
+				glFinish();
+				uint64_t drainUs = sceKernelGetProcessTimeWide() - drainStart;
+				g_drainUs += drainUs;
+				g_drainMaxUs = std::max(g_drainMaxUs, drainUs);
+				g_drains++;
+			}
+		}
+		if(g_drains != 0)
+		{
+			if(FILE* drainFile = std::fopen(DRAIN_PATH, "w"))
+			{
+				std::fprintf(drainFile, "every %u presents: %llu waits, mean %.2f ms, max %.2f ms, over %llu presents\n", g_drainEvery,
+				             static_cast<unsigned long long>(g_drains), g_drainUs / 1000.0 / g_drains, g_drainMaxUs / 1000.0,
+				             static_cast<unsigned long long>(g_drainPresents));
+				std::fclose(drainFile);
+			}
 		}
 
 		mpegHle.Disable();

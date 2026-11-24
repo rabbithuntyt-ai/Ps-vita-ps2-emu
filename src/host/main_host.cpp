@@ -652,6 +652,7 @@ int main(int argc, char** argv)
 				for(int m = 0; m < 4; m++)
 					std::printf("reuse DIRECT mode %d: %.1f MB, %.1f MB repeated\n", m, CVpu::g_reuseDirectMode[m][0] / 1048576.0, CVpu::g_reuseDirectMode[m][1] / 1048576.0);
 			if(Re4Skin::g_modelCheck) Re4Skin::PrintModelStats();
+			std::printf("host to local transfers: %llu, changing no byte of GS memory: %llu\n", (unsigned long long)CGSH_Hardware::g_transfersInTotal, (unsigned long long)CGSH_Hardware::g_unchangedTransfersTotal);
 			if(Re4Skin::g_gpuSkin) std::printf("gpu skin: %llu batches (%llu vertices) on the GPU, %llu native\n", (unsigned long long)Re4Skin::g_gpuBatches, (unsigned long long)Re4Skin::g_gpuVertices, (unsigned long long)Re4Skin::g_nativeBatches);
 			if(CVpu::g_reuseScan)
 			{

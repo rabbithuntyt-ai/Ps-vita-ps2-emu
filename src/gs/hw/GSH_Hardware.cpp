@@ -1376,6 +1376,7 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 	if(g_gsCeiling) return; //G1 ceiling run: no GPU side
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
 	m_stats.transfersIn++;
+	g_transfersInTotal++;
 	auto bltBuf = make_convertible<BITBLTBUF>(m_nReg[GS_REG_BITBLTBUF]);
 	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
 	auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
@@ -1385,6 +1386,7 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 		// Same bytes as already in memory (menus send the same images every
 		// frame): textures and targets stay current.
 		m_stats.unchangedTransfers++;
+		g_unchangedTransfersTotal++;
 		return;
 	}
 	m_textureCache.MarkBytesWritten(start, size);

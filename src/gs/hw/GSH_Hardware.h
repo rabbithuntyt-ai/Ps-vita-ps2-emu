@@ -238,6 +238,7 @@ public:
 	static inline uint64 g_worldSlotUs = 0; //W2 diagnostics: time in the slot (non-retained) world path (perf.csv world_slot_ms)
 	static inline uint64 g_regSplitUs[4] = {}; //diagnostics, inclusive: ApplyState, FlushBatch, OnDraw, OnDrawStripTriangle (perf.csv reg_split)
 	static inline bool g_fineTimers = false; //per primitive and per batch timers (reg_split, world_seg, world_slot_ms): fine_timers=1; each costs two clock reads
+	static inline uint64 g_transfersInTotal = 0, g_unchangedTransfersTotal = 0; //host to local transfers, and those that changed no byte (whole run)
 	static inline uint64 g_applyStateCalls = 0; //state applications (perf.csv apply_calls)
 	static inline uint64 g_primitiveCalls = 0; //OnDraw and strip triangle calls (perf.csv prim_calls)
 	static inline uint64 g_applySplitUs[3] = {}; //fine_timers: ApplyState target, texture, GL state (perf.csv apply_split)

@@ -5,6 +5,7 @@
 # 1 ms samples in that row's interval; sections are exclusive (one current section per thread).
 import csv, sys
 STEADY_T = 25.0
+GS_NAMES = 'idle other registers vertex primitive addvertex state texture target flush upload download transfer world display worldRet worldSkin'.split()
 EE_NAMES = "other EE VU0 VU1 IOP SPU VIF GIF IPU SIF JIT GSwait idle SPUsync SPUread VIFdirect VIFunpack EEio EEkernel EEticks IOPio IOPkernel IOPticks IOPcounters IOPbios IOPdma IOPwait IOPdrain IOPlag IOPpark VU1relay VIFqueue VU1native VU1kick relayDirect relayWorld VU1hle VIFcmd VU1jit VIFlock VIFwake VIFcopy VIFunlock VU1sync VU1quiet EEioTimer EEioIntc EEioDma EEioGs EEioWait".split()
 for f in sys.argv[1:]:
     rows = list(csv.DictReader(open(f)))
@@ -37,3 +38,14 @@ for f in sys.argv[1:]:
             vu[k] += float(v) * dt[i] * 1000
     parts = sorted(((v / steady_frames, EE_NAMES[k]) for k, v in enumerate(vu) if k < len(EE_NAMES) and v / steady_frames >= 2), reverse=True)
     print('  VU1 worker, ms per game frame: total %.0f | %s' % (sum(m for m, _ in parts), ', '.join('%s %.0f' % (n, m) for m, n in parts)))
+    # GS thread: raw sample counts per row (gs_sections), turned into shares of the row's samples
+    gs = [0.0] * 32
+    samples = 0
+    for i in steady:
+        v = [float(x) for x in rows[i]['gs_sections'].split(';')]
+        total = sum(v) or 1
+        samples += total
+        for k, c in enumerate(v):
+            gs[k] += c / total * dt[i] * 1000
+    gparts = sorted(((v / steady_frames, GS_NAMES[k]) for k, v in enumerate(gs) if k < len(GS_NAMES) and v / steady_frames >= 1), reverse=True)
+    print('  GS thread, ms per game frame: total %.0f | %s; samples per second %.0f' % (sum(m for m, _ in gparts), ', '.join('%s %.0f' % (n, m) for m, n in gparts), samples / steady_time))

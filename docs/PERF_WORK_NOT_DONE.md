@@ -640,6 +640,33 @@ by the GPU world path, already projected; consecutive batches share a draw. Vita
 fps against 2.81-2.90 (+15%); the emulation thread's wait on the GS thread 86 to 33-38 ms per game
 frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "GPU skinning".
 
+### R16a/R17 audit: accounting, unchanged transfers, GPU queue (24 Nov 2026)
+
+- **Accounting.** `tools/perf_audit.py` now also converts the GS thread's sampled sections
+  (`gs_sections`) to ms per game frame from the rows' timestamps. With that, every thread's sections
+  add up to the frame period: in R16a (290 ms), the GS thread was 276 busy and 14 idle, and the VU1
+  worker was 201 busy and 89 idle. The emulation thread had 77 ms of waits (GS 46, VU1 31) and about
+  203 ms of its own work. The "13 ms GS gap" quoted earlier came from a hand conversion that
+  assumed 1 s rows. It isn't real.
+- **Unchanged-image skipping is not viable for RE4.**
+  - PC, whole gameplay run with `--gpu-skin`: 52,779 host-to-local transfers, of which 16 (0.03%)
+    change no byte of GS memory. These counters are printed at the end of a host run.
+  - Vita: `f_xfer_same` is 0 per frame.
+  - The game reuses its texture slots for different images, so a transfer can't be skipped
+    exactly.
+- **GPU queue at present (`gxm_drain_every=N`, measuring only, off by default).** After every Nth
+  present, the UI/GS thread waits in `glFinish` (all submitted GXM scenes complete) and times the
+  wait. This bounds the GPU work still queued at that point. It does not measure GPU busy time.
+  - Vita R17b/R17d, N = 4, about 10.4 presents/s: mean 7.7 / 8.2 ms, max 27.6 / 26.6 ms.
+  - So, at present time, the GPU is on average less than one 33 ms frame behind. At 280 ms per game
+    frame, GXM execution is not what limits RE4 now. It may become the limit once the CPU side is
+    near 33 ms.
+  - The waits cost about 6% (3.38 / 3.38 game fps against 3.57 / 3.60 without), so runs that
+    measure speed keep this off.
+- **R17 baseline (Vita, same build, drain off):** 3.57 and 3.60 steady game fps. R16a/c measured
+  3.45/3.46 with the same code paths on another series. Run-to-run conditions move the result by
+  about 4%, so no speedup is claimed from this.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an
