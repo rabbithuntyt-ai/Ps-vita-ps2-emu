@@ -28,15 +28,28 @@ own notes (`docs/PERF_WORK_NOT_DONE.md`, `docs/PATH_TO_30FPS.md`).
 
 ## Where RE4 stands (24 Nov 2026)
 
-- **About 3.2 game fps** in gameplay: 290-320 game frames per 120 s, against 0.66 on 15 Nov.
-  The game targets 30. The emulated machine runs at about 9 of 60 vblanks a second (15% speed).
-- **Per game frame (~300 ms),** per thread:
+- **About 3.0 game fps in steady gameplay** (2.84-3.25 in four recent runs, measured from the
+  perf.csv timestamps from 25 s on), **2.6-2.9 over a whole run** (290-323 game frames in about
+  111 s of rows, including about 14 s of state loading with no game frames). The game targets 30:
+  about 10x. The emulated machine runs at about 9 of 60 vblanks a second.
+- **Audit note (24 Nov):** earlier figures (3.2-3.6 game fps, and ms per game frame about 8% low)
+  averaged per-row counts as if each perf.csv row were one second; rows are 1.10 s apart. All
+  numbers below use the rows' own timestamps (`tools/perf_audit.py`).
+- **Profiler sections are exclusive:** each thread has one current section, sampled every
+  millisecond, and a thread's sections sum to its wall time per game frame (about 330 ms at 3.0
+  fps). Waits are their own sections, so active time is the sum minus the wait sections.
+- **Per game frame (~330 ms of wall time),** per thread (runs R8a, R8c, R10a, R10b):
 
-| Thread | Where the time goes (ms per game frame) |
+| Thread | Where the time goes (ms per game frame, exclusive sections) |
 |---|---|
-| Emulation thread (the limit) | RE4's own code (EE JIT) 83; waiting for the GS thread 40-70; queueing VIF1 data 34 (copy 18, rest 16); relaying VU1 output to the GS 40 (DIRECT 15, PATH1 17, world 8); waiting for VU1 15-20; DMA register writes 10; IOP 17; SPU and other 10 |
-| GS thread | Busy ~280: image data into GS memory 40, other 9, world batches 39, GL flush 38, read-backs 26, render targets 25, target uploads 20, vertex conversion 21, textures 18, vertices 16, registers 13, primitives 9, state 8; idle ~20 |
-| VU1 worker | Busy ~170, idle 40%: native skinning 52, world handler 34, unpack 29, JIT VU1 programs 21, VIF1 commands 19, DIRECT 17, XGKICK copies 7 |
+| Emulation thread (the limit) | Total 300-345. Active ~230: RE4's own code (EE JIT) 88-93; queueing VIF1 data 31-40 (copy 17-21); relaying VU1/VIF1 output to the GS 37-47 (DIRECT 16-17, PATH1 14-20, world 7-10); VIF1 commands 8-11; DMA register writes 9-12; IOP 20-21; SPU 5-6; other 5-10. Waits: GS thread 73-78, VU1 16-25 |
+| GS thread | Busy ~280: image data into GS memory 40, other 9, world batches 39, GL flush 38, read-backs 26, render targets 25, target uploads 20, vertex conversion 21, textures 18, vertices 16, registers 13, primitives 9, state 8; idle ~20 (per-row figures, about 8% low) |
+| VU1 worker | Total 307-351. Busy ~190: native skinning 45-63, world handler 29-42, unpack 23-36, JIT VU1 programs 18-26, VIF1 commands 16-23, DIRECT 17-19, XGKICK copies 6-9. Idle 133-152 |
+
+- **Pipeline view:** steady throughput is set by the slowest stage plus the synchronization that
+  does not overlap. Today the emulation thread's active work (~230 ms) is the longest; the GS
+  thread (~280 ms busy, but it overlaps with the emulation thread through 4 vblanks of lead) is
+  next; the VU1 worker (~190 ms) third.
 
 - **Workload per game frame:** about 3 MB of VIF1 data in ~9,400 transfers; ~640 XGKICK packets
   (1.2 MB); ~1,700 VIF1 DIRECT transfers (1.6 MB); ~1,500 RE4 world batches (~160,000
@@ -49,6 +62,32 @@ own notes (`docs/PERF_WORK_NOT_DONE.md`, `docs/PATH_TO_30FPS.md`).
   instructions' own work, 10-12% guest register loads and stores, 8% branches, 5% cycle quota and
   exit bookkeeping). RE4's game code has a flat profile: the hottest function is 3.2% of EE time,
   the top 20 about half.
+
+## New measurement: the GS data is almost all repeated (24 Nov)
+
+PC runner, RE4 walk, 420 vblanks, every GIF packet the relay hands to the GS hashed (patch 0123,
+`--reuse-scan`); "repeated" means the same bytes were relayed in the previous 6 vblanks
+(about 2-3 game frames):
+
+| Relayed GIF data | Size | Repeated |
+|---|---|---|
+| XGKICK packets (VU1 output: characters, effects) | 176 MB, 97,750 packets | 0.2% of bytes |
+| VIF1 DIRECT, PACKED register data | 152 MB | 97% |
+| VIF1 DIRECT, REGLIST register data | 38 MB | 99% |
+| VIF1 DIRECT, IMAGE (texture uploads) | 56 MB | 99% |
+
+- Per game frame that is about 1.2 MB of register data and 0.37 MB of image data sent by the
+  game's EE code through VIF1 DIRECT, nearly all identical to what it sent a few vblanks before.
+  This register data is most of the ~84,500 GS register writes per game frame.
+- Its cost today, along the whole path: the emulation thread copies it into the VIF1 queue
+  (part of 31-40 ms) and parses it into register writes (DIRECT relay, 16-17 ms); the VU1 worker
+  copies it out of the queue (DIRECT, 17-19 ms); the GS thread decodes, assembles primitives,
+  converts vertices and batches them (registers, vertices, primitives, vertex conversion, part of
+  flush: roughly 60-90 ms) and writes the images into GS memory (40 ms).
+- **What it suggests:** caching by content, keyed by the packet's hash plus the GS state it
+  depends on (registers at its start, the textures and CLUTs it samples, the target it draws
+  into), with the result kept as ready GL batches. Not built; the hit rate after those extra keys,
+  and what the cache costs to check, are the next measurements.
 
 ## Work done and kept
 
@@ -154,8 +193,8 @@ frame dumps) or results compared bit for bit.
 
 - **All three threads need cutting together.** Even with no waiting at all, the emulation
   thread needs ~230 ms per game frame (about 4.3 fps). At 30 fps each thread has 33 ms.
-- **The emulation thread is about 7x over budget on its own work.** RE4's game code alone is ~83
-  ms per game frame, about 2.5x the whole budget, and its profile is flat.
+- **The emulation thread is about 7x over budget on its own work.** RE4's game code alone is
+  ~90 ms per game frame, about 2.7x the whole budget, and its profile is flat.
 - **The GS thread is about 8x over.** The GS is emulated on the CPU: every register write,
   vertex, primitive and render target round trip is CPU work on a 444 MHz core.
 - **The VU1 worker is about 5x over**, even with skinning and the world done natively.

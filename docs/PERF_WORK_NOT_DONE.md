@@ -619,6 +619,20 @@ for their own clock reads. RE4 gameplay on the Vita, warm, ms per game frame:
   VU0 operation now stores its result to the context and the next loads it back), LDL/LDR pairs as
   one unaligned load (each is a C++ call now), guest registers kept across linked blocks.
 
+### Baseline audit and the GIF reuse scan (24 Nov 2026, patch 0123)
+
+- **Frame rates were overstated by about 8-10%.** `sh.py`-style averages took each perf.csv row
+  as one second; rows are 1.10 s apart. With the rows' timestamps (`tools/perf_audit.py`), RE4 runs
+  at 2.84-3.25 game fps in steady play (t >= 25 s) and 2.6-2.9 over a whole run (which includes
+  about 14 s of state loading). Milliseconds per game frame were about 8% low by the same factor.
+  Comparisons between runs measured the same way stay valid.
+- **Profiler sections are exclusive** (one current section per thread): with the timestamps a
+  thread's sections sum to its wall time per game frame (about 330 ms at 3.0 fps).
+- **GIF reuse scan** (`--reuse-scan`, PC): VU1's XGKICK output repeats 0.2% of its bytes within 6
+  vblanks; VIF1 DIRECT data repeats 97-99% (PACKED 152 MB, REGLIST 38 MB, IMAGE 56 MB in 420
+  vblanks). The register data sent by DIRECT is most of the GS register writes. Details and what
+  it suggests: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md).
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an

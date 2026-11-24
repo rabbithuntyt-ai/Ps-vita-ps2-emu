@@ -1,0 +1,94 @@
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -1,4 +1,5 @@
+ #include <chrono>
++#include <unordered_map>
+ #include "../EmuProfile.h"
+ #include "Vpu.h"
+ #include "../EmuProfile.h"
+@@ -522,6 +523,7 @@
+ 			EmuProfile::CScope directScope(EmuProfile::SECTION_RELAY_DIRECT);
+ 			CGsPacketMetadata directMetadata(2);
+ 			uint32 size = static_cast<uint32>(kick->packet.size());
++			if(g_reuseScan && (m_kickOffset == 0)) NoteReuse(1, kick->packet.data(), size);
+ 			if(m_kickOffset < size)
+ 			{
+ 				m_kickOffset += m_gif.ProcessMultiplePackets(kick->packet.data(), size, m_kickOffset, size, directMetadata);
+@@ -542,6 +544,7 @@
+ 			continue;
+ 		}
+ 		auto* packet = &kick->packet;
++		if(g_reuseScan && (m_kickOffset == 0)) NoteReuse(0, packet->data(), static_cast<uint32>(packet->size()));
+ 		uint32 size = static_cast<uint32>(packet->size());
+ 		bool refused = false;
+ 		while(m_kickOffset < size)
+@@ -562,6 +565,38 @@
+ 	}
+ }
+ 
++void CVpu::NoteReuse(int kind, const uint8* data, uint32 size)
++{
++	static std::unordered_map<uint64, uint32> lastSeen;
++	constexpr uint32 REUSE_WINDOW = 6;
++	//FNV-1a, 64 bits
++	uint64 hash = 0xCBF29CE484222325ULL ^ size;
++	for(uint32 i = 0; i < size; i++)
++	{
++		hash ^= data[i];
++		hash *= 0x100000001B3ULL;
++	}
++	auto& counts = g_reuse[kind];
++	counts[0]++;
++	counts[1] += size;
++	auto it = lastSeen.find(hash);
++	if((it != lastSeen.end()) && ((g_reuseVBlank - it->second) <= REUSE_WINDOW))
++	{
++		counts[2]++;
++		counts[3] += size;
++	}
++	bool repeated = (it != lastSeen.end()) && ((g_reuseVBlank - it->second) <= REUSE_WINDOW);
++	if((kind == 1) && (size >= 16))
++	{
++		uint64 tag = 0;
++		memcpy(&tag, data, 8);
++		uint32 flg = static_cast<uint32>(tag >> 58) & 3;
++		g_reuseDirectMode[flg][0] += size;
++		if(repeated) g_reuseDirectMode[flg][1] += size;
++	}
++	lastSeen[hash] = g_reuseVBlank;
++}
++
+ void CVpu::QueueXgKick(uint32 address)
+ {
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_VU1_KICK);
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -157,6 +157,15 @@
+ 	//EE thread, after it changed VIF1 state: a stalled worker tries again
+ 	void ResumeAsync();
+ 	static inline VPU_ASYNC_STATS g_asyncStats;
++	//Diagnostics (PC runner, --reuse-scan): GIF data the relay hands to the GS, hashed; a packet
++	//"repeats" when the same bytes were relayed in the last REUSE_WINDOW vblanks.
++	//[0] XGKICK packets, [1] VIF1 DIRECT transfers; counts and bytes, all and repeated
++	static inline bool g_reuseScan = false;
++	static inline uint64 g_reuse[2][4] = {};
++	//DIRECT by the first GIF tag's mode (0 PACKED, 1 REGLIST, 2/3 IMAGE): bytes, repeated bytes
++	static inline uint64 g_reuseDirectMode[4][2] = {};
++	static inline uint32 g_reuseVBlank = 0;
++	static void NoteReuse(int kind, const uint8* data, uint32 size);
+ 	//Diagnostics (VU1, inline execution only): called before a program starts (true) and after
+ 	//it ran (false), with its start address. Used to check program replacements on the PC.
+ 	static inline std::function<void(CVpu&, uint32 address, bool before)> g_programHook;
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -397,6 +397,7 @@
+ 
+ void CSubSystem::NotifyVBlankStart()
+ {
++	CVpu::g_reuseVBlank++;
+ 	//Frames are complete when displayed: give a threaded VU1 some time to
+ 	//finish. Not indefinitely: a program can run until VIF1 (driven by the
+ 	//EE) delivers more data, which would deadlock.

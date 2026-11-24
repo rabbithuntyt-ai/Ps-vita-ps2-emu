@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+# tools/perf_audit.py PERF.csv...: game frame rates measured with the rows' own timestamps (t), and the
+# emulation thread's / VU1 worker's sampled sections in ms per game frame over the steady window
+# (from STEADY_T seconds of the run's clock to the end). Each row's ps2_* value is the share of the
+# 1 ms samples in that row's interval; sections are exclusive (one current section per thread).
+import csv, sys
+STEADY_T = 25.0
+EE_NAMES = "other EE VU0 VU1 IOP SPU VIF GIF IPU SIF JIT GSwait idle SPUsync SPUread VIFdirect VIFunpack EEio EEkernel EEticks IOPio IOPkernel IOPticks IOPcounters IOPbios IOPdma IOPwait IOPdrain IOPlag IOPpark VU1relay VIFqueue VU1native VU1kick relayDirect relayWorld VU1hle VIFcmd VU1jit VIFlock VIFwake VIFcopy VIFunlock VU1sync VU1quiet EEioTimer EEioIntc EEioDma EEioGs EEioWait".split()
+for f in sys.argv[1:]:
+    rows = list(csv.DictReader(open(f)))
+    t = [float(r['t']) for r in rows]
+    g = [float(r['game_fps']) for r in rows]
+    total = sum(g)
+    first = next(i for i, v in enumerate(g) if v > 0)
+    span_all = t[-1] - t[first - 1] if first > 0 else t[-1]
+    steady = [i for i in range(1, len(rows)) if t[i] >= STEADY_T]
+    dt = {i: t[i] - t[i - 1] for i in steady}
+    steady_frames = sum(g[i] for i in steady)
+    steady_time = sum(dt.values())
+    naive = sum(g[i] for i in steady) / len(steady)
+    print('%s: %d rows, row interval %.3f s; %d game frames in all; from the first frame: %.2f fps over %.1f s; steady (t >= %.0f s): %.2f fps over %.1f s (per-row average, the old figure: %.2f)' % (
+        f.split('/')[-2], len(rows), (t[-1] - t[0]) / (len(rows) - 1), total, total / span_all, span_all, STEADY_T, steady_frames / steady_time, steady_time, naive))
+    # ms per game frame, steady window: share x row interval, summed, over the frames
+    out = []
+    for n in EE_NAMES:
+        key = 'ps2_' + n
+        if key not in rows[0]:
+            continue
+        ms = sum(float(rows[i][key]) * dt[i] * 1000 for i in steady) / steady_frames
+        if ms >= 2:
+            out.append((ms, n))
+    out.sort(reverse=True)
+    print('  emulation thread, ms per game frame: total %.0f (sum of sections) | %s' % (sum(m for m, _ in out), ', '.join('%s %.0f' % (n, m) for m, n in out)))
+    vu = [0.0] * 64
+    for i in steady:
+        for k, v in enumerate(rows[i]['vu1_sections'].split(';')):
+            vu[k] += float(v) * dt[i] * 1000
+    parts = sorted(((v / steady_frames, EE_NAMES[k]) for k, v in enumerate(vu) if k < len(EE_NAMES) and v / steady_frames >= 2), reverse=True)
+    print('  VU1 worker, ms per game frame: total %.0f | %s' % (sum(m for m, _ in parts), ', '.join('%s %.0f' % (n, m) for m, n in parts)))

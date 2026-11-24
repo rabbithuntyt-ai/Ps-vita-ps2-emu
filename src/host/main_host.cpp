@@ -279,6 +279,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-fast-packed")) CGIF::g_fastPacked = false; //gif_fast_packed=0
 		else if(!std::strcmp(argv[i], "--no-bulk-unpack")) CVif::g_bulkUnpack = false; //bulk_unpack=0
 		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
+		else if(!std::strcmp(argv[i], "--reuse-scan")) CVpu::g_reuseScan = true; //relayed GIF data repeated across frames
 		else if(!std::strcmp(argv[i], "--no-merged-submit")) CGSHandler::g_mergedSubmit = false; //gs_merged_submit=0
 		else if(!std::strcmp(argv[i], "--no-fast-registers")) CGSH_Primitives::g_fastRegisters = false; //gs_fast_registers=0
 		else if(!std::strcmp(argv[i], "--re4-skin")) CVpu::g_nativeProgram = Re4Skin::Run; //RE4 skinning programs natively (re4_skin)
@@ -636,6 +637,16 @@ int main(int argc, char** argv)
 			std::printf("relay: %llu kicks (%.1f MB), %llu DIRECT (%.1f MB), %llu replaced; %llu register writes\n",(unsigned long long)a.kicks.load(), a.kickBytes.load() / 1048576.0,
 			            (unsigned long long)a.directs.load(), a.directBytes.load() / 1048576.0, (unsigned long long)a.customs.load(), (unsigned long long)CGSHandler::g_writeBufferTotal);
 			std::printf("unpacked by runs: %llu values\n", (unsigned long long)CVif::g_bulkValues);
+			if(CVpu::g_reuseScan)
+				for(int k = 0; k < 2; k++)
+				{
+					const auto& c = CVpu::g_reuse[k];
+					std::printf("reuse %s: %llu packets (%.1f MB), %llu repeated within 6 vblanks (%.1f%%, %.1f%% of bytes)\n", k ? "DIRECT" : "XGKICK",
+					            (unsigned long long)c[0], c[1] / 1048576.0, (unsigned long long)c[2], c[0] ? 100.0 * c[2] / c[0] : 0.0, c[1] ? 100.0 * c[3] / c[1] : 0.0);
+				}
+			if(CVpu::g_reuseScan)
+				for(int m = 0; m < 4; m++)
+					std::printf("reuse DIRECT mode %d: %.1f MB, %.1f MB repeated\n", m, CVpu::g_reuseDirectMode[m][0] / 1048576.0, CVpu::g_reuseDirectMode[m][1] / 1048576.0);
 			if(Ee::CSubSystem::g_ioCounts)
 			{
 				//The 20 busiest EE I/O register slots
