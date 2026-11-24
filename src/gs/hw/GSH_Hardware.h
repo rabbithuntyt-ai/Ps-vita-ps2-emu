@@ -256,9 +256,10 @@ public:
 	// its depth blur; the Z read-back and the blur round trips go away.
 	static inline uint32 g_re4SkipDof = 0;
 	// Ordinary batches drawn with one GLSL program instead of the fixed-function texture
-	// combiner, fog unit and alpha test (gs_shaders, on: on the Vita a batch costs ~27 us of GL
-	// time against ~63 us through vitaGL's fixed-function path, 24 Nov 2026)
-	static inline bool g_shaderBatches = true;
+	// combiner, fog unit and alpha test (gs_shaders, off: ~27 us of GL time per batch on the Vita
+	// against ~63 us through vitaGL's fixed-function path, but RE4 crashed in 4 of 9 runs with
+	// it on, 24 Nov 2026: a trap in a system allocator, heap corruption suspected)
+	static inline bool g_shaderBatches = false;
 	// Compiles and links a series of shader pairs (simplest first, then the batch and world
 	// programs), writing a line before and after each link to 'path' (closed each time, so a
 	// crash leaves the step it died in). For vitaGL's GLSL translation on the Vita.
