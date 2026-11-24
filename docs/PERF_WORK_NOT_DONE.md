@@ -515,6 +515,29 @@ for their own clock reads. RE4 gameplay on the Vita, warm, ms per game frame:
   both are layout work on the GS thread with uncertain gain (the read-backs cost ~25 ms per
   game frame on the Vita, of which 15 is `glReadPixels`).
 
+### GL draw calls by path, and `gs_shaders` again (24 Nov 2026)
+
+- **Draw time by path** (perf.csv `gpu_parts` 15-20: program, world slot and retained draw
+  times, then fixed-function, program and retained draw counts). RE4 walk on the Vita, per
+  game frame: 373 fixed-function batches 23.5 ms (63 us each, vitaGL's fixed-function path),
+  216 retained world draws 9.5 ms (44 us), world slots 7.9 ms. The GS thread's world section
+  (~40 ms) is therefore about half GL calls and half the CPU side of 1,650 batches.
+- **`gs_shaders=1` measured again** (batches drawn by one GLSL program; it lost on 16 Nov):
+  386 program draws take 10.5 ms (27 us each) against 23.5 ms, the flush section 33 against 40
+  ms, and the emulation thread's wait on the GS thread drops from 57 to 19-23 ms per game frame.
+  Game frames 293 and 277 against 295: no gain, because the emulation thread is now the limit
+  (game code 92-94 ms, waiting for VU1 37-39 ms). PC pictures differ by rounding only (at most
+  4 levels per channel in up to 5% of pixels; none above 8). Left off until the emulation
+  thread is faster; then it is the first GS thread step (Vita pictures not compared yet).
+- **Tried: copying an old target into a new layout up to a page row the new one ends inside**
+  (that row read back): it never applied in today's frames (the case only arose with the
+  stale-row uploads above). Removed.
+- **The read-back that matters** is the first one each frame: a transfer needs rows 96-128 of
+  the 512 wide target at 0x310000, which is read back whole (448 rows, 229,000 pixels). Keeping
+  that saving needs both dirty bands (above) and a GPU copy into the next layout that leaves
+  the stale rows to be filled from GS memory in the new target (instead of uploading them into
+  the old one, which froze the Vita). Not built.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an

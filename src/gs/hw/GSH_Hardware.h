@@ -171,6 +171,12 @@ public:
 		GPU_PART_RELAYOUT,        //targets copied into a new layout on the GPU
 		GPU_PART_ALPHA_CLUT,      //alpha index textures converted on the GPU
 		GPU_PART_CONTENT_HITS,    //not a time: textures found by content, in thousandths (count = value)
+		GPU_PART_DRAW_PROGRAM,    //batches drawn with a shader program (DrawBatchWithProgram)
+		GPU_PART_DRAW_WORLD,      //RE4 world slots (FlushWorld)
+		GPU_PART_DRAW_RETAINED,   //RE4 retained world draws (run setup and draws)
+		GPU_PART_DRAWS_FF,        //not times: draw calls (count = value) by fixed function batches,
+		GPU_PART_DRAWS_PROGRAM,   //batches with a program,
+		GPU_PART_DRAWS_RETAINED,  //retained world draws
 		GPU_PART_COUNT
 	};
 	struct GPU_TIMES

@@ -2394,7 +2394,8 @@ void CGSH_Hardware::DrawBatchWithProgram()
 		}
 	};
 	{
-		CPartTimer timer(GPU_PART_DRAW);
+		CPartTimer timer(GPU_PART_DRAW_PROGRAM);
+		GetTimes().partUs[GPU_PART_DRAWS_PROGRAM] += 1000;
 		draw();
 	}
 	if(m_alphaPass)
@@ -2747,7 +2748,7 @@ void CGSH_Hardware::FlushWorld()
 		m_worldSlots = 0;
 		return;
 	}
-	CPartTimer timer(GPU_PART_DRAW);
+	CPartTimer timer(GPU_PART_DRAW_WORLD);
 	const auto& s = m_state;
 	const auto& target = *m_currentTarget;
 	glUseProgram(m_worldProgram);
@@ -3084,7 +3085,7 @@ bool CGSH_Hardware::DrawRetainedWorld(const Re4Vu1::WORLD_BATCH& batch)
 	if(entry.indexCount == 0) return true;
 
 	FlushBatch(); //what was drawn before this batch goes first (ends a run if it draws)
-	CPartTimer timer(GPU_PART_DRAW);
+	CPartTimer timer(GPU_PART_DRAW_RETAINED);
 	if(!m_retainedRun)
 	{
 		// A run of retained draws: program, streams, culling and the fragment side once
@@ -3139,7 +3140,8 @@ void CGSH_Hardware::FlushRetainedDraw()
 	auto& pending = m_retainedPending;
 	if(!pending.active) return;
 	pending.active = false;
-	CPartTimer timer(GPU_PART_DRAW);
+	CPartTimer timer(GPU_PART_DRAW_RETAINED);
+	GetTimes().partUs[GPU_PART_DRAWS_RETAINED] += 1000;
 	const float* u = pending.uniforms;
 	glUniform4fv(m_retainedLocations[0], 4, u);
 	glUniform4f(m_retainedLocations[1], u[16], u[17], u[18], u[19]);
@@ -4166,6 +4168,7 @@ void CGSH_Hardware::FlushBatch()
 	}
 	{
 		CPartTimer timer(GPU_PART_DRAW);
+		GetTimes().partUs[GPU_PART_DRAWS_FF] += 1000;
 		glDrawArrays(m_batchMode, 0, static_cast<GLsizei>(m_batch.size()));
 	}
 	if(m_alphaPass)
