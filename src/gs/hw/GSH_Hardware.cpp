@@ -269,6 +269,25 @@ CGSH_Hardware::CGSH_Hardware(const OPTIONS& options)
 	g_sectionClock = NowUs; //CGSHandler section times (patch 0101)
 }
 
+namespace
+{
+	// Diagnostics: why target pixels go between GS memory and the GPU (the outermost cause wins)
+	struct ROUND_TRIP_CAUSE
+	{
+		uint32& cause;
+		uint32 previous;
+		ROUND_TRIP_CAUSE(uint32& c, uint32 n)
+		    : cause(c), previous(c)
+		{
+			if(cause == 0) cause = n;
+		}
+		~ROUND_TRIP_CAUSE()
+		{
+			cause = previous;
+		}
+	};
+}
+
 CGSH_Hardware::~CGSH_Hardware()
 {
 }
@@ -511,6 +530,7 @@ void CGSH_Hardware::ReleaseTargetPool()
 
 void CGSH_Hardware::RemoveTargetsOverlapping(const TARGET* except, uint32 start, uint32 size)
 {
+	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 13);
 	SettleStripCover(); //W1: a strip clear in progress ends here
 	for(auto it = m_targets.begin(); it != m_targets.end();)
 	{
@@ -530,6 +550,7 @@ void CGSH_Hardware::RemoveTargetsOverlapping(const TARGET* except, uint32 start,
 
 CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 psm, bool create, uint32 minHeight)
 {
+	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 1);
 	if(!IsColorPsm(psm) || (fbw == 0)) return nullptr;
 	minHeight = std::min<uint32>(minHeight, 1024);
 	// Rows up to the next target in use (drawn, sampled or displayed in the
@@ -1058,6 +1079,7 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTargetContaining(uint32 ptr, uint32 fb
 
 void CGSH_Hardware::UploadStaleRows(TARGET& target, uint32 rowEnd)
 {
+	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 2);
 	// Stale rows below rowEnd: [staleBegin, min(staleEnd, rowEnd)).
 	if((target.staleBegin >= target.staleEnd) || (target.staleBegin >= rowEnd)) return;
 	uint32 begin = target.staleBegin, end = std::min(target.staleEnd, rowEnd);
@@ -1071,6 +1093,7 @@ void CGSH_Hardware::UploadStaleRows(TARGET& target, uint32 rowEnd)
 
 void CGSH_Hardware::MarkRowsStale(TARGET& target, uint32 rowBegin, uint32 rowEnd)
 {
+	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 3);
 	// GPU pixels not written back yet cannot be replaced from GS memory later.
 	bool dirtyRows = target.gpuDirty && (target.dirtyY0 < rowEnd) && (rowBegin < target.dirtyY1);
 	bool hasStale = target.staleBegin < target.staleEnd;
@@ -1092,6 +1115,7 @@ void CGSH_Hardware::MarkRowsStale(TARGET& target, uint32 rowBegin, uint32 rowEnd
 
 void CGSH_Hardware::EnsureValidRows(TARGET& target, uint32 rows)
 {
+	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 4);
 	rows = std::min(rows, target.height);
 	UploadStaleRows(target, rows);
 	if(rows <= target.validRows) return;
@@ -1139,6 +1163,7 @@ void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 wi
 	GetTimes().uploadPixels += width * height;
 	m_stats.targetUploads++;
 	m_stats.uploadedPixels += width * height;
+	g_roundTripPixels[1][std::min<uint32>(m_roundTripCause, 15)] += width * height;
 	m_stateApplied = false;
 }
 
@@ -1192,7 +1217,7 @@ void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEn
 	if(m_diagFile && (m_diagUploads.size() < 60000))
 	{
 		char text[64];
-		std::snprintf(text, sizeof(text), " D%X:%u,%u+%ux%u(%u-%u)", target.fbp, x0, y0, width, height, rowBegin, rowEnd);
+		std::snprintf(text, sizeof(text), " D%X/%u/%u:%u,%u+%ux%u(%u-%u)c%u", target.fbp, target.fbw, target.psm, x0, y0, width, height, rowBegin, rowEnd, m_roundTripCause);
 		m_diagUploads += text;
 	}
 	m_transferPixels.resize(width * height);
@@ -1216,6 +1241,7 @@ void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEn
 	DiscardDirtyRows(target, y0, y1);
 	if(!target.gpuDirty) target.alphaDirty = false;
 	m_stats.targetDownloads++;
+	g_roundTripPixels[0][std::min<uint32>(m_roundTripCause, 15)] += width * height;
 	m_stats.downloadedPixels += width * height;
 	m_stateApplied = false;
 }
@@ -1305,6 +1331,7 @@ void CGSH_Hardware::UploadTargetsOverlapping(uint32 start, uint32 size)
 
 void CGSH_Hardware::BeginTransferWrite()
 {
+	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 5);
 	FlushBatch();
 	auto bltBuf = make_convertible<BITBLTBUF>(m_nReg[GS_REG_BITBLTBUF]);
 	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
@@ -1343,6 +1370,7 @@ void CGSH_Hardware::BeginTransferWrite()
 
 void CGSH_Hardware::ProcessHostToLocalTransfer()
 {
+	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 5);
 	GsProfile::CScope gsSection(GsProfile::SECTION_TRANSFER);
 	SettleStripCover(); //W1: a strip clear in progress ends here
 	if(g_gsCeiling) return; //G1 ceiling run: no GPU side
@@ -1409,6 +1437,7 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 
 void CGSH_Hardware::ProcessLocalToHostTransfer()
 {
+	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 6);
 	SettleStripCover(); //W1: a strip clear in progress ends here
 	if(g_gsCeiling) return; //G1 ceiling run: no GPU side
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
@@ -1423,6 +1452,7 @@ void CGSH_Hardware::ProcessLocalToHostTransfer()
 
 void CGSH_Hardware::ProcessLocalToLocalTransfer()
 {
+	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 7);
 	SettleStripCover(); //W1: a strip clear in progress ends here
 	if(g_gsCeiling) return; //G1 ceiling run: no GPU side
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
@@ -1459,6 +1489,7 @@ void CGSH_Hardware::ProcessClutTransfer(uint32, uint32)
 
 void CGSH_Hardware::SyncCLUT(const TEX0& tex0)
 {
+	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 8);
 	if(tex0.nCLD != 0)
 	{
 		FlushBatch();
@@ -1496,6 +1527,7 @@ void CGSH_Hardware::OnStateChanged()
 
 void CGSH_Hardware::BindTexture()
 {
+	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 9);
 	GsProfile::CScope gsSection(GsProfile::SECTION_TEXTURE);
 	CStageTimer stageTimer(GPU_STAGE_TEXTURE);
 	const auto& s = m_state;
@@ -3691,6 +3723,7 @@ void CGSH_Hardware::AddVertex(const CSoftwareRasterizer::VERTEX& v)
 
 void CGSH_Hardware::SettleStripCover()
 {
+	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 10);
 	auto& c = m_stripCover;
 	if(!c.target) return;
 	TARGET* target = c.target;
@@ -3704,6 +3737,7 @@ void CGSH_Hardware::SettleStripCover()
 
 bool CGSH_Hardware::SkipOverwrittenRows(const CSoftwareRasterizer::VERTEX& a, const CSoftwareRasterizer::VERTEX& b)
 {
+	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 11);
 	// Only pixels the sprite surely replaces: no blending, masks or tests
 	// that can keep the old color.
 	const auto& s = m_state;
@@ -4255,6 +4289,7 @@ void CGSH_Hardware::WriteFrameDump(const uint32* pixels, uint32 width, uint32 he
 
 void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 {
+	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 12);
 	GsProfile::CScope gsSection(GsProfile::SECTION_DISPLAY);
 	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	SettleStripCover(); //W1: a strip clear in progress ends here

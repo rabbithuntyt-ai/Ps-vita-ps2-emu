@@ -508,6 +508,15 @@ private:
 	STRIP_COVER m_stripCover;
 	void SettleStripCover();
 	void MarkTargetDirty(TARGET&, int32 x0, int32 y0, int32 x1, int32 y1);
+	uint32 m_roundTripCause = 0; //diagnostics (g_roundTripPixels)
+
+public:
+	// Pixels read back [0] and uploaded [1] by cause: 1 FindTarget, 2 stale rows, 3 rows made
+	// stale, 4 valid rows, 5 transfer into GS memory, 6 transfer out, 7 local transfer, 8 CLUT,
+	// 9 texture, 10 strip cover, 11 overwritten rows, 12 flip, 13 overlapping targets removed
+	static inline uint64 g_roundTripPixels[2][16] = {};
+
+private:
 	// GS memory spanned by a range of rows (whole page rows).
 	void RowsToBytes(const TARGET&, uint32 rowBegin, uint32 rowEnd, uint32& start, uint32& end) const;
 	// Rows of the target stored in a range of GS memory.

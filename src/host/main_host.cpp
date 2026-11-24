@@ -639,6 +639,13 @@ int main(int argc, char** argv)
 			            (unsigned long long)CGSH_Primitives::g_worldVertices, (unsigned long long)CGSH_Primitives::g_worldClipped, (unsigned long long)CGSH_Hardware::g_gpuWorldBatches, (unsigned long long)CGSH_Hardware::g_gpuWorldDraws, (unsigned long long)CGSH_Hardware::g_gpuWorldFallbacks);
 		if(Re4Vu1Hle::IsEnabled()) std::printf("most world vertices in one draw: %llu, guard band triangles: %llu\n", (unsigned long long)CGSH_Hardware::g_gpuWorldMaxVertices, (unsigned long long)CGSH_Hardware::g_gpuWorldGuarded);
 		if(CGSH_Hardware::g_gpuWorldRetained) std::printf("retained world: %llu inside, %llu outside, %llu edge; %llu hits, %llu misses, %llu evictions, %.1f MB\n", (unsigned long long)CGSH_Hardware::g_retainedInside, (unsigned long long)CGSH_Hardware::g_retainedOutside, (unsigned long long)CGSH_Hardware::g_retainedEdge, (unsigned long long)CGSH_Hardware::g_retainedHits, (unsigned long long)CGSH_Hardware::g_retainedMisses, (unsigned long long)CGSH_Hardware::g_retainedEvictions, CGSH_Hardware::g_retainedMegabytes);
+		for(int d = 0; d < 2; d++)
+		{
+			std::printf(d ? "uploaded pixels by cause:" : "read back pixels by cause:");
+			for(int c = 0; c < 16; c++)
+				if(CGSH_Hardware::g_roundTripPixels[d][c]) std::printf(" %d:%llu", c, (unsigned long long)CGSH_Hardware::g_roundTripPixels[d][c]);
+			std::printf("\n");
+		}
 		if(CGSH_Hardware::g_gpuWorldRetained) std::printf("retained draws: %llu draw calls, %llu batches merged into the one before\n", (unsigned long long)CGSH_Hardware::g_retainedDrawCalls, (unsigned long long)CGSH_Hardware::g_retainedMerged);
 #endif
 

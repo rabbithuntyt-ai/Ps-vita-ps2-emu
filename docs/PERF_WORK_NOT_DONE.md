@@ -482,6 +482,39 @@ for their own clock reads. RE4 gameplay on the Vita, warm, ms per game frame:
   ~71) are the largest GS thread item left; removing them needs dirty areas by GS block and the
   GPU pass for the PSMT8H depth trick (`runs/re4/alpha_clut16.diff`, local).
 
+### Read-backs by cause, and three things tried (24 Nov 2026, not kept)
+
+- **Read-backs by cause** (`CGSH_Hardware::g_roundTripPixels`, the PC runner's "read back
+  pixels by cause" and "uploaded pixels by cause" lines; the cause is also in `--gs-diag`'s D
+  entries as `cN`). RE4 walk, per game frame: about 317,000 pixels read back, 255,000 of them
+  because a transfer writes into memory a GPU-drawn target still holds (cause 5), the rest
+  CLUT loads 16,000, texture reads 16,000, rows overwritten by sprites 28,000, the flip 1,500.
+  Uploads: 113,000 for rows a draw needs, 65,000 overwritten rows, 30,000 after transfers. On
+  the Vita: 319,000 pixels read back (15 ms of `glReadPixels`), 213,000 uploaded (10.5 ms).
+- **Where they come from:** RE4's blur buffers. The 512 wide target at 0x310000 has textures
+  streamed into a few of its page rows (96-128, 288-320) and is then used 256 wide; the target
+  at 0x348000 gets its 32 row strips read back one by one as textures stream into it.
+- **Tried: dirty rows by bands of 16 instead of one rectangle** (rows could leave the middle
+  of the dirty area, so a transfer needed only its own rows read back, not the whole target).
+  Exact on the PC, and transfer read-backs fell from 39 to 11 M pixels in 420 frames, but the
+  rest was read back moments later when the buffer was used in its next layout (new-target
+  read-backs 0 -> 27.6 M): the same total. Vita: 319,000 pixels per game frame either way.
+- **Tried: upload the stale rows, then copy the old target on the GPU.** The rows a transfer
+  made stale kept the old target from being copied into the new layout on the GPU; uploading
+  them first let the copy happen (PC: read-backs 48.5 -> 41.1 M pixels, uploads 31.8 -> 36.6
+  M, pictures identical). On the Vita uploads went from 10.6 to 26 ms of GL time per game
+  frame (they land in textures drawn from that frame, and vitaGL copies those) and RE4 froze
+  in both runs with it (20 s and 80 s in). Not kept.
+- **Tried: a NEON copy for the VIF1 ring.** The Vita self-test measured memcpy at 800-1,000
+  MB/s and the NEON loop at ~400 MB/s; the ring's copy section rose from 21 to 28 ms per game
+  frame. The "310 MB/s" above was the cost of cold VIF1 data, not of memcpy. Not kept.
+- **What would remove them:** the targets' pixels are needed in GS memory because the game
+  reuses the memory in another layout (or as texture slots) every frame. Copying across
+  layouts that do not start on a whole page row (the old target reaching past the new one's
+  end mid-row) on the GPU, and a GPU-side path for the strips at 0x348000, are what is left;
+  both are layout work on the GS thread with uncertain gain (the read-backs cost ~25 ms per
+  game frame on the Vita, of which 15 is `glReadPixels`).
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an
