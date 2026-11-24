@@ -123,6 +123,14 @@ texture coordinates scaled by Q. Output is ST, RGBA, XYZ2 per vertex under one G
 triangle is skipped (ADC) when any of its three vertices is outside the clip box or where the input
 restarts the strip.
 
+**Checked:** the same math written as plain float code (`src/common/Re4SkinModel.cpp`, PC runner
+`--skin-model`) against the bit-exact native program over the RE4 walk (420 vblanks): 94,301
+batches, 3,800,968 vertices. All 2,588,369 drawn vertices are identical in screen position, depth,
+colour and texture coordinates; the skip bit matches for all but 731 vertices (0.02%, the first
+vertices of a batch, which use clip flags left by the previous run). Per game frame: about 616
+batches and 25,000 vertices, a third of them skipped. The semantics are understood; a shader
+version would differ only by the GPU's own float rounding.
+
 **Risks of a GPU version:** the PS2 skips triangles that leave the clip box, the GPU would clip them
 (different only at the guard band, as the GPU world already accepts); bone matrices indexed per
 vertex in the shader (vitaGL's GLSL translation got a dynamic uniform index wrong for the world

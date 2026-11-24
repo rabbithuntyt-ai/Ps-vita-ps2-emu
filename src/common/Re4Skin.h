@@ -8,6 +8,7 @@
 #include <string>
 
 class CVpu;
+struct VU_AOT_REGS;
 
 namespace Re4Skin
 {
@@ -29,4 +30,10 @@ namespace Re4Skin
 		uint64_t mismatched = 0; // comparisons with a difference
 	};
 	extern STATS g_stats;
+
+	// PC runner --skin-model (Re4SkinModel.cpp): each native run is also computed as plain float
+	// math, the way a GPU vertex shader would, and its output vertices compared
+	inline bool g_modelCheck = false;
+	void CheckModel(const uint8_t* before, const uint8_t* after, const VU_AOT_REGS& start, uint32_t entry);
+	void PrintModelStats();
 }

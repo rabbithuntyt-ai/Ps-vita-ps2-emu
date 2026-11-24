@@ -120,7 +120,15 @@ bool Re4Skin::Run(CVpu& vpu, uint32_t address)
 	auto& state = vpu.GetContext().m_State;
 	VU_AOT_REGS r;
 	Load(state, vpu.GetVif().GetTOP(), r);
+	std::vector<uint8_t> before;
+	VU_AOT_REGS start;
+	if(g_modelCheck)
+	{
+		before.assign(vpu.GetVuMemory(), vpu.GetVuMemory() + vpu.GetVuMemorySize());
+		start = r;
+	}
 	if(!Re4SkinProgram(r, vpu.GetVuMemory(), address, Kick, &vpu)) return false;
+	if(g_modelCheck) CheckModel(before.data(), vpu.GetVuMemory(), start, address);
 	Store(r, state);
 	g_stats.runs++;
 	return true;

@@ -134,6 +134,7 @@ add_library(vitaps2_common STATIC
 	src/common/EmuSession.cpp
 	src/common/GameScan.cpp
 	src/common/Re4Skin.cpp
+	src/common/Re4SkinModel.cpp
 	src/common/Re4Skin.gen.cpp
 	src/common/Re4Skin.h
 	src/common/VuAot.h
