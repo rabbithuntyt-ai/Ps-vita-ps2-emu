@@ -288,7 +288,8 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--vu1-async-no-p3sync")) CVpu::g_asyncPath3Sync = false; //PATH3 does not wait for queued VIF1 work
 #ifdef VITAPS2_HAS_GL
 		else if(!std::strcmp(argv[i], "--re4-skip-dof") && (i + 1 < argc)) CGSH_Hardware::g_re4SkipDof = std::strtoul(argv[++i], nullptr, 0);
-		else if(!std::strcmp(argv[i], "--gs-shaders")) CGSH_Hardware::g_shaderBatches = true; //batch program (gs_shaders)
+		else if(!std::strcmp(argv[i], "--gs-shaders")) CGSH_Hardware::g_shaderBatches = true; //batch program (gs_shaders, the default)
+		else if(!std::strcmp(argv[i], "--no-gs-shaders")) CGSH_Hardware::g_shaderBatches = false; //fixed-function batches (gs_shaders=0)
 		else if(!std::strcmp(argv[i], "--gpu-world-debug") && (i + 1 < argc)) CGSH_Hardware::g_gpuWorldDebug = std::atoi(argv[++i]);
 		else if(!std::strcmp(argv[i], "--no-gpu-world")) CGSH_Hardware::g_gpuWorld = false;
 		else if(!std::strcmp(argv[i], "--gpu-world")) CGSH_Hardware::g_gpuWorld = true;

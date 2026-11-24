@@ -207,7 +207,7 @@ else()
 		add_executable(gs_hardware_tests tests/gs_hardware_tests.cpp)
 		target_include_directories(gs_hardware_tests PRIVATE tests)
 		target_link_libraries(gs_hardware_tests PRIVATE vitaps2_common gsh_hardware)
-		add_test(NAME gs_hardware_tests COMMAND gs_hardware_tests)
+		add_test(NAME gs_hardware_tests COMMAND gs_hardware_tests --fixed-function)
 		add_test(NAME gs_hardware_tests_shaders COMMAND gs_hardware_tests --shaders)
 
 		add_executable(target_pixels_tests tests/target_pixels_tests.cpp)

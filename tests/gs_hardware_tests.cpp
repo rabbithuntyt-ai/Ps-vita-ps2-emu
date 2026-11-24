@@ -762,9 +762,12 @@ int main(int argc, char** argv)
 	const char* dumpDir = nullptr;
 	for(int i = 1; i < argc; i++)
 	{
-		//--shaders: the batch program instead of the fixed-function path (gs_shaders)
+		//--shaders: the batch program (gs_shaders, the default); --fixed-function: the
+		//fixed-function path (gs_shaders=0)
 		if(!std::strcmp(argv[i], "--shaders"))
 			CGSH_Hardware::g_shaderBatches = true;
+		else if(!std::strcmp(argv[i], "--fixed-function"))
+			CGSH_Hardware::g_shaderBatches = false;
 		else
 			dumpDir = argv[i];
 	}

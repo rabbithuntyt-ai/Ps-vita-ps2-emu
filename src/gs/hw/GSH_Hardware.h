@@ -256,8 +256,9 @@ public:
 	// its depth blur; the Z read-back and the blur round trips go away.
 	static inline uint32 g_re4SkipDof = 0;
 	// Ordinary batches drawn with one GLSL program instead of the fixed-function texture
-	// combiner, fog unit and alpha test (gs_shaders, off until measured on the Vita)
-	static inline bool g_shaderBatches = false;
+	// combiner, fog unit and alpha test (gs_shaders, on: on the Vita a batch costs ~27 us of GL
+	// time against ~63 us through vitaGL's fixed-function path, 24 Nov 2026)
+	static inline bool g_shaderBatches = true;
 	// Compiles and links a series of shader pairs (simplest first, then the batch and world
 	// programs), writing a line before and after each link to 'path' (closed each time, so a
 	// crash leaves the step it died in). For vitaGL's GLSL translation on the Vita.
