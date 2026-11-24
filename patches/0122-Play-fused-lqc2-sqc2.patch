@@ -1,0 +1,36 @@
+diff --git a/Source/ee/COP_VU.cpp b/Source/ee/COP_VU.cpp
+--- a/Source/ee/COP_VU.cpp
++++ b/Source/ee/COP_VU.cpp
+@@ -80,6 +80,16 @@
+ {
+ 	if(m_nFT == 0) return;
+ 
++	if(m_codeGen->SupportsGuestMemoryOps() && (m_pCtx->m_pageLookup != nullptr))
++	{
++		//As LQ: page lookup, access and handler call in one op (the template below looks the
++		//page up twice and splits register allocation around its branch)
++		ComputeMemAccessAddrNoXlat();
++		m_codeGen->GuestLoad(offsetof(CMIPS, m_pageLookup), 0x10, false, reinterpret_cast<void*>(&MemoryUtils_GetQuadProxyPtr));
++		m_codeGen->MD_PullRel(offsetof(CMIPS, m_State.nCOP2[m_nFT]));
++		return;
++	}
++
+ 	ComputeMemAccessPageRef();
+ 
+ 	m_codeGen->PushCst(0);
+@@ -114,6 +124,15 @@
+ //3E
+ void CCOP_VU::SQC2()
+ {
++	if(m_codeGen->SupportsGuestMemoryOps() && (m_pCtx->m_pageLookup != nullptr))
++	{
++		//As SQ
++		ComputeMemAccessAddrNoXlat();
++		m_codeGen->MD_PushRel(offsetof(CMIPS, m_State.nCOP2[m_nFT]));
++		m_codeGen->GuestStore(offsetof(CMIPS, m_pageLookup), 0x10, reinterpret_cast<void*>(&MemoryUtils_SetQuadProxyPtr));
++		return;
++	}
++
+ 	ComputeMemAccessPageRef();
+ 
+ 	m_codeGen->PushCst(0);

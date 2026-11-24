@@ -593,6 +593,30 @@ for their own clock reads. RE4 gameplay on the Vita, warm, ms per game frame:
 - Runs that end early without `crash.txt` are crashes too: `vitalab crashes --get` fetches the
   dumps, `tools/psp2dmp.py` reads them.
 
+### EE JIT rework, first steps (24 Nov 2026, patch 0122)
+
+- **What the JIT makes of RE4's hot code** (`tools/jit_arm_report.py` on a Vita run's `eehot.txt`
+  and `eeram.bin`): 23 ARM instructions per EE instruction, 77% of them the instructions' own
+  work, 10-12% guest register loads and stores, 8% branches, 5% quota and exit fields. The
+  heaviest blocks (25-34 per EE instruction) are the VU0 matrix helpers at 0x252000-0x258000.
+- **Instruction mix of the hot code** (sample weighted): ALU 45%, COP1 7%, jumps 7%, branches 6%,
+  LW 6%, COP2 6%, LQC2 4.3%, LWC1 3.6%, LQ/SQ 2.2% each, SQC2 1.4%, LDL/LDR 0.6% each.
+- **LQC2/SQC2 fused** (patch 0122): they were the last aligned guest accesses on the old template
+  (page lookup, a branch, the same lookup again, a call path inline); they now use the fused
+  128-bit op LQ/SQ already use (about 7 instructions on the RAM path). Vita: no crash, but the
+  EE section per emulated frame is 29.4-30.0 ms against 29.0-31.0 before: below what two runs
+  resolve.
+- **VU0 flags:** in macro mode `pipeTime` never moves, so the flags read are always the last
+  written, but the sticky status flags accumulate every result, so the flag computation must stay;
+  only the pipeline stores could go (~15 of ~50 instructions per VU0 operation, ~2 ms per game
+  frame). Not done.
+- **Measuring EE changes:** game frames vary +-5% run to run; the EE section in ms per emulated
+  frame (`eecost.py`: ps2_EE share x 1000 / vm_fps) varies about +-3%. Compiled code is cached
+  across runs, so code generation changes are compared between builds, not toggled by setting.
+- **What is left for the JIT, by size:** VU0 registers kept in NEON registers within a block (each
+  VU0 operation now stores its result to the context and the next loads it back), LDL/LDR pairs as
+  one unaligned load (each is a C++ call now), guest registers kept across linked blocks.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an
