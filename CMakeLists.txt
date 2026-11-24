@@ -210,6 +210,10 @@ else()
 		add_test(NAME gs_hardware_tests COMMAND gs_hardware_tests)
 		add_test(NAME gs_hardware_tests_shaders COMMAND gs_hardware_tests --shaders)
 
+		add_executable(target_pixels_tests tests/target_pixels_tests.cpp)
+		target_link_libraries(target_pixels_tests PRIVATE vitaps2_common gsh_hardware)
+		add_test(NAME target_pixels_tests COMMAND target_pixels_tests)
+
 		add_executable(ui_render_test tests/ui_render_test.cpp)
 		target_link_libraries(ui_render_test PRIVATE vitaps2_ui)
 		add_test(NAME ui_render_test COMMAND ui_render_test)

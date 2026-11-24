@@ -390,6 +390,31 @@ for their own clock reads. RE4 gameplay on the Vita, warm, ms per game frame:
   Removing them needs dirty areas by block, or read-backs deferred until memory is read
   (the target's data is likely dead by then). The pass is kept in `runs/re4/alpha_clut16.diff`
   (local).
+- **Read-backs and uploads made cheaper instead (23 Nov).** Of their ~62 ms per game frame,
+  glReadPixels was 15 and glTexSubImage2D 10; the CPU loops between GS memory and RGBA8
+  pixels were 19 (read-back) and 21 (upload). `src/gs/hw/TargetPixels.h` now does whole GS
+  blocks: a table of each pixel's place in the block (built and checked from the page tables)
+  instead of the address arithmetic per pixel, and for 32-bit formats the alpha conversion over
+  the block's memory (NEON: saturating add, rounding halving add) and pixels moved 8 bytes at
+  a time; blocks the rectangle covers in part use the per pixel code. `target_pixels_tests`:
+  1,200 random rectangles in PSMCT32/24/16/16S, identical; a Vita self-test at autostart
+  (`selftest.txt`, 0 of 100 differ); RE4 PC screenshots identical with and without its
+  profile (`--no-target-blocks`). Vita: 17.6 -> 10 ms and 20 -> 11 ms per game frame.
+- **World draws merged (23 Nov).** 92% of RE4's retained world draws have the same uniforms
+  as the one before (PC count), about 30 triangles each. Retained batches now share buffers
+  (chunks) in the order first seen, so such a run of batches is one draw (PC: 182,884 draw
+  calls -> 29,684, screenshots identical; `gpu_world_merge`, `--no-world-merge`). A chunk is
+  made once at the end of the frame from that frame's new batches (which the slot path draws
+  that once) and never written again: the first version wrote new batches into 1 MB chunks
+  already drawn from, and on the Vita that froze at the area load (vitaGL copies a whole
+  buffer written after the frame used it).
+- **Measured together, same build, alternating (120 s runs):** on 263 and 265 game frames,
+  off (`target_pixel_blocks=0 gpu_world_merge=0`) 255 and 258, about +3%. Per game frame: GL
+  draw time 43 against 57-61 ms, world 41 against 49-52, and the emulation thread's wait on
+  the GS thread 15-21 against 53-60. **The GS thread is no longer what the emulation thread
+  waits for most.** The emulation thread is now full: game code 88, queueing VIF1 data 68-70,
+  the relay ~76 (VU1relay, relayDirect, relayWorld), waiting for VU1 38-41 ms; the VU1 worker
+  runs JIT VU1 programs other than skinning for ~157 ms and is idle ~40. Next: those threads.
 
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 

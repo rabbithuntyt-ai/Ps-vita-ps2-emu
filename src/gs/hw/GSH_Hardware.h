@@ -220,6 +220,10 @@ public:
 	static inline bool g_gpuWorldRetained = false; //W2: world geometry kept on the GPU (gpu_world_retained)
 	static inline uint32 g_retainedBudgetMb = 24;  //W2: GPU memory for it (gpu_world_cache_mb)
 	static inline uint64 g_retainedHits = 0, g_retainedMisses = 0, g_retainedEvictions = 0;
+	// Consecutive retained batches with the same uniforms drawn as one (gpu_world_merge, on);
+	// batches merged into the draw before them, and the draw calls issued
+	static inline bool g_retainedMerge = true;
+	static inline uint64 g_retainedMerged = 0, g_retainedDrawCalls = 0;
 	static inline uint64 g_retainedInside = 0, g_retainedOutside = 0, g_retainedEdge = 0; //batches drawn retained, skipped, left to the clipping path
 	static inline float g_retainedMegabytes = 0; //W2: GPU memory in use for it (perf.csv world_cache_mb)
 	static inline bool g_retainedRunsOn = true; //W2: consecutive retained draws share their setup (gpu_world_runs)
@@ -236,6 +240,8 @@ public:
 	static inline bool g_feedbackDraw = true;
 	// Alpha index textures (PSMT8H/4HL/4HH) of render targets converted on the GPU (gpu_alpha_clut, on)
 	static inline bool g_gpuAlphaClut = true;
+	// Target uploads and read-backs a GS block at a time (TargetPixels.h; target_pixel_blocks, on)
+	static inline bool g_targetPixelBlocks = true;
 	// Vita: depth buffers loaded at each new GPU scene (depth_force_load, on)
 	static inline bool g_depthForceLoad = true;
 	// Resident Evil 4's world batches (Re4Vu1Hle) transformed by a vertex shader (gpu_world, on)
@@ -400,14 +406,42 @@ private:
 	// static buffers once, keyed by a hash of its data; each draw sets one matrix that folds the
 	// projection, the 4096 pixel wrap, w > 0 and the depth mapping, and the GPU transforms and
 	// clips (gpu_world_retained).
-	struct RETAINED_WORLD
+	// Batches' vertices and triangles share large buffers (chunks), in the order first seen,
+	// so the next batch drawn with the same uniforms is usually right after the previous one
+	// in the same chunk: the two become one draw (92% of RE4's retained draws, PC count).
+	struct RETAINED_CHUNK
 	{
 		GLuint vbo = 0, ibo = 0;
+		uint32 vertices = 0, indices = 0; //used
+	};
+	static constexpr uint32 RETAINED_CHUNK_VERTICES = 65535;    //16-bit indices
+	std::vector<RETAINED_CHUNK> m_retainedChunks;
+	// This frame's new batches, a chunk made at the end of the frame (MarkNewFrame)
+	std::vector<float> m_stagedVertices;
+	std::vector<uint16> m_stagedIndices;
+	std::vector<uint64> m_stagedKeys;
+	void SealRetainedChunk();
+	struct RETAINED_WORLD
+	{
+		bool built = false;  //in a chunk
+		bool staged = false; //new this frame: in the chunk being staged (drawn by the slot path)
+		uint32 chunk = 0, firstIndex = 0;
 		uint32 indexCount = 0, bytes = 0, lastFrame = 0;
 		float boxMin[3] = {}, boxMax[3] = {}; //object space bounds of its positions
 	};
 	std::unordered_map<uint64, RETAINED_WORLD> m_retainedWorld;
 	uint64 m_retainedBytes = 0;
+	// The retained draw not issued yet (extended while batches follow on with the same
+	// uniforms; issued at the next other one, or when the run ends)
+	struct RETAINED_PENDING
+	{
+		bool active = false;
+		uint32 chunk = 0, firstIndex = 0, indexCount = 0;
+		float uniforms[28] = {}; //projection (16), color offset (4), color scale (4), vf31/fog (4)
+	};
+	RETAINED_PENDING m_retainedPending;
+	uint32 m_retainedBoundChunk = ~0u; //chunk whose buffers the retained streams point at
+	void FlushRetainedDraw();
 	GLuint m_retainedProgram = 0;
 	bool m_retainedProgramFailed = false;
 	GLint m_retainedLocations[9] = {};

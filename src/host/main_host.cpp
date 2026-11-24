@@ -273,6 +273,8 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--vu1-hle")) Re4Vu1Hle::Enable(true); //RE4 world program without VU1
 		else if(!std::strcmp(argv[i], "--gs-frames-ahead") && (i + 1 < argc)) CGSHandler::g_framesAhead = std::atoi(argv[++i]); //gs_frames_ahead
 		else if(!std::strcmp(argv[i], "--no-block-writes")) GsTransferWrite::g_blockWrites = false; //transfers a pixel at a time (A/B)
+		else if(!std::strcmp(argv[i], "--no-target-blocks")) CGSH_Hardware::g_targetPixelBlocks = false; //target_pixel_blocks=0
+		else if(!std::strcmp(argv[i], "--no-world-merge")) CGSH_Hardware::g_retainedMerge = false; //gpu_world_merge=0
 		else if(!std::strcmp(argv[i], "--re4-skin")) CVpu::g_nativeProgram = Re4Skin::Run; //RE4 skinning programs natively (re4_skin)
 		else if(!std::strcmp(argv[i], "--skin-verify")) CVpu::g_programHook = Re4Skin::VerifyHook; //skinverify.txt (inline VU1)
 		else if(!std::strcmp(argv[i], "--vu-scalar-opmul")) VUShared::g_vectorOuterProduct = false; //old OPMULA/OPMSUB
@@ -631,6 +633,7 @@ int main(int argc, char** argv)
 			            (unsigned long long)CGSH_Primitives::g_worldVertices, (unsigned long long)CGSH_Primitives::g_worldClipped, (unsigned long long)CGSH_Hardware::g_gpuWorldBatches, (unsigned long long)CGSH_Hardware::g_gpuWorldDraws, (unsigned long long)CGSH_Hardware::g_gpuWorldFallbacks);
 		if(Re4Vu1Hle::IsEnabled()) std::printf("most world vertices in one draw: %llu, guard band triangles: %llu\n", (unsigned long long)CGSH_Hardware::g_gpuWorldMaxVertices, (unsigned long long)CGSH_Hardware::g_gpuWorldGuarded);
 		if(CGSH_Hardware::g_gpuWorldRetained) std::printf("retained world: %llu inside, %llu outside, %llu edge; %llu hits, %llu misses, %llu evictions, %.1f MB\n", (unsigned long long)CGSH_Hardware::g_retainedInside, (unsigned long long)CGSH_Hardware::g_retainedOutside, (unsigned long long)CGSH_Hardware::g_retainedEdge, (unsigned long long)CGSH_Hardware::g_retainedHits, (unsigned long long)CGSH_Hardware::g_retainedMisses, (unsigned long long)CGSH_Hardware::g_retainedEvictions, CGSH_Hardware::g_retainedMegabytes);
+		if(CGSH_Hardware::g_gpuWorldRetained) std::printf("retained draws: %llu draw calls, %llu batches merged into the one before\n", (unsigned long long)CGSH_Hardware::g_retainedDrawCalls, (unsigned long long)CGSH_Hardware::g_retainedMerged);
 #endif
 
 		if(width == 0)

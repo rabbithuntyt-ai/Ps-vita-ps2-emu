@@ -54,6 +54,7 @@
 #include "Re4Skin.h"
 #include "GsProfile.h"
 #include "gs/GsTransferWrite.h"
+#include "TargetPixels.h"
 #include "ee/Vif1.h"
 #include "xxhash.h"
 #include "EmuSession.h"
@@ -355,6 +356,7 @@ namespace
 		else if(key == "gpu_relayout") CGSH_Hardware::g_gpuRelayout = value != 0;
 		else if(key == "feedback_draw") CGSH_Hardware::g_feedbackDraw = value != 0;
 		else if(key == "gpu_alpha_clut") CGSH_Hardware::g_gpuAlphaClut = value != 0;
+		else if(key == "target_pixel_blocks") CGSH_Hardware::g_targetPixelBlocks = value != 0; //target uploads and read-backs by GS block
 		else if(key == "depth_force_load") CGSH_Hardware::g_depthForceLoad = value != 0;
 		else if(key == "vu1_spin_us") CVpu::g_workerSpinUs = value; //threaded VU1: poll this long before sleeping
 		else if(key == "vu_stall_check") CVuBasicBlock::g_combinedStallCheck = (value != 0); //one test of pending FMAC writes per block
@@ -374,6 +376,7 @@ namespace
 		else if(key == "gpu_world_retained") Re4Vu1Hle::g_hashBatches = CGSH_Hardware::g_gpuWorldRetained = value != 0; //W2: world geometry kept on the GPU
 		else if(key == "gpu_world_cache_mb") CGSH_Hardware::g_retainedBudgetMb = value; //W2 (24)
 		else if(key == "gpu_world_runs") CGSH_Hardware::g_retainedRunsOn = value != 0; //W2 (on)
+		else if(key == "gpu_world_merge") CGSH_Hardware::g_retainedMerge = value != 0; //consecutive retained batches with the same uniforms as one draw (on)
 		else if(key == "fine_timers") CGSH_Hardware::g_fineTimers = value != 0; //per primitive/batch timers in perf.csv (off: they cost a clock read each)
 		else if(key == "gpu_world_debug") CGSH_Hardware::g_gpuWorldDebug = value; //4: no culling, 64: the other faces (diagnostics)
 		else if(key == "gs_vertex_ring") CGSH_Hardware::g_vertexRing = value != 0; //with gs_shaders: vertices in GPU buffers (on)
@@ -797,6 +800,7 @@ namespace
 			{
 				//Code paths only this build runs (NEON): checked here against the plain ones
 				std::fprintf(selfTest, "psmt4 blocks: %u of 2000 differ\n", GsTransferWrite::SelfTestPsmt4Blocks(2000));
+				std::fprintf(selfTest, "target pixels: %u of 100 differ\n", TargetPixels::SelfTest(100));
 				std::fclose(selfTest);
 			}
 			if(perfFile)

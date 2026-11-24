@@ -1,4 +1,5 @@
 #include "GSH_Hardware.h"
+#include "TargetPixels.h"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -418,6 +419,7 @@ void CGSH_Hardware::MarkNewFrame()
 {
 	FlushBatch();
 	m_frameNumber++;
+	SealRetainedChunk(); //W2: this frame's new batches into a chunk
 	TrimRetainedWorld(); //W2
 	g_retainedMegabytes = static_cast<float>(m_retainedBytes) / (1024.0f * 1024.0f);
 	m_lastFrameStats = m_stats;
@@ -1120,38 +1122,13 @@ void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 wi
 		std::snprintf(text, sizeof(text), " U%X:%u,%u+%ux%u", target.fbp, x0, y0, width, height);
 		m_diagUploads += text;
 	}
-	GS_SURFACE surface;
-	surface.Init(target.psm, target.fbp, target.fbw);
-	bool is16 = IsPsm16(target.psm);
-	bool is24 = GsMemory::IsPsm24(target.psm);
 	m_transferPixels.resize(width * height);
 	uint32* pixels = m_transferPixels.data();
 	uint64 swizzleStart = NowUs();
-	for(uint32 y = 0; y < height; y++)
-	{
-		uint32 rowBase = surface.RowBase(y0 + y);
-		const uint32* rowTable = surface.RowTable(y0 + y);
-		uint32* dst = pixels + y * width;
-		if(is16)
-		{
-			for(uint32 x = 0; x < width; x++)
-			{
-				uint32 offset = surface.Offset(rowBase, rowTable, x0 + x);
-				uint32 color = GsMemory::Color16To32(*reinterpret_cast<const uint16*>(m_pRAM + offset));
-				dst[x] = (color & 0x00FFFFFF) | (static_cast<uint32>(GsAlphaToTarget(color >> 24)) << 24);
-			}
-		}
-		else
-		{
-			for(uint32 x = 0; x < width; x++)
-			{
-				uint32 offset = surface.Offset(rowBase, rowTable, x0 + x);
-				uint32 color = *reinterpret_cast<const uint32*>(m_pRAM + offset);
-				uint32 alpha = is24 ? 0x80 : (color >> 24);
-				dst[x] = (color & 0x00FFFFFF) | (static_cast<uint32>(GsAlphaToTarget(alpha)) << 24);
-			}
-		}
-	}
+	if(g_targetPixelBlocks)
+		TargetPixels::Read(m_pRAM, target.psm, target.fbp, target.fbw, x0, y0, width, height, pixels);
+	else
+		TargetPixels::ReadPixels(m_pRAM, target.psm, target.fbp, target.fbw, x0, y0, width, height, pixels, width);
 	GetTimes().partUs[GPU_PART_UPLOAD_SWIZZLE] += NowUs() - swizzleStart;
 	glBindTexture(GL_TEXTURE_2D, target.colorTexture);
 	uint64 glStart = NowUs();
@@ -1229,35 +1206,10 @@ void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEn
 	CPartTimer swizzleTimer(GPU_PART_DOWNLOAD_SWIZZLE);
 	GetTimes().downloadPixels += width * height;
 
-	GS_SURFACE surface;
-	surface.Init(target.psm, target.fbp, target.fbw);
-	bool is16 = IsPsm16(target.psm);
-	bool is24 = GsMemory::IsPsm24(target.psm);
-	for(uint32 y = 0; y < height; y++)
-	{
-		uint32 rowBase = surface.RowBase(y0 + y);
-		const uint32* rowTable = surface.RowTable(y0 + y);
-		const uint32* src = pixels + y * width;
-		for(uint32 x = 0; x < width; x++)
-		{
-			uint32 color = src[x];
-			uint32 gsColor = (color & 0x00FFFFFF) | (TargetAlphaToGs(color >> 24) << 24);
-			uint32 offset = surface.Offset(rowBase, rowTable, x0 + x);
-			if(is16)
-			{
-				*reinterpret_cast<uint16*>(m_pRAM + offset) = static_cast<uint16>(GsMemory::Color32To16(gsColor));
-			}
-			else if(is24)
-			{
-				auto pixel = reinterpret_cast<uint32*>(m_pRAM + offset);
-				*pixel = (*pixel & 0xFF000000) | (gsColor & 0x00FFFFFF);
-			}
-			else
-			{
-				*reinterpret_cast<uint32*>(m_pRAM + offset) = gsColor;
-			}
-		}
-	}
+	if(g_targetPixelBlocks)
+		TargetPixels::Write(m_pRAM, target.psm, target.fbp, target.fbw, x0, y0, width, height, pixels);
+	else
+		TargetPixels::WritePixels(m_pRAM, target.psm, target.fbp, target.fbw, x0, y0, width, height, pixels, width);
 	uint32 start = 0, end = 0;
 	RowsToBytes(target, y0, y0 + height, start, end);
 	m_textureCache.MarkBytesWritten(start, end - start);
@@ -3001,59 +2953,63 @@ bool CGSH_Hardware::DrawRetainedWorld(const Re4Vu1::WORLD_BATCH& batch)
 	uint64 key = (batch.hash ? batch.hash : XXH3_64bits(raw, static_cast<size_t>(batch.count) * 48)) ^ windingClass ^ (static_cast<uint64>(batch.count) << 40);
 	auto& entry = m_retainedWorld[key];
 	mark(1); //hash and lookup
-	if(!entry.vbo)
+	if(!entry.built)
 	{
-		g_retainedMisses++;
-		std::vector<float> vertices(static_cast<size_t>(batch.count) * 12);
-		for(uint32 i = 0; i < batch.count * 12; i++) vertices[i] = static_cast<float>(raw[i]);
-		for(int c = 0; c < 3; c++)
+		// New: its triangles go into the chunk being staged and the slot path draws it this
+		// time. A chunk is a GL buffer made whole once at the end of the frame and never
+		// written again (vitaGL copies a whole buffer that is written after this frame drew
+		// from it: 1,600 new batches into 1 MB chunks froze the Vita).
+		if(!entry.staged)
 		{
-			entry.boxMin[c] = entry.boxMax[c] = vertices[c];
-			for(uint32 i = 1; i < batch.count; i++)
+			uint32 base = static_cast<uint32>(m_stagedVertices.size() / 12);
+			if(base + batch.count > RETAINED_CHUNK_VERTICES)
 			{
-				entry.boxMin[c] = std::min(entry.boxMin[c], vertices[i * 12 + c]);
-				entry.boxMax[c] = std::max(entry.boxMax[c], vertices[i * 12 + c]);
+				m_retainedWorld.erase(key);
+				return false; //too many new batches this frame (or too big): seen again later
 			}
-		}
-		std::vector<uint16> indices;
-		indices.reserve(batch.count * 3);
-		for(uint32 i = 2; i < batch.count; i++)
-		{
-			const int32* v = raw + i * 12;
-			if(v[7] != 0) continue; //ADC: no triangle (a strip restart)
-			uint16 a = static_cast<uint16>(i - 2), b = static_cast<uint16>(i - 1), c = static_cast<uint16>(i);
-			float winding = static_cast<float>(v[3]) * batch.vf31.w;
-			bool flip = winding < 0;
-			indices.push_back(a);
-			indices.push_back(flip ? c : b);
-			indices.push_back(flip ? b : c);
-			if(winding == 0)
+			g_retainedMisses++;
+			std::vector<float> vertices(static_cast<size_t>(batch.count) * 12);
+			for(uint32 i = 0; i < batch.count * 12; i++) vertices[i] = static_cast<float>(raw[i]);
+			for(int c = 0; c < 3; c++)
 			{
-				//No back face test (foliage drawn from both sides): both orders, the GPU drops one
-				indices.push_back(a);
-				indices.push_back(c);
-				indices.push_back(b);
+				entry.boxMin[c] = entry.boxMax[c] = vertices[c];
+				for(uint32 i = 1; i < batch.count; i++)
+				{
+					entry.boxMin[c] = std::min(entry.boxMin[c], vertices[i * 12 + c]);
+					entry.boxMax[c] = std::max(entry.boxMax[c], vertices[i * 12 + c]);
+				}
 			}
+			uint32 firstIndex = static_cast<uint32>(m_stagedIndices.size());
+			for(uint32 i = 2; i < batch.count; i++)
+			{
+				const int32* v = raw + i * 12;
+				if(v[7] != 0) continue; //ADC: no triangle (a strip restart)
+				uint16 a = static_cast<uint16>(base + i - 2), b = static_cast<uint16>(base + i - 1), c = static_cast<uint16>(base + i);
+				float winding = static_cast<float>(v[3]) * batch.vf31.w;
+				bool flip = winding < 0;
+				m_stagedIndices.push_back(a);
+				m_stagedIndices.push_back(flip ? c : b);
+				m_stagedIndices.push_back(flip ? b : c);
+				if(winding == 0)
+				{
+					//No back face test (foliage drawn from both sides): both orders, the GPU drops one
+					m_stagedIndices.push_back(a);
+					m_stagedIndices.push_back(c);
+					m_stagedIndices.push_back(b);
+				}
+			}
+			m_stagedVertices.insert(m_stagedVertices.end(), vertices.begin(), vertices.end());
+			entry.staged = true;
+			entry.firstIndex = firstIndex;
+			entry.indexCount = static_cast<uint32>(m_stagedIndices.size()) - firstIndex;
+			entry.bytes = static_cast<uint32>(vertices.size() * sizeof(float) + entry.indexCount * sizeof(uint16));
+			m_retainedBytes += entry.bytes;
+			m_stagedKeys.push_back(key);
 		}
-		glGenBuffers(1, &entry.vbo);
-		glBindBuffer(GL_ARRAY_BUFFER, entry.vbo);
-		glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
-		glBindBuffer(GL_ARRAY_BUFFER, 0);
-		if(!indices.empty())
-		{
-			glGenBuffers(1, &entry.ibo);
-			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, entry.ibo);
-			glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint16), indices.data(), GL_STATIC_DRAW);
-			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-		}
-		entry.indexCount = static_cast<uint32>(indices.size());
-		entry.bytes = static_cast<uint32>(vertices.size() * sizeof(float) + indices.size() * sizeof(uint16));
-		m_retainedBytes += entry.bytes;
+		entry.lastFrame = m_frameNumber;
+		return false;
 	}
-	else
-	{
-		g_retainedHits++;
-	}
+	g_retainedHits++;
 	entry.lastFrame = m_frameNumber;
 	// The program clips in its clip space against |w| (vertices behind the camera are mirrored,
 	// not cut) and the world shader uses |w| too: a batch whose box lies inside the clip volume
@@ -3113,20 +3069,32 @@ bool CGSH_Hardware::DrawRetainedWorld(const Re4Vu1::WORLD_BATCH& batch)
 		g_retainedRuns++;
 	}
 	mark(3); //flush and run setup
-	glUniform4fv(m_retainedLocations[0], 4, mf);
-	glUniform4f(m_retainedLocations[1], batch.colorOffset.x, batch.colorOffset.y, batch.colorOffset.z, 0);
-	glUniform4f(m_retainedLocations[2], batch.colorScale.x * batch.colorOffset.w, batch.colorScale.y * batch.colorOffset.w, batch.colorScale.z * batch.colorOffset.w, 1);
 	// The FOG register at the batch's kicks (the packet does not set it; games set it per object)
 	float fog = s.fog ? static_cast<float>((m_nReg[GS_REG_FOG] >> 56) & 0xFF) / 255.0f : 1.0f;
-	glUniform4f(m_retainedLocations[3], batch.vf31.x, batch.vf31.y, fog, 0);
-	glBindBuffer(GL_ARRAY_BUFFER, entry.vbo);
-	glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 48, reinterpret_cast<const void*>(0));
-	glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 48, reinterpret_cast<const void*>(16));
-	glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 48, reinterpret_cast<const void*>(32));
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, entry.ibo);
-	mark(4); //uniforms and buffers
-	glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(entry.indexCount), GL_UNSIGNED_SHORT, nullptr);
-	mark(5); //the draw call
+	float uniforms[28];
+	std::memcpy(uniforms, mf, sizeof(mf));
+	const float rest[12] = {batch.colorOffset.x, batch.colorOffset.y, batch.colorOffset.z, 0,
+	                        batch.colorScale.x * batch.colorOffset.w, batch.colorScale.y * batch.colorOffset.w, batch.colorScale.z * batch.colorOffset.w, 1,
+	                        batch.vf31.x, batch.vf31.y, fog, 0};
+	std::memcpy(uniforms + 16, rest, sizeof(rest));
+	auto& pending = m_retainedPending;
+	if(g_retainedMerge && pending.active && (pending.chunk == entry.chunk) && (pending.firstIndex + pending.indexCount == entry.firstIndex) &&
+	   (std::memcmp(pending.uniforms, uniforms, sizeof(uniforms)) == 0))
+	{
+		//Right after the pending draw's triangles, same uniforms: one draw
+		pending.indexCount += entry.indexCount;
+		g_retainedMerged++;
+	}
+	else
+	{
+		FlushRetainedDraw();
+		pending.active = true;
+		pending.chunk = entry.chunk;
+		pending.firstIndex = entry.firstIndex;
+		pending.indexCount = entry.indexCount;
+		std::memcpy(pending.uniforms, uniforms, sizeof(uniforms));
+	}
+	mark(4); //uniforms and buffers (the draw itself is issued later, FlushRetainedDraw)
 	if(!g_retainedRunsOn) EndRetainedRun(); //gpu_world_runs=0: one draw at a time
 	g_gpuWorldDraws++;
 	m_stats.drawCalls++;
@@ -3134,9 +3102,37 @@ bool CGSH_Hardware::DrawRetainedWorld(const Re4Vu1::WORLD_BATCH& batch)
 	return true;
 }
 
+void CGSH_Hardware::FlushRetainedDraw()
+{
+	auto& pending = m_retainedPending;
+	if(!pending.active) return;
+	pending.active = false;
+	CPartTimer timer(GPU_PART_DRAW);
+	const float* u = pending.uniforms;
+	glUniform4fv(m_retainedLocations[0], 4, u);
+	glUniform4f(m_retainedLocations[1], u[16], u[17], u[18], u[19]);
+	glUniform4f(m_retainedLocations[2], u[20], u[21], u[22], u[23]);
+	glUniform4f(m_retainedLocations[3], u[24], u[25], u[26], u[27]);
+	if(m_retainedBoundChunk != pending.chunk)
+	{
+		const auto& chunk = m_retainedChunks[pending.chunk];
+		glBindBuffer(GL_ARRAY_BUFFER, chunk.vbo);
+		glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 48, reinterpret_cast<const void*>(0));
+		glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 48, reinterpret_cast<const void*>(16));
+		glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 48, reinterpret_cast<const void*>(32));
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, chunk.ibo);
+		m_retainedBoundChunk = pending.chunk;
+	}
+	glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(pending.indexCount), GL_UNSIGNED_SHORT,
+	               reinterpret_cast<const void*>(static_cast<uintptr_t>(pending.firstIndex) * sizeof(uint16)));
+	g_retainedDrawCalls++;
+}
+
 void CGSH_Hardware::EndRetainedRun()
 {
 	if(!m_retainedRun) return;
+	FlushRetainedDraw(); //the run's last draw, with its state still set
+	m_retainedBoundChunk = ~0u;
 	m_retainedRun = false;
 	glDisable(GL_CULL_FACE);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
@@ -3150,33 +3146,70 @@ void CGSH_Hardware::EndRetainedRun()
 
 void CGSH_Hardware::TrimRetainedWorld()
 {
-	// Over the budget: the batches not drawn for the longest time go first
+	// Over the budget: batches share chunks, so everything goes and is built again as it is
+	// drawn (rare: RE4's areas take a few MB, the budget is g_retainedBudgetMb)
 	uint64 budget = static_cast<uint64>(g_retainedBudgetMb) * 1024 * 1024;
 	if(m_retainedBytes <= budget) return;
-	std::vector<std::pair<uint32, uint64>> byAge;
-	byAge.reserve(m_retainedWorld.size());
-	for(const auto& [key, entry] : m_retainedWorld) byAge.emplace_back(entry.lastFrame, key);
-	std::sort(byAge.begin(), byAge.end());
-	for(const auto& [frame, key] : byAge)
+	EndRetainedRun();
+	for(auto& chunk : m_retainedChunks)
 	{
-		if((m_retainedBytes <= budget * 3 / 4) || (frame + 2 >= m_frameNumber)) break;
-		auto it = m_retainedWorld.find(key);
-		if(it->second.vbo) glDeleteBuffers(1, &it->second.vbo);
-		if(it->second.ibo) glDeleteBuffers(1, &it->second.ibo);
-		m_retainedBytes -= it->second.bytes;
-		m_retainedWorld.erase(it);
-		g_retainedEvictions++;
+		glDeleteBuffers(1, &chunk.vbo);
+		glDeleteBuffers(1, &chunk.ibo);
 	}
+	m_retainedChunks.clear();
+	m_stagedVertices.clear();
+	m_stagedIndices.clear();
+	m_stagedKeys.clear();
+	g_retainedEvictions += m_retainedWorld.size();
+	m_retainedWorld.clear();
+	m_retainedBytes = 0;
+}
+
+void CGSH_Hardware::SealRetainedChunk()
+{
+	// The frame's new batches as one chunk: buffers made whole, never written again
+	if(m_stagedKeys.empty()) return;
+	EndRetainedRun();
+	RETAINED_CHUNK chunk;
+	glGenBuffers(1, &chunk.vbo);
+	glBindBuffer(GL_ARRAY_BUFFER, chunk.vbo);
+	glBufferData(GL_ARRAY_BUFFER, m_stagedVertices.size() * sizeof(float), m_stagedVertices.data(), GL_STATIC_DRAW);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glGenBuffers(1, &chunk.ibo);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, chunk.ibo);
+	if(!m_stagedIndices.empty()) glBufferData(GL_ELEMENT_ARRAY_BUFFER, m_stagedIndices.size() * sizeof(uint16), m_stagedIndices.data(), GL_STATIC_DRAW);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	chunk.vertices = static_cast<uint32>(m_stagedVertices.size() / 12);
+	chunk.indices = static_cast<uint32>(m_stagedIndices.size());
+	uint32 index = static_cast<uint32>(m_retainedChunks.size());
+	m_retainedChunks.push_back(chunk);
+	for(uint64 key : m_stagedKeys)
+	{
+		auto it = m_retainedWorld.find(key);
+		if((it == m_retainedWorld.end()) || !it->second.staged) continue;
+		it->second.staged = false;
+		it->second.built = true;
+		it->second.chunk = index;
+	}
+	m_stagedVertices.clear();
+	m_stagedIndices.clear();
+	m_stagedKeys.clear();
+	m_retainedBoundChunk = ~0u;
+	m_stateApplied = false;
 }
 
 void CGSH_Hardware::ReleaseRetainedWorld()
 {
 	EndRetainedRun();
-	for(auto& [key, entry] : m_retainedWorld)
+	for(auto& chunk : m_retainedChunks)
 	{
-		if(entry.vbo) glDeleteBuffers(1, &entry.vbo);
-		if(entry.ibo) glDeleteBuffers(1, &entry.ibo);
+		glDeleteBuffers(1, &chunk.vbo);
+		glDeleteBuffers(1, &chunk.ibo);
 	}
+	m_retainedChunks.clear();
+	m_stagedVertices.clear();
+	m_stagedIndices.clear();
+	m_stagedKeys.clear();
 	m_retainedWorld.clear();
 	m_retainedBytes = 0;
 	if(m_retainedProgram) glDeleteProgram(m_retainedProgram);
