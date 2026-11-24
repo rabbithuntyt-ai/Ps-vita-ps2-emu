@@ -537,6 +537,17 @@ for their own clock reads. RE4 gameplay on the Vita, warm, ms per game frame:
   that saving needs both dirty bands (above) and a GPU copy into the next layout that leaves
   the stale rows to be filled from GS memory in the new target (instead of uploading them into
   the old one, which froze the Vita). Not built.
+- **Built and reverted (24 Nov, later).** Dirty bands plus GPU copies that leave the old
+  target's stale rows (whole page rows) out of the copy and make the same memory stale rows of
+  the new target, in both the whole copy and the copy of the front rows (the old target keeping
+  the rest). PC, 420 frames: uploads 31.8 -> 18.6 M pixels, but read-backs only 48.5 -> 45.6 M
+  (the game's frame sequence changed: the target at 0x310000 is created 256 rows tall, and
+  the rows later covered by sprites are read back instead, 4.3 -> 12.3 M). Pictures differed
+  in two screen rows (390-391, about row 195 of the 224 row blur buffer, up to 43 levels),
+  from the front copy with stale rows; filling stale rows over the whole sampled range did
+  not change that. With the front copy's stale handling off, pictures were identical but
+  nothing was saved. At best ~4 ms per game frame of uploads on the Vita: not worth a wrong
+  picture. The read-backs stay; they are bound to the way RE4 reuses its blur buffer memory.
 
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
