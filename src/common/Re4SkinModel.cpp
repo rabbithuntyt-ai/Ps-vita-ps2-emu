@@ -15,6 +15,7 @@
 #include "Re4Skin.h"
 #include <cmath>
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include "VuAot.h"
@@ -78,6 +79,9 @@ namespace
 		uint64_t rgbaExact = 0, rgbaWithin1 = 0, rgbaWorse = 0;
 		uint64_t stExact = 0, stClose = 0, stWorse = 0;
 		uint64_t adcMatch = 0, adcDiffer = 0;
+		uint64_t bonesHist[5] = {}; //vertices by bone count (4: 4 or more)
+		uint64_t oneMatrixBatches = 0, oneMatrixVertices = 0, recordsHist[5] = {}; //batches by distinct bone lists (4: 4 or more)
+		uint64_t maxBoneIndex = 0;
 		std::string examples;
 		int exampleCount = 0;
 	};
@@ -136,6 +140,36 @@ void Re4Skin::CheckModel(const uint8_t* before, const uint8_t* after, const VU_A
 	ambient.w = 128.0f;
 	V4 material = LoadF(before, vi5 - 1);
 	uint32_t clipHistory = clipIn;
+	{
+		// Bone use in this batch: one matrix for every vertex (a single bone list with one bone)?
+		uint32_t firstRecord = ~0U, records = 0;
+		uint32_t lastRecord = ~0U;
+		bool oneMatrix = true;
+		for(uint32_t k = 0; k < count; k++)
+		{
+			int32_t p0[4];
+			LoadI(before, top + 0x21 + 3 * k, p0);
+			uint32_t rec = static_cast<uint32_t>(p0[3]) & 0xFFFF;
+			int32_t idx[4];
+			LoadI(before, top + rec, idx);
+			uint32_t bones = static_cast<uint32_t>(idx[3]) & 0xFFFF;
+			m.bonesHist[std::min<uint32_t>(bones, 4)]++;
+			for(uint32_t b = 0; b < bones && b < 3; b++) m.maxBoneIndex = std::max<uint64_t>(m.maxBoneIndex, static_cast<uint32_t>(idx[b]) & 0xFFFF);
+			if(rec != lastRecord)
+			{
+				records++;
+				lastRecord = rec;
+			}
+			if(firstRecord == ~0U) firstRecord = rec;
+			if((rec != firstRecord) || (bones != 1)) oneMatrix = false;
+		}
+		m.recordsHist[std::min<uint32_t>(records, 4)]++;
+		if(oneMatrix)
+		{
+			m.oneMatrixBatches++;
+			m.oneMatrixVertices += count;
+		}
+	}
 	for(uint32_t k = 0; k < count; k++)
 	{
 		int32_t in0[4], in1[4], in2[4];
@@ -256,5 +290,9 @@ void Re4Skin::PrintModelStats()
 	std::printf("skin model, drawn vertices: xy exact %llu, within 1/16 px %llu, worse %llu; z exact %llu, other %llu; rgba exact %llu, within 1 %llu, worse %llu; stq exact %llu, close %llu, worse %llu\n",
 	            (unsigned long long)m.xyExact, (unsigned long long)m.xyWithin1, (unsigned long long)m.xyWorse, (unsigned long long)m.zExact, (unsigned long long)m.zWorse,
 	            (unsigned long long)m.rgbaExact, (unsigned long long)m.rgbaWithin1, (unsigned long long)m.rgbaWorse, (unsigned long long)m.stExact, (unsigned long long)m.stClose, (unsigned long long)m.stWorse);
+	std::printf("skin model, vertices by bone count: 0:%llu 1:%llu 2:%llu 3:%llu 4+:%llu; batches by bone-list runs: 1:%llu 2:%llu 3:%llu 4+:%llu; one matrix for the whole batch: %llu batches, %llu vertices; highest bone index %llu\n",
+	            (unsigned long long)m.bonesHist[0], (unsigned long long)m.bonesHist[1], (unsigned long long)m.bonesHist[2], (unsigned long long)m.bonesHist[3], (unsigned long long)m.bonesHist[4],
+	            (unsigned long long)m.recordsHist[1], (unsigned long long)m.recordsHist[2], (unsigned long long)m.recordsHist[3], (unsigned long long)m.recordsHist[4],
+	            (unsigned long long)m.oneMatrixBatches, (unsigned long long)m.oneMatrixVertices, (unsigned long long)m.maxBoneIndex);
 	if(!m.examples.empty()) std::printf("%s", m.examples.c_str());
 }

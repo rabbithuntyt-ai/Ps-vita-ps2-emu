@@ -178,6 +178,10 @@ namespace
 		batch->vf31 = {0, 0, 0, 0};
 		batch->raw.resize(count * 12);
 		uint32_t clipHistory = r.clip;
+		// Vertices come in runs that share a bone list: its blended matrix is made once per run
+		// (the same products and sums in the same order as per vertex)
+		uint32_t cachedRecord = ~0U;
+		Re4Vu1::VEC4 mat[4] = {};
 		for(uint32_t k = 0; k < count; k++)
 		{
 			int32_t in0[4], in1[4], in2[4];
@@ -186,12 +190,15 @@ namespace
 			LoadInts(mem, top + 0x23 + 3 * k, in2);
 			// Bone blend
 			uint32_t record = top + (static_cast<uint32_t>(in0[3]) & 0xFFFF);
+			if(record != cachedRecord)
+			{
+			cachedRecord = record;
 			int32_t indices[4];
 			LoadInts(mem, record, indices);
 			Re4Vu1::VEC4 w = LoadVec(mem, record + 1);
 			float weights[4] = {w.x, w.y, w.z, w.w};
 			uint32_t bones = std::min<uint32_t>(static_cast<uint32_t>(indices[3]) & 0xFFFF, 3);
-			Re4Vu1::VEC4 mat[4] = {};
+			for(int c = 0; c < 4; c++) mat[c] = {};
 			for(uint32_t b = 0; b < bones; b++)
 			{
 				uint32_t base = vi5 + (static_cast<uint32_t>(indices[b]) & 0xFFFF);
@@ -203,6 +210,7 @@ namespace
 					mat[c].z += col.z * weights[b];
 					mat[c].w += col.w * weights[b];
 				}
+			}
 			}
 			Re4Vu1::VEC4 pos = {static_cast<float>(in0[0]) * scale, static_cast<float>(in0[1]) * scale, static_cast<float>(in0[2]) * scale, 1.0f};
 			Re4Vu1::VEC4 world = Re4Vu1::Transform(mat, pos);
