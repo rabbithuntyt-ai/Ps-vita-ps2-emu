@@ -53,6 +53,7 @@
 #include "GameScan.h"
 #include "Re4Skin.h"
 #include "GsProfile.h"
+#include "gs/GsTransferWrite.h"
 #include "ee/Vif1.h"
 #include "xxhash.h"
 #include "EmuSession.h"
@@ -792,6 +793,12 @@ namespace
 			                                 [](const auto& setting) { return (setting.first == "auto_tune") && (setting.second == "1"); });
 			autoTune = autoTune && tuneRequested;
 			perfFile = std::fopen(PERF_PATH, "w");
+			if(FILE* selfTest = std::fopen(VITAPS2_DATA_DIR "/selftest.txt", "w"))
+			{
+				//Code paths only this build runs (NEON): checked here against the plain ones
+				std::fprintf(selfTest, "psmt4 blocks: %u of 2000 differ\n", GsTransferWrite::SelfTestPsmt4Blocks(2000));
+				std::fclose(selfTest);
+			}
 			if(perfFile)
 			{
 				std::fprintf(perfFile, "t,vm_fps,out_fps,ee_idle,ee_rate");

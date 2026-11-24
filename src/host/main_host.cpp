@@ -57,6 +57,7 @@
 #ifdef VITAPS2_HAS_GL
 #include <GL/osmesa.h>
 #include "GSH_Hardware.h"
+#include "gs/GsTransferWrite.h"
 #endif
 
 namespace
@@ -271,6 +272,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--vu1-verify")) CVpu::g_programHook = Vu1Verify::Hook; //vu1verify.txt
 		else if(!std::strcmp(argv[i], "--vu1-hle")) Re4Vu1Hle::Enable(true); //RE4 world program without VU1
 		else if(!std::strcmp(argv[i], "--gs-frames-ahead") && (i + 1 < argc)) CGSHandler::g_framesAhead = std::atoi(argv[++i]); //gs_frames_ahead
+		else if(!std::strcmp(argv[i], "--no-block-writes")) GsTransferWrite::g_blockWrites = false; //transfers a pixel at a time (A/B)
 		else if(!std::strcmp(argv[i], "--re4-skin")) CVpu::g_nativeProgram = Re4Skin::Run; //RE4 skinning programs natively (re4_skin)
 		else if(!std::strcmp(argv[i], "--skin-verify")) CVpu::g_programHook = Re4Skin::VerifyHook; //skinverify.txt (inline VU1)
 		else if(!std::strcmp(argv[i], "--vu-scalar-opmul")) VUShared::g_vectorOuterProduct = false; //old OPMULA/OPMSUB

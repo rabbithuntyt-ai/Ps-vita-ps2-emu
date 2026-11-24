@@ -359,6 +359,38 @@ for their own clock reads. RE4 gameplay on the Vita, warm, ms per game frame:
 - **Idle is now 20%:** the GS thread waits for work a fifth of the time, so the emulation and
   VU1 threads limit the frame rate too.
 
+### The GS thread after W3 (23 Nov 2026)
+
+- **Where it goes (ms per game frame, Vita, sampled):** other 88 (of which image data into GS
+  memory 57), world 53, flush 40, read-backs 33, uploads 28, targets 25, add vertex 22,
+  texture 19, registers 18, vertex 18, primitive 11, state 5, idle 25. The thread is nearly
+  full, and the emulation thread waits 78 ms per game frame on it.
+- **Image data, patch 0108.** PSMT4 blocks: in that layout each byte of a column holds pixel x
+  of row y (low nibble) and pixel x ^ 4 of row y + 2 (high nibble), so a column is four
+  16-byte row loads, a 16-bit swap, two shift-inserts, a zip and eight `vtbl` lookups (NEON;
+  plain C elsewhere), not 128 nibble gathers. Whole PSMT4 pages use it too. PSMCT32 blocks: every
+  8 bytes of a block are two neighbouring pixels of one row, so a block is 32 copies of 8
+  bytes. Both tables are built from Play's page offsets and checked on first use (a layout
+  that did not fit falls back). Exact: `gs_block_transfer_tests` (now with whole PSMT4 pages,
+  which the random sizes never reached) and a 2,000-block self-test of the PSMT4 writer that
+  the Vita also runs at each autostart (`selftest.txt`: 0 differ); RE4's PC screenshots equal
+  the per-pixel path's (`--no-block-writes`). On the Vita image data fell from 57 to 42 ms
+  per game frame, all of it from the PSMT4 part; the PSMCT32 part changed nothing measurable
+  (PC log: 79% of transfer bytes are PSMCT32, so the copy itself was not the cost). Game
+  frames per 120 s: 242, 255 (PSMT4 part), 238, 238, 239 (both), against 239-268 before:
+  inside the noise.
+- **Read-backs (33 ms): what they are.** About 830,000 pixels per game frame. The largest
+  (450,000) is a trick: RE4 draws depth into a PSMCT16 512x1024 target at 0x310000 and reads
+  that memory as a PSMT8H 512x512 texture (16 strips through palettes). A GPU pass for it was
+  built (a 64x32 map from each 32-bit pixel of a page to the 16-bit pixel holding its top byte,
+  the byte rebuilt from the RGBA8 texel as the read-back does): pictures identical, but no
+  read-back saved, because the game then streams textures into the middle of that buffer and
+  a target's dirty area is one rectangle, so the whole of it is read back anyway. The rest is
+  the same buffer changing layout every frame (read back 229,000 pixels, uploaded 458,000).
+  Removing them needs dirty areas by block, or read-backs deferred until memory is read
+  (the target's data is likely dead by then). The pass is kept in `runs/re4/alpha_clut16.diff`
+  (local).
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an

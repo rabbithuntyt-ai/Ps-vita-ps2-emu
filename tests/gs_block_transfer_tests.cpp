@@ -80,11 +80,20 @@ namespace
 int main()
 {
 	std::mt19937 rng(1234);
+	if(!GsTransferWrite::GetPsmt4BlockTables().valid || !GsTransferWrite::GetBlockChunks<CGsPixelFormats::STORAGEPSMCT32>().valid)
+	{
+		std::printf("FAIL: PSMT4 or PSMCT32 block tables not built (layout not as expected)\n");
+		return 1;
+	}
 	int failures = 0;
+	uint32 selfTest = GsTransferWrite::SelfTestPsmt4Blocks(2000);
+	std::printf("  %s PSMT4 block self-test: %u of 2000 differ\n", selfTest ? "FAIL" : "ok  ", selfTest);
+	failures += selfTest;
 	failures += Check("PSMCT32", 8, 8, 32, RunUnits<CGsPixelFormats::STORAGEPSMCT32>, rng);
 	failures += Check("PSMCT16", 16, 8, 16, RunUnits<CGsPixelFormats::STORAGEPSMCT16>, rng);
 	failures += Check("PSMT8", 16, 16, 8, RunUnits<CGsPixelFormats::STORAGEPSMT8>, rng);
 	failures += Check("PSMT4", 32, 16, 4, RunPsmt4, rng);
+	failures += Check("PSMT4 pages", 128, 128, 4, RunPsmt4, rng);
 	GsTransferWrite::g_blockWrites = true;
 	std::printf("%s\n", failures ? "FAILED" : "all transfers match");
 	return failures ? 1 : 0;

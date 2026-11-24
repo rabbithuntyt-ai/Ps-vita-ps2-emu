@@ -100,6 +100,8 @@ Each package names the budget line it serves, the place in the code, and the tes
 
 **W4. Streamed textures by payload hash (all games; G5 in the list).** Record a whole-rectangle transfer as "this region holds the payload with hash H". Write emulated GS memory only when something reads those bytes another way. A texture lookup that matches the region goes straight to the content cache. Today each of about 130 textures per frame is written a nibble at a time (`Source/gs/GsTransferWrite.h`). Done when a steady frame writes no texture bytes into GS memory.
 
+- **23 Nov: the writes themselves made cheaper instead (patch 0108).** PSMT4 blocks through NEON table lookups, PSMCT32 blocks 8 bytes at a time; exact (tests, a Vita self-test, identical PC screenshots). Image data 57 -> 42 ms per game frame on the GS thread; frame rate inside the noise (238-255 game frames per 120 s, 239-268 before). The next GS thread items by size: world 53-60, flush 40-45, read-backs 30-34 (RE4's depth drawn as 16-bit and read as alpha indices, then textures streamed into the same buffer: needs dirty areas by block; see PERF_WORK_NOT_DONE.md, "The GS thread after W3").
+
 **W5. One queue record per batch, and no relay (all games).**
 
 - **Why:** every hand-off to the GPU thread is a `std::function`, a mutex and a `notify_all` (`Source/MailBox.cpp`). The world path alone makes 1,800 to 3,600 per game frame, and each is first relayed through the emulation thread (E1 below).
