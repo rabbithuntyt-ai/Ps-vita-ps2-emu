@@ -585,8 +585,11 @@ for their own clock reads. RE4 gameplay on the Vita, warm, ms per game frame:
   returns the buffer's own memory and only `glBufferData`, `glBufferSubData` or a delete replace
   it, none of which the ring calls on the Vita. Suspect: GPU memory exhaustion, the ring taking
   16 MB (four 4 MB buffers) when RE4 needs about 2.2 MB per game frame. The ring size is now
-  `gs_vertex_ring_kb` (default 1024, batches that do not fit go from client memory); not yet
-  run on the Vita.
+  `gs_vertex_ring_kb` (default 1024, batches that do not fit go from client memory). Vita, five
+  runs with `gs_shaders=1` and 1 MB buffers: no crash (against 4 of 9 with 4 MB). Game frames
+  290-306 against 303-323 with it off: the emulation thread's wait on the GS thread drops to
+  37-48 ms per game frame (67-71 off) but the thread's own work is the limit, so `gs_shaders`
+  stays off by default.
 - Runs that end early without `crash.txt` are crashes too: `vitalab crashes --get` fetches the
   dumps, `tools/psp2dmp.py` reads them.
 
