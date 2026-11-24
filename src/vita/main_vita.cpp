@@ -377,6 +377,7 @@ namespace
 		else if(key == "gpu_world_cache_mb") CGSH_Hardware::g_retainedBudgetMb = value; //W2 (24)
 		else if(key == "gpu_world_runs") CGSH_Hardware::g_retainedRunsOn = value != 0; //W2 (on)
 		else if(key == "gpu_world_merge") CGSH_Hardware::g_retainedMerge = value != 0; //consecutive retained batches with the same uniforms as one draw (on)
+		else if(key == "vu1_vblank_sync") Ee::CSubSystem::g_vblankVu1Sync = value != 0; //threaded VU1: wait for the worker at each vblank (on)
 		else if(key == "fine_timers") CGSH_Hardware::g_fineTimers = value != 0; //per primitive/batch timers in perf.csv (off: they cost a clock read each)
 		else if(key == "gpu_world_debug") CGSH_Hardware::g_gpuWorldDebug = value; //4: no culling, 64: the other faces (diagnostics)
 		else if(key == "gs_vertex_ring") CGSH_Hardware::g_vertexRing = value != 0; //with gs_shaders: vertices in GPU buffers (on)

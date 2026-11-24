@@ -275,6 +275,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-block-writes")) GsTransferWrite::g_blockWrites = false; //transfers a pixel at a time (A/B)
 		else if(!std::strcmp(argv[i], "--no-target-blocks")) CGSH_Hardware::g_targetPixelBlocks = false; //target_pixel_blocks=0
 		else if(!std::strcmp(argv[i], "--no-world-merge")) CGSH_Hardware::g_retainedMerge = false; //gpu_world_merge=0
+		else if(!std::strcmp(argv[i], "--no-vu1-vblank-sync")) Ee::CSubSystem::g_vblankVu1Sync = false; //vu1_vblank_sync=0
 		else if(!std::strcmp(argv[i], "--re4-skin")) CVpu::g_nativeProgram = Re4Skin::Run; //RE4 skinning programs natively (re4_skin)
 		else if(!std::strcmp(argv[i], "--skin-verify")) CVpu::g_programHook = Re4Skin::VerifyHook; //skinverify.txt (inline VU1)
 		else if(!std::strcmp(argv[i], "--vu-scalar-opmul")) VUShared::g_vectorOuterProduct = false; //old OPMULA/OPMSUB

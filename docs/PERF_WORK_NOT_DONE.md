@@ -416,6 +416,39 @@ for their own clock reads. RE4 gameplay on the Vita, warm, ms per game frame:
   the relay ~76 (VU1relay, relayDirect, relayWorld), waiting for VU1 38-41 ms; the VU1 worker
   runs JIT VU1 programs other than skinning for ~157 ms and is idle ~40. Next: those threads.
 
+### The emulation thread and the VU1 worker (23 Nov 2026, patch 0109)
+
+- **Finer sections first** (perf.csv `ps2_*`): on the worker `VU1hle` (the RE4 world handler),
+  `VIFcmd` (VIF1 commands outside unpack and DIRECT), `VU1jit` (programs run by the JIT); on the
+  emulation thread `VIFlock`/`VIFcopy`/`VIFunlock`/`VIFwake` inside VIF1 queueing and
+  `VU1sync`/`VU1quiet` for its waits. The worker's 157 ms of "VU1" was not VU1 programs:
+  JIT-run programs are almost nothing now (`vu1_stats`: only 0x3008, ~800 cycles 3,000 times in
+  120 s; skinning and the world are native). Its time per game frame: unpack 72, native
+  skinning 66, world handler 46, DIRECT 22, VIF1 commands 16, kicks 13, idle 46; by the
+  thread's real CPU time (perf.csv thread column) it is 78% busy, the emulation thread 95%.
+- **VIF1 queueing was the copy under the mutex** (46 ms per game frame, for about 4 MB and
+  9,400 packets: plain memcpy runs 310 MB/s, so ~13 ms of it is the copy) plus releasing the
+  mutex (15 ms: a system call when the worker waits on it) and taking it (6). Now a lock-free
+  ring (`CVpu::QueueVifRecord`, `ProcessAsyncQueue`): the emulation thread copies each transfer
+  into it and publishes it with one atomic store, the worker processes it in place. Records
+  never wrap (a filler record to the end); transfers over 64 KB are split (the stream reads
+  them as consecutive transfers, as before). When the ring is full and the worker cannot make
+  room (VIF1 stalled on the EE) or takes over 2 ms, records go to an overflow queue, in order,
+  until the worker has drained it. PC: RE4 screenshots identical, also with a 64 KB ring and
+  every 50th record forced to the overflow. A 1 MB ring filled in bursts (the emulation thread
+  waited 43-49 ms per game frame for room while the worker idled 120); it is 4 MB, and the GS
+  register write buffers went from 8 to 6 MB each (at most 116,000 of 393,216 entries used,
+  overflows counted: none) so the heap is no smaller (minimum free 1.1-1.4 MB, as before).
+- **Result (120 s runs):** 265-287 game frames, against 255-265 before this patch and 238 before
+  the GS work of 23 Nov. Queueing is 34-41 ms per game frame (was ~68 with the lock parts).
+- **The wait at each vblank** (`SyncFor(20)` in `NotifyVBlankStart`: the emulation thread waits
+  for the worker to finish everything queued) can be turned off (`vu1_vblank_sync=0`,
+  `--no-vu1-vblank-sync`; PC screenshots identical). Same build, alternating: off 280 and 284,
+  on 287 and 265: no gain, the time goes to waiting for the GS thread (80-85 ms per game frame
+  against 62-64). It stays on.
+- **Where that leaves it:** the emulation thread waits for the GS thread 62-85 ms per game frame
+  again; game code 83-88, the relay ~50, queueing ~37. The GS thread is the limit once more.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an

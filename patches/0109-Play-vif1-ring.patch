@@ -1,0 +1,331 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -46,12 +46,21 @@
+ 		SECTION_VU1_KICK, //VU1 worker: XGKICK packet copied into the queue for the EE thread
+ 		SECTION_RELAY_DIRECT, //EE thread, relay: VIF1 DIRECT data (PATH2) into the GIF
+ 		SECTION_RELAY_CUSTOM, //EE thread, relay: replaced programs' output (RE4 world batches)
++		SECTION_VU1_HLE,      //VU1 programs replaced (CVpu::g_programReplacement: RE4 world batches)
++		SECTION_VIF_CMD,      //VIF1 worker: packet commands outside unpack and DIRECT
++		SECTION_VU1_JIT,      //VU1 programs run by the JIT
++		SECTION_VIF_LOCK,     //EE thread, queueing VIF1 data: waiting for the queue's lock
++		SECTION_VIF_WAKE,     //EE thread, queueing VIF1 data: waking the worker
++		SECTION_VIF_COPY,     //EE thread, queueing VIF1 data: the copy into the queue
++		SECTION_VIF_UNLOCK,   //EE thread, queueing VIF1 data: releasing the lock
++		SECTION_VU1_SYNC,     //EE thread: waiting for the VU1 worker to finish (CVpu::Sync)
++		SECTION_VU1_QUIET,    //EE thread: waiting for VIF1 to go quiet (CVpu::WaitAsyncQuiet)
+ 		SECTION_COUNT
+ 	};
+ 
+ 	inline const char* GetSectionName(unsigned int section)
+ 	{
+-		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle", "SPUsync", "SPUread", "VIFdirect", "VIFunpack", "EEio", "EEkernel", "EEticks", "IOPio", "IOPkernel", "IOPticks", "IOPcounters", "IOPbios", "IOPdma", "IOPwait", "IOPdrain", "IOPlag", "IOPpark", "VU1relay", "VIFqueue", "VU1native", "VU1kick", "relayDirect", "relayWorld"};
++		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle", "SPUsync", "SPUread", "VIFdirect", "VIFunpack", "EEio", "EEkernel", "EEticks", "IOPio", "IOPkernel", "IOPticks", "IOPcounters", "IOPbios", "IOPdma", "IOPwait", "IOPdrain", "IOPlag", "IOPpark", "VU1relay", "VIFqueue", "VU1native", "VU1kick", "relayDirect", "relayWorld", "VU1hle", "VIFcmd", "VU1jit", "VIFlock", "VIFwake", "VIFcopy", "VIFunlock", "VU1sync", "VU1quiet"};
+ 		return (section < SECTION_COUNT) ? names[section] : "?";
+ 	}
+ 
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -256,18 +256,43 @@
+ 	}
+ 	//Worker: runs queued VIF1 data until the queue is empty or VIF1 stalls (true if it did work)
+ 	bool ProcessAsyncQueue();
++	//Queued VIF1 data: a ring the EE thread writes and the worker reads in place, no lock
++	//(records: a 16-byte header, then the data padded to 16 bytes; a record never wraps).
++	//Positions count bytes and wrap at 2^32. When the ring has no room and the worker cannot
++	//make any (VIF1 stalled, waiting for the EE), records go to the overflow queue, in order,
++	//until the worker has drained it.
++	static constexpr uint32 ASYNC_RING_SIZE = 0x400000; //4 MB: a frame's VIF1 data comes in bursts (Resident Evil 4: about 4 MB a game frame)
++	static constexpr uint32 ASYNC_RECORD_MAX = 0x10000; //larger transfers are split
++	enum
++	{
++		ASYNC_RECORD_TAG = 1,  //the DMA tag is included
++		ASYNC_RECORD_SKIP = 2, //filler to the end of the ring
++	};
++	struct ASYNC_RECORD
++	{
++		uint32 size;
++		uint32 flags;
++		uint32 reserved[2];
++	};
++	std::unique_ptr<uint8[]> m_asyncRingMemory;
++	uint8* m_asyncRing = nullptr;
++	std::atomic<uint32> m_asyncWrite = 0; //EE thread
++	std::atomic<uint32> m_asyncRead = 0;  //worker
+ 	struct ASYNC_PACKET
+ 	{
+ 		std::vector<uint8> data;
+ 		bool tagIncluded = false;
+ 	};
+-	std::mutex m_asyncMutex;
++	std::mutex m_asyncMutex; //the overflow queue
+ 	std::deque<ASYNC_PACKET> m_asyncQueue;
+-	std::vector<std::vector<uint8>> m_asyncFree; //finished buffers, reused
+-	std::atomic<uint32> m_asyncQueued = 0; //packets queued and not finished
++	std::atomic<bool> m_asyncOverflow = false; //records go to m_asyncQueue (ring write position frozen)
++	void QueueVifRecord(const uint8* data, uint32 size, bool tagIncluded);
++	std::atomic<uint32> m_asyncQueued = 0; //records queued and not finished
+ 	std::atomic<bool> m_asyncStalled = false;
+ 	bool m_asyncInProgress = false; //worker only
+-	ASYNC_PACKET m_asyncCurrent;    //worker only
++	bool m_asyncCurrentInRing = false; //worker only: the record in progress
++	uint32 m_asyncCurrentEnd = 0;      //worker only: ring position after it
++	ASYNC_PACKET m_asyncCurrent;       //worker only: an overflow record in progress
+ 	std::atomic<bool> m_stopWorker = false;
+ 	std::mutex m_kickMutex;
+ 	struct PENDING_KICK
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -182,6 +182,7 @@
+ 		{
+ 			while((m_vuState == VU_STATE_RUNNING) && !m_stopWorker)
+ 			{
++				EmuProfile::CScope jitScope(EmuProfile::SECTION_VU1_JIT);
+ 				ExecuteInternal(5000);
+ 			}
+ 			//A program the EE started may be what a stalled VIF1 waits for
+@@ -234,17 +235,47 @@
+ 		if(m_asyncStalled.load(std::memory_order_acquire)) return worked;
+ 		if(!m_asyncInProgress)
+ 		{
++			uint32 read = m_asyncRead.load(std::memory_order_relaxed);
++			if(read != m_asyncWrite.load(std::memory_order_acquire))
+ 			{
++				auto record = reinterpret_cast<const ASYNC_RECORD*>(m_asyncRing + (read & (ASYNC_RING_SIZE - 1)));
++				if(record->flags & ASYNC_RECORD_SKIP)
++				{
++					m_asyncRead.store(read + record->size, std::memory_order_release);
++					continue;
++				}
++				m_asyncCurrentInRing = true;
++				m_asyncCurrentEnd = read + sizeof(ASYNC_RECORD) + ((record->size + 15) & ~15u);
++				m_asyncInProgress = true;
++				m_vif->BeginAsyncPacket(const_cast<uint8*>(reinterpret_cast<const uint8*>(record + 1)), record->size, (record->flags & ASYNC_RECORD_TAG) != 0);
++			}
++			else if(m_asyncOverflow.load(std::memory_order_acquire))
++			{
++				//The ring is empty and its write position frozen: the overflow records come next
+ 				std::lock_guard<std::mutex> lock(m_asyncMutex);
+-				if(m_asyncQueue.empty()) return worked;
++				if(m_asyncQueue.empty())
++				{
++					m_asyncOverflow.store(false, std::memory_order_release);
++					continue;
++				}
+ 				m_asyncCurrent = std::move(m_asyncQueue.front());
+ 				m_asyncQueue.pop_front();
++				m_asyncCurrentInRing = false;
++				m_asyncInProgress = true;
++				m_vif->BeginAsyncPacket(m_asyncCurrent.data.data(), static_cast<uint32>(m_asyncCurrent.data.size()), m_asyncCurrent.tagIncluded);
++			}
++			else
++			{
++				return worked;
+ 			}
+-			m_asyncInProgress = true;
+-			m_vif->BeginAsyncPacket(m_asyncCurrent.data.data(), static_cast<uint32>(m_asyncCurrent.data.size()), m_asyncCurrent.tagIncluded);
+ 		}
+ 		worked = true;
+-		if(!m_vif->ContinueAsyncPacket())
++		bool finished;
++		{
++			EmuProfile::CScope cmdScope(EmuProfile::SECTION_VIF_CMD);
++			finished = m_vif->ContinueAsyncPacket();
++		}
++		if(!finished)
+ 		{
+ 			//VIF1 stalls (interrupt, or a stopped program): the EE resumes it
+ 			g_asyncStats.stalls.fetch_add(1, std::memory_order_relaxed);
+@@ -252,12 +283,10 @@
+ 			return worked;
+ 		}
+ 		m_asyncInProgress = false;
+-		m_asyncCurrent.data.clear();
+-		{
+-			//The buffer keeps its memory for the next packet
+-			std::lock_guard<std::mutex> lock(m_asyncMutex);
+-			if(m_asyncFree.size() < 64) m_asyncFree.push_back(std::move(m_asyncCurrent.data));
+-		}
++		if(m_asyncCurrentInRing)
++			m_asyncRead.store(m_asyncCurrentEnd, std::memory_order_release);
++		else
++			m_asyncCurrent.data.clear();
+ 		m_asyncQueued.fetch_sub(1, std::memory_order_acq_rel);
+ 	}
+ 	return worked;
+@@ -267,29 +296,87 @@
+ {
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_VIF_QUEUE);
+ 	g_asyncStats.bytes.fetch_add(size, std::memory_order_relaxed);
++	//Games send VIF1 data in small DMA chunks (Resident Evil 4: about 260 bytes); large ones
++	//go as several records (the stream reads them the same way as consecutive transfers)
++	while(size > ASYNC_RECORD_MAX)
++	{
++		QueueVifRecord(data, ASYNC_RECORD_MAX, tagIncluded);
++		data += ASYNC_RECORD_MAX;
++		size -= ASYNC_RECORD_MAX;
++		tagIncluded = false;
++	}
++	QueueVifRecord(data, size, tagIncluded);
++}
++
++void CVpu::QueueVifRecord(const uint8* data, uint32 size, bool tagIncluded)
++{
++	if(!m_asyncRing)
++	{
++		m_asyncRingMemory.reset(new uint8[ASYNC_RING_SIZE + 64]);
++		m_asyncRing = reinterpret_cast<uint8*>((reinterpret_cast<uintptr_t>(m_asyncRingMemory.get()) + 63) & ~uintptr_t(63));
++	}
++	auto toOverflow = [&]() {
++		ASYNC_PACKET packet;
++		packet.data.assign(data, data + size);
++		packet.tagIncluded = tagIncluded;
++		m_asyncQueue.push_back(std::move(packet));
++		g_asyncStats.packets.fetch_add(1, std::memory_order_relaxed);
++		m_asyncQueued.fetch_add(1, std::memory_order_acq_rel);
++	};
++	if(m_asyncOverflow.load(std::memory_order_acquire))
+ 	{
+ 		std::lock_guard<std::mutex> lock(m_asyncMutex);
+-		//Games send VIF1 data in small DMA chunks (Resident Evil 4: about 260 bytes): data
+-		//without a tag goes after the last packet the worker has not taken yet. The stream
+-		//reads it the same way as two transfers.
+-		if(!tagIncluded && !m_asyncQueue.empty() && (m_asyncQueue.back().data.size() < 0x10000))
++		if(m_asyncOverflow.load(std::memory_order_relaxed))
+ 		{
+-			auto& last = m_asyncQueue.back().data;
+-			last.insert(last.end(), data, data + size);
++			toOverflow();
++			WakeWorker();
+ 			return;
+ 		}
+-		ASYNC_PACKET packet;
+-		if(!m_asyncFree.empty())
++	}
++	uint32 need = sizeof(ASYNC_RECORD) + ((size + 15) & ~15u);
++	uint32 write = m_asyncWrite.load(std::memory_order_relaxed);
++	uint32 offset = write & (ASYNC_RING_SIZE - 1);
++	uint32 filler = (offset + need > ASYNC_RING_SIZE) ? (ASYNC_RING_SIZE - offset) : 0;
++	if((write + filler + need - m_asyncRead.load(std::memory_order_acquire)) > ASYNC_RING_SIZE)
++	{
++		//Full: wait for the worker, unless it cannot make room (stalled on the EE) or takes
++		//too long; then the overflow queue
++		EmuProfile::CScope waitScope(EmuProfile::SECTION_VIF_LOCK);
++		auto start = std::chrono::steady_clock::now();
++		for(uint32 spins = 0; (write + filler + need - m_asyncRead.load(std::memory_order_acquire)) > ASYNC_RING_SIZE; spins++)
++		{
++			bool stalled = m_asyncStalled.load(std::memory_order_acquire);
++			if(stalled || (((spins & 63) == 63) && (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(2))))
++			{
++				std::lock_guard<std::mutex> lock(m_asyncMutex);
++				m_asyncOverflow.store(true, std::memory_order_release);
++				toOverflow();
++				WakeWorker();
++				return;
++			}
++			if((spins & 63) == 63) std::this_thread::yield();
++			WakeWorker();
++		}
++	}
++	{
++		EmuProfile::CScope copyScope(EmuProfile::SECTION_VIF_COPY);
++		if(filler != 0)
+ 		{
+-			packet.data = std::move(m_asyncFree.back());
+-			m_asyncFree.pop_back();
++			auto skip = reinterpret_cast<ASYNC_RECORD*>(m_asyncRing + offset);
++			skip->size = filler;
++			skip->flags = ASYNC_RECORD_SKIP;
++			write += filler;
++			offset = 0;
+ 		}
+-		packet.data.assign(data, data + size);
+-		packet.tagIncluded = tagIncluded;
+-		m_asyncQueue.push_back(std::move(packet));
++		auto record = reinterpret_cast<ASYNC_RECORD*>(m_asyncRing + offset);
++		record->size = size;
++		record->flags = tagIncluded ? ASYNC_RECORD_TAG : 0;
++		std::memcpy(record + 1, data, size);
+ 	}
+ 	g_asyncStats.packets.fetch_add(1, std::memory_order_relaxed);
+ 	m_asyncQueued.fetch_add(1, std::memory_order_acq_rel);
++	m_asyncWrite.store(write + need, std::memory_order_release);
++	EmuProfile::CScope wakeScope(EmuProfile::SECTION_VIF_WAKE);
+ 	WakeWorker();
+ }
+ 
+@@ -315,7 +402,7 @@
+ void CVpu::WaitAsyncQuiet()
+ {
+ 	if(IsAsyncQuiet()) return;
+-	EmuProfile::CScope profileScope(EmuProfile::SECTION_VU1);
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_VU1_QUIET);
+ 	auto start = std::chrono::steady_clock::now();
+ 	for(uint32 spins = 0; !IsAsyncQuiet(); spins++)
+ 	{
+@@ -333,7 +420,7 @@
+ void CVpu::Sync()
+ {
+ 	if(!m_threaded) return;
+-	EmuProfile::CScope profileScope(EmuProfile::SECTION_VU1);
++	EmuProfile::CScope profileScope(EmuProfile::SECTION_VU1_SYNC);
+ 	if(!IsWorkerIdle())
+ 	{
+ 		auto waitStart = std::chrono::steady_clock::now();
+@@ -660,6 +747,7 @@
+ 	assert(m_vuState != VU_STATE_RUNNING);
+ 	if(g_programReplacement && (m_number == 1))
+ 	{
++		EmuProfile::CScope hleScope(EmuProfile::SECTION_VU1_HLE);
+ 		if(auto custom = g_programReplacement(*this, nAddress))
+ 		{
+ 			if(m_threaded)
+@@ -708,6 +796,7 @@
+ 	auto statsStart = stats ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+ 	for(unsigned int i = 0; i < 100; i++)
+ 	{
++		EmuProfile::CScope jitScope(EmuProfile::SECTION_VU1_JIT);
+ 		ExecuteInternal(5000);
+ 		if(m_vuState != VU_STATE_RUNNING) break;
+ 	}
+diff --git a/Source/ee/Ee_SubSystem.h b/Source/ee/Ee_SubSystem.h
+--- a/Source/ee/Ee_SubSystem.h
++++ b/Source/ee/Ee_SubSystem.h
+@@ -33,6 +33,11 @@
+ 		//ExecuteCpu handles kernel calls and interrupt checks and goes on with its quota
+ 		//instead of returning after each one (on by default)
+ 		static inline bool g_stayInSlice = true;
++		//Threaded VU1: wait (up to 20 ms) for the worker to finish what is queued at each
++		//vblank start (on by default). Off: the EE goes on preparing the next frame while
++		//VU1 works; games that wait for their drawing do it through VIF1 status or GS
++		//FINISH/SIGNAL, which still wait for the worker (vu1_vblank_sync)
++		static inline bool g_vblankVu1Sync = true;
+ 		void CountTicks(int);
+ 
+ 		void NotifyVBlankStart();
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -399,7 +399,7 @@
+ 	//Frames are complete when displayed: give a threaded VU1 some time to
+ 	//finish. Not indefinitely: a program can run until VIF1 (driven by the
+ 	//EE) delivers more data, which would deadlock.
+-	m_vpu1->SyncFor(20);
++	if(g_vblankVu1Sync) m_vpu1->SyncFor(20);
+ 	m_timer.NotifyVBlankStart();
+ 	m_intc.AssertLine(CINTC::INTC_LINE_VBLANK_START);
+ 	m_os->GetLibMc2().NotifyVBlankStart();
+diff --git a/Source/gs/GSHandler.h b/Source/gs/GSHandler.h
+--- a/Source/gs/GSHandler.h
++++ b/Source/gs/GSHandler.h
+@@ -947,7 +947,7 @@
+ 
+ 	enum
+ 	{
+-		REGISTERWRITEBUFFER_SIZE = 0x80000, //entries per vblank (Resident Evil 4 gameplay: about 60,000)
++		REGISTERWRITEBUFFER_SIZE = 0x60000, //entries per vblank, 6 MB (Resident Evil 4 gameplay: at most 116,000 measured; overflows counted)
+ 		REGISTERWRITEBUFFER_SUBMIT_THRESHOLD = 0x100
+ 	};
+ 
