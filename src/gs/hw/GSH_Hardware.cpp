@@ -2532,10 +2532,10 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 		return;
 	}
 	//Whole GPU world path for this batch, draw included (gpu_parts' world value, G0)
-	struct WORLD_TIMER
+	struct WORLD_TIMER //clock reads only with fine_timers: two per batch cost ~2,000 a game frame
 	{
-		uint64 start = NowUs();
-		~WORLD_TIMER() { g_worldUs += NowUs() - start; }
+		uint64 start = g_fineTimers ? NowUs() : 0;
+		~WORLD_TIMER() { if(g_fineTimers) g_worldUs += NowUs() - start; }
 	} worldTimer;
 	bool drawing = BeginBatchStrip();
 	if(drawing && !m_stateApplied) ApplyState();
@@ -2575,6 +2575,7 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 			EndBatchStrip(nullptr, last);
 		return;
 	}
+	GsProfile::CScope skinSection(batch.clipSpace ? GsProfile::SECTION_WORLD_SKIN : GsProfile::SECTION_WORLD);
 	//The slot path's own time (W2 diagnostics: with the retained path on, the batches it left)
 	struct SLOT_TIMER
 	{
@@ -2931,6 +2932,7 @@ bool CGSH_Hardware::BuildRetainedProgram()
 
 bool CGSH_Hardware::DrawRetainedWorld(const Re4Vu1::WORLD_BATCH& batch)
 {
+	GsProfile::CScope retainedSection(GsProfile::SECTION_WORLD_RETAINED);
 	if(!BuildRetainedProgram()) return false;
 	uint64 segment = g_fineTimers ? NowUs() : 0; //W2 diagnostics: time per step (g_retainedSegmentUs, fine_timers)
 	auto mark = [&segment](int index) { if(!g_fineTimers) return; uint64 now = NowUs(); g_retainedSegmentUs[index] += now - segment; segment = now; };
@@ -3348,8 +3350,8 @@ void CGSH_Hardware::ApplyState()
 	struct REG_TIMER
 	{
 		uint64& total;
-		uint64 start = NowUs();
-		~REG_TIMER() { total += NowUs() - start; }
+		uint64 start = g_fineTimers ? NowUs() : 0;
+		~REG_TIMER() { if(g_fineTimers) total += NowUs() - start; }
 	} regTimer{g_regSplitUs[0]}; //register path split (perf.csv reg_split)
 	g_applyStateCalls++;
 	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
@@ -4152,8 +4154,8 @@ void CGSH_Hardware::FlushBatch()
 	struct REG_TIMER
 	{
 		uint64& total;
-		uint64 start = NowUs();
-		~REG_TIMER() { total += NowUs() - start; }
+		uint64 start = g_fineTimers ? NowUs() : 0;
+		~REG_TIMER() { if(g_fineTimers) total += NowUs() - start; }
 	} regTimer{g_regSplitUs[1]}; //register path split (perf.csv reg_split)
 	CStageTimer stageTimer(GPU_STAGE_GL);
 	FlushWorld();

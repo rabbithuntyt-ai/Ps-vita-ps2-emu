@@ -28,7 +28,7 @@ own notes (`docs/PERF_WORK_NOT_DONE.md`, `docs/PATH_TO_30FPS.md`).
 
 ## Where RE4 stands (24 Nov 2026)
 
-- **About 3.3 game fps in steady gameplay since GPU skinning** (3.28-3.34; 2.81-3.25 before it,
+- **About 3.4 game fps in steady gameplay since GPU skinning** (3.36-3.45; 2.81-3.25 before it,
   measured from the perf.csv timestamps from 25 s on), **2.6-2.9 over a whole run** (290-323 game frames in about
   111 s of rows, including about 14 s of state loading with no game frames). The game targets 30:
   about 10x. The emulated machine runs at about 9 of 60 vblanks a second.
@@ -107,7 +107,7 @@ Status of each item of the external review ("PS Vita PS2 Emulator Performance Ro
 | Priority 0: frame counter, timer window, profiler buckets | Done | Rates corrected (rows are 1.10 s apart); sections exclusive and summing to wall time (`tools/perf_audit.py`) |
 | Priority 1: GS command caching | Not viable for RE4 | 89% of register writes are skinned vertices, 0.2% repeated; the repeated DIRECT data is texture uploads |
 | Priority 1: GPU-resident GS memory | Tried earlier in three forms, not kept | Dirty bands, stale-row uploads, stale-row GPU copies: read-backs move rather than vanish (RE4 reuses its blur buffer memory in another layout each frame), one form crashed, one drew wrong rows |
-| Priority 2: VU1 to GPU | **Built for RE4's skinning (`gpu_skin`, on in RE4's profile): +15%** | See "GPU skinning" below: 3.28-3.34 game fps against 2.81-2.90 |
+| Priority 2: VU1 to GPU | **Built for RE4's skinning (`gpu_skin`, on in RE4's profile): +15-19%** | See "GPU skinning" below: 3.36-3.45 game fps against 2.81-2.90 |
 | Priority 3: EE trace compilation | Partly measured | 23 ARM instructions per EE instruction, 77% the instructions' own work; LQC2/SQC2 fused with no measurable change; cross-block register retention not built |
 | Priority 4: dependency scheduling | Not promising now | The VU1 worker is idle 133-152 ms per game frame and the emulation thread is the limit; moving work between threads was tried twice (E1, IOP on core 3) and lost |
 | Priority 5: reduced precision, title-specific | Used where exact enough | RE4's world (0.10-0.15% pixels differ) and skinning (bit exact) are already title-specific |
@@ -159,6 +159,16 @@ shader on the Vita, so this likely needs a Cg shader); float rounding in the lig
 - **First version, kept off:** batches with one bone matrix only, each drawn with its own matrix
   uniform: +2%, because every batch became its own GL draw on the Vita (one matrix slot per
   draw there).
+- **Then:** the blended bone matrix made once per run of vertices sharing a bone list (same
+  arithmetic; the worker's skinning 88-92 to 50-67 ms per game frame), and the per-batch clock
+  reads of the world and register timers only with `fine_timers`. With RE4's profile (`gpu_skin`
+  on): **3.36, 3.45, 3.40, 3.44 game fps** in four runs (R13c/d, R15a/b).
+- **Where a game frame goes now (R15, ~290 ms):** emulation thread: game code 91-92, waiting for
+  the GS thread 33-44, waiting for VU1 22-25, VIF1 queueing 35-39, DIRECT relay 17, world and skin
+  batch submits 11-13, DMA register writes 11-12, IOP 17-21, SPU 6, other 5: **about 240 ms of
+  its own work, the limit now.** GS thread: image data and other 54, flush 30, world batches 30
+  (plus retained 13, skinning 16), targets 26, read-backs 26, uploads 20, textures 19, idle 18.
+  VU1 worker: idle 94-109.
 
 ## Work done and kept
 

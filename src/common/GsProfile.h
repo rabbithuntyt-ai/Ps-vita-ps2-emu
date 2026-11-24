@@ -26,12 +26,14 @@ namespace GsProfile
 		SECTION_TRANSFER,  //host to local transfers handled by the renderer
 		SECTION_WORLD,     //RE4 world batches
 		SECTION_DISPLAY,   //flips
+		SECTION_WORLD_RETAINED, //of world: retained batches (lookup, uniforms, merge)
+		SECTION_WORLD_SKIN,     //of world: projected skinning batches (vertices into the slot)
 		SECTION_COUNT
 	};
 
 	inline const char* GetSectionName(unsigned int section)
 	{
-		static const char* names[SECTION_COUNT] = {"idle", "other", "registers", "vertex", "primitive", "addvertex", "state", "texture", "target", "flush", "upload", "download", "transfer", "world", "display"};
+		static const char* names[SECTION_COUNT] = {"idle", "other", "registers", "vertex", "primitive", "addvertex", "state", "texture", "target", "flush", "upload", "download", "transfer", "world", "display", "worldRet", "worldSkin"};
 		return (section < SECTION_COUNT) ? names[section] : "?";
 	}
 
