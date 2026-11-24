@@ -286,7 +286,8 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--skin-verify")) CVpu::g_programHook = Re4Skin::VerifyHook; //skinverify.txt (inline VU1)
 		else if(!std::strcmp(argv[i], "--skin-model")) Re4Skin::g_modelCheck = true; //native skinning against a plain float model
 		else if(!std::strcmp(argv[i], "--skin-sparse-state")) Re4Skin::g_sparseState = true; //experiment: skinning leaves only cheap registers
-		else if(!std::strcmp(argv[i], "--gpu-skin")) Re4Skin::g_gpuSkin = true; //one-matrix skinning batches through the GPU world path (gpu_skin)
+		else if(!std::strcmp(argv[i], "--gpu-skin")) Re4Skin::g_gpuSkin = true; //skinning batches through the GPU world path (gpu_skin)
+		else if(!std::strcmp(argv[i], "--no-group-submit")) Re4Vu1Hle::g_groupSubmit = false; //one GS call per world batch (group_submit=0)
 		else if(!std::strcmp(argv[i], "--vu-scalar-opmul")) VUShared::g_vectorOuterProduct = false; //old OPMULA/OPMSUB
 		else if(!std::strcmp(argv[i], "--vu-no-loop-variant")) CVuBasicBlock::g_loopVariant = false;      //no loop copy of self-looping VU blocks
 		else if(!std::strcmp(argv[i], "--vu-no-clamp")) CVuBasicBlock::g_extraCompileHints |= VUShared::COMPILEHINT_NO_CLAMPING; //vu_no_clamp

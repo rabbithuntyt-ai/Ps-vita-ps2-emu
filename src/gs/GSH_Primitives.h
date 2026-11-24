@@ -1,6 +1,8 @@
 #pragma once
 
 #include "gs/GSHandler.h"
+#include <vector>
+#include <memory>
 #include "SoftwareRasterizer.h"
 #include "Re4Vu1Batch.h"
 
@@ -34,6 +36,16 @@ public:
 	// VU1 (Re4Vu1Hle). Same registers, kicks and draws as the program's GIF packet, but
 	// triangles crossing the clip volume are clipped here (the program's clipping routine).
 	virtual void DrawWorldBatch(const Re4Vu1::WORLD_BATCH&);
+	// A group of batches in order, each after the PRIM its GIF tag sets (PRE), as the register
+	// write before it would have
+	void DrawWorldBatches(const std::vector<std::shared_ptr<Re4Vu1::WORLD_BATCH>>& batches)
+	{
+		for(const auto& batch : batches)
+		{
+			if((batch->tagLow >> 46) & 1) WriteRegisterImpl(GS_REG_PRIM, (batch->tagLow >> 47) & 0x7FF);
+			DrawWorldBatch(*batch);
+		}
+	}
 	static inline uint64 g_worldBatches = 0, g_worldVertices = 0, g_worldClipped = 0;
 	static inline uint64 g_stripBreaks[3] = {}; //diagnostics: new PRIM, state change, kick without drawing
 	static inline uint64 g_dirtyBy[256] = {};   //diagnostics: register writes that changed the state

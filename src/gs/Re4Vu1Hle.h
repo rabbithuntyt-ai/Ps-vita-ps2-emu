@@ -13,4 +13,7 @@ namespace Re4Vu1Hle
 	bool IsEnabled();
 	// W2: hash each batch's data where it is built (the retained world path's key)
 	inline bool g_hashBatches = false;
+	// A run of consecutive batches in the kick queue goes to the GS thread as one call (on;
+	// group_submit, PC --no-group-submit): one call per batch was ~2,100 a game frame
+	inline bool g_groupSubmit = true;
 }

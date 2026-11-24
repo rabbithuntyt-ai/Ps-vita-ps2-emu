@@ -395,6 +395,8 @@ namespace
 		else if(key == "re4_vu1_hle") Re4Vu1Hle::Enable(value != 0); //RE4: world vertex program without VU1
 		else if(key == "gs_frames_ahead") CGSHandler::g_framesAhead = value; //vblanks the emulation thread may lead the GS thread (2-4)
 		else if(key == "re4_skin") CVpu::g_nativeProgram = (value != 0) ? std::function<bool(CVpu&, uint32)>(Re4Skin::Run) : nullptr; //RE4: skinning programs natively
+		else if(key == "group_submit") Re4Vu1Hle::g_groupSubmit = value != 0; //consecutive world/skin batches as one GS call (on)
+		else if(key == "fast_scope") EmuProfile::g_fastScope = value != 0; //profiler scopes find their thread by the thread register (on)
 		else if(key == "gpu_skin") Re4Skin::g_gpuSkin = value != 0; //RE4: one-matrix skinning batches drawn by the GPU world path (off)
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
@@ -809,6 +811,30 @@ namespace
 				//Code paths only this build runs (NEON): checked here against the plain ones
 				std::fprintf(selfTest, "psmt4 blocks: %u of 2000 differ\n", GsTransferWrite::SelfTestPsmt4Blocks(2000));
 				std::fprintf(selfTest, "target pixels: %u of 100 differ\n", TargetPixels::SelfTest(100));
+				{
+					//Profiler scope cost: thread_local (emulated on the Vita) against the thread register
+					uintptr_t savedKey = EmuProfile::g_eeThreadKey;
+					bool savedFast = EmuProfile::g_fastScope;
+					EmuProfile::g_eeThreadKey = EmuProfile::CurrentThreadKey();
+					double us[2] = {};
+					for(int fast = 0; fast < 2; fast++)
+					{
+						EmuProfile::g_fastScope = (fast != 0);
+						uint64_t start = sceKernelGetProcessTimeWide();
+						for(int i = 0; i < 200000; i++)
+						{
+							EmuProfile::CScope scope(EmuProfile::SECTION_VIF_QUEUE);
+							__asm__ volatile("" ::: "memory");
+						}
+						us[fast] = static_cast<double>(sceKernelGetProcessTimeWide() - start);
+					}
+					uintptr_t otherKey = 0;
+					std::thread([&otherKey]() { otherKey = EmuProfile::CurrentThreadKey(); }).join();
+					std::fprintf(selfTest, "profiler scope: thread_local %.0f ns, thread register %.0f ns; keys main %08X other %08X\n", us[0] * 1000.0 / 200000,
+					             us[1] * 1000.0 / 200000, static_cast<unsigned>(EmuProfile::g_eeThreadKey), static_cast<unsigned>(otherKey));
+					EmuProfile::g_eeThreadKey = savedKey;
+					EmuProfile::g_fastScope = savedFast;
+				}
 				std::fclose(selfTest);
 			}
 			if(perfFile)

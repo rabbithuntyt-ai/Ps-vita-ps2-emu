@@ -1,0 +1,116 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -76,6 +76,38 @@
+ 	//its unpack and program time showed as the EE thread's
+ 	inline std::atomic<uint8> g_vu1Section{SECTION_LIMITER};
+ 	inline thread_local std::atomic<uint8>* t_section = &g_section;
++	//The current thread's section without thread_local: on the Vita thread_local is emulated (a
++	//call into the runtime and a walk of its key list at every access), so the emulation thread,
++	//the VU1 worker and the IOP thread register the thread register TPIDRURO (one instruction to
++	//read) and a scope compares it with them; any other thread goes through t_section
++	inline uintptr_t g_eeThreadKey = 0, g_vu1ThreadKey = 0, g_iopThreadKey = 0;
++	inline bool g_fastScope = true; //fast_scope (Vita)
++	inline uintptr_t CurrentThreadKey()
++	{
++#if defined(__vita__)
++		uintptr_t value;
++		__asm__ volatile("mrc p15, 0, %0, c13, c0, 3" : "=r"(value));
++		return value;
++#else
++		return 0;
++#endif
++	}
++	inline std::atomic<uint8>& CurrentSection()
++	{
++#if defined(__vita__)
++		if(g_fastScope)
++		{
++			uintptr_t key = CurrentThreadKey();
++			if(key != 0)
++			{
++				if(key == g_eeThreadKey) return g_section;
++				if(key == g_vu1ThreadKey) return g_vu1Section;
++				if(key == g_iopThreadKey) return g_iopSection;
++			}
++		}
++#endif
++		return *t_section;
++	}
+ 	// Time the emulation thread sleeps, in microseconds.
+ 	inline std::atomic<uint64_t> g_discReadUs{0};
+ 	inline std::atomic<uint64_t> g_discReads{0};
+@@ -167,7 +199,7 @@
+ 	{
+ 	public:
+ 		explicit CScope(SECTION section)
+-		    : m_target(*t_section)
++		    : m_target(CurrentSection())
+ 		    , m_previous(m_target.load(std::memory_order_relaxed))
+ 		{
+ 			m_target.store(section, std::memory_order_relaxed);
+diff --git a/Source/PS2VM.cpp b/Source/PS2VM.cpp
+--- a/Source/PS2VM.cpp
++++ b/Source/PS2VM.cpp
+@@ -1080,6 +1080,7 @@
+ 
+ void CPS2VM::EmuThread()
+ {
++	EmuProfile::g_eeThreadKey = EmuProfile::CurrentThreadKey();
+ 	CreateVM();
+ 	fesetround(FE_TOWARDZERO);
+ 	FpUtils::SetDenormalHandlingMode();
+@@ -1239,6 +1240,7 @@
+ {
+ 	ParallelIop::t_iopThread = true;
+ 	EmuProfile::t_section = &EmuProfile::g_iopSection;
++	EmuProfile::g_iopThreadKey = EmuProfile::CurrentThreadKey();
+ 	if(g_iopThreadInit) g_iopThreadInit();
+ 	auto& s = ParallelIop::g_state;
+ 	s.workerStage = 1;
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -174,6 +174,7 @@
+ 	{
+ 		//Busy time not marked otherwise is the program (VU1)
+ 		EmuProfile::t_section = &EmuProfile::g_vu1Section;
++		EmuProfile::g_vu1ThreadKey = EmuProfile::CurrentThreadKey();
+ 		EmuProfile::g_vu1Section.store(EmuProfile::SECTION_VU1, std::memory_order_relaxed);
+ 	}
+ 	while(!m_stopWorker)
+@@ -538,6 +539,21 @@
+ 		{
+ 			if(activePath != 0) return;
+ 			EmuProfile::CScope customScope(EmuProfile::SECTION_RELAY_CUSTOM);
++			if(g_customKickSubmitGroup)
++			{
++				//The run of custom kicks at the front of the queue, as one group
++				std::vector<std::shared_ptr<void>> group;
++				{
++					std::lock_guard<std::mutex> lock(m_kickMutex);
++					while(!m_pendingKicks.empty() && m_pendingKicks.front().custom && (group.size() < 64))
++					{
++						group.push_back(std::move(m_pendingKicks.front().custom));
++						m_pendingKicks.pop_front();
++					}
++				}
++				g_customKickSubmitGroup(m_gif, group);
++				continue;
++			}
+ 			g_customKickSubmit(m_gif, kick->custom);
+ 			std::lock_guard<std::mutex> lock(m_kickMutex);
+ 			m_pendingKicks.pop_front();
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -179,6 +179,9 @@
+ 	//g_customKickSubmit in order with the XGKICK packets, as the program's output would.
+ 	static inline std::function<std::shared_ptr<void>(CVpu&, uint32 address)> g_programReplacement;
+ 	static inline std::function<void(CGIF&, const std::shared_ptr<void>&)> g_customKickSubmit;
++	//When set: a run of consecutive custom kicks in the queue goes to this as one group (one GS
++	//call instead of one per kick)
++	static inline std::function<void(CGIF&, std::vector<std::shared_ptr<void>>&)> g_customKickSubmitGroup;
+ 	//For a native program (g_nativeProgram) that hands its output over in g_customKickSubmit's
+ 	//form instead of XGKICK packets: queued in order with the packets (VU1 worker), or submitted
+ 	//at once (inline VU1)

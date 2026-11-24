@@ -97,11 +97,32 @@ namespace
 	}
 }
 
+namespace
+{
+	// A run of batches from the kick queue: the register writes before it, then one GS call
+	void SubmitGroup(CGIF& gif, std::vector<std::shared_ptr<void>>& group)
+	{
+		if(!Re4Vu1Hle::g_groupSubmit)
+		{
+			for(auto& item : group) Submit(gif, item);
+			return;
+		}
+		auto gs = gif.GetGsHandler();
+		gs->ProcessWriteBuffer(nullptr);
+		std::vector<std::shared_ptr<Re4Vu1::WORLD_BATCH>> batches;
+		batches.reserve(group.size());
+		for(auto& item : group) batches.push_back(std::static_pointer_cast<Re4Vu1::WORLD_BATCH>(item));
+		auto primitives = static_cast<CGSH_Primitives*>(gs);
+		gs->SubmitWriteBufferThen([primitives, batches = std::move(batches)]() { primitives->DrawWorldBatches(batches); });
+	}
+}
+
 void Re4Vu1Hle::Enable(bool enabled)
 {
 	g_enabled = enabled;
 	CVpu::g_programReplacement = enabled ? std::function<std::shared_ptr<void>(CVpu&, uint32)>(Replace) : nullptr;
 	CVpu::g_customKickSubmit = enabled ? std::function<void(CGIF&, const std::shared_ptr<void>&)>(Submit) : nullptr;
+	CVpu::g_customKickSubmitGroup = enabled ? std::function<void(CGIF&, std::vector<std::shared_ptr<void>>&)>(SubmitGroup) : nullptr;
 }
 
 bool Re4Vu1Hle::IsEnabled()
