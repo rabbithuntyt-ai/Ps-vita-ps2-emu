@@ -277,6 +277,8 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-world-merge")) CGSH_Hardware::g_retainedMerge = false; //gpu_world_merge=0
 		else if(!std::strcmp(argv[i], "--no-vu1-vblank-sync")) Ee::CSubSystem::g_vblankVu1Sync = false; //vu1_vblank_sync=0
 		else if(!std::strcmp(argv[i], "--no-fast-packed")) CGIF::g_fastPacked = false; //gif_fast_packed=0
+		else if(!std::strcmp(argv[i], "--no-bulk-unpack")) CVif::g_bulkUnpack = false; //bulk_unpack=0
+		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
 		else if(!std::strcmp(argv[i], "--no-merged-submit")) CGSHandler::g_mergedSubmit = false; //gs_merged_submit=0
 		else if(!std::strcmp(argv[i], "--no-fast-registers")) CGSH_Primitives::g_fastRegisters = false; //gs_fast_registers=0
 		else if(!std::strcmp(argv[i], "--re4-skin")) CVpu::g_nativeProgram = Re4Skin::Run; //RE4 skinning programs natively (re4_skin)
@@ -633,6 +635,23 @@ int main(int argc, char** argv)
 			            a.bytes.load() / 1048576.0, (unsigned long long)a.stalls.load(), (unsigned long long)a.quietWaits.load(), a.quietWaitUs.load() / 1000.0, (unsigned long long)a.path3Syncs.load());
 			std::printf("relay: %llu kicks (%.1f MB), %llu DIRECT (%.1f MB), %llu replaced; %llu register writes\n",(unsigned long long)a.kicks.load(), a.kickBytes.load() / 1048576.0,
 			            (unsigned long long)a.directs.load(), a.directBytes.load() / 1048576.0, (unsigned long long)a.customs.load(), (unsigned long long)CGSHandler::g_writeBufferTotal);
+			std::printf("unpacked by runs: %llu values\n", (unsigned long long)CVif::g_bulkValues);
+			if(Ee::CSubSystem::g_ioCounts)
+			{
+				//The 20 busiest EE I/O register slots
+				std::vector<std::pair<uint64, uint32>> slots;
+				for(uint32 i = 0; i < 4098; i++)
+					if(Ee::CSubSystem::g_ioCount[0][i] + Ee::CSubSystem::g_ioCount[1][i]) slots.emplace_back(Ee::CSubSystem::g_ioCount[0][i] + Ee::CSubSystem::g_ioCount[1][i], i);
+				std::sort(slots.rbegin(), slots.rend());
+				std::printf("EE I/O by register (reads/writes):");
+				for(size_t n = 0; n < std::min<size_t>(slots.size(), 20); n++)
+				{
+					uint32 i = slots[n].second;
+					uint32 address = (i < 4096) ? (0x10000000 + i * 16) : (i == 4096) ? 0x12000000 : 0;
+					std::printf(" %08X:%llu/%llu(%.0f/%.0fns)", address, (unsigned long long)Ee::CSubSystem::g_ioCount[0][i], (unsigned long long)Ee::CSubSystem::g_ioCount[1][i], Ee::CSubSystem::g_ioNs[0][i] / std::max(1.0, double(Ee::CSubSystem::g_ioCount[0][i])), Ee::CSubSystem::g_ioNs[1][i] / std::max(1.0, double(Ee::CSubSystem::g_ioCount[1][i])));
+				}
+				std::printf("\n");
+			}
 		}
 #ifdef VITAPS2_HAS_GL
 		if(Re4Vu1Hle::IsEnabled())

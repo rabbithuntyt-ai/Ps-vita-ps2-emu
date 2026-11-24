@@ -1,0 +1,276 @@
+diff --git a/Source/EmuProfile.h b/Source/EmuProfile.h
+--- a/Source/EmuProfile.h
++++ b/Source/EmuProfile.h
+@@ -55,12 +55,17 @@
+ 		SECTION_VIF_UNLOCK,   //EE thread, queueing VIF1 data: releasing the lock
+ 		SECTION_VU1_SYNC,     //EE thread: waiting for the VU1 worker to finish (CVpu::Sync)
+ 		SECTION_VU1_QUIET,    //EE thread: waiting for VIF1 to go quiet (CVpu::WaitAsyncQuiet)
++		SECTION_EE_IO_TIMER,  //EE I/O: timer registers
++		SECTION_EE_IO_INTC,   //EE I/O: interrupt controller registers
++		SECTION_EE_IO_DMA,    //EE I/O: DMA controller registers
++		SECTION_EE_IO_GS,     //EE I/O: GS privileged registers
++		SECTION_EE_IO_WAIT,   //EE I/O: the wait loop check after a status register read
+ 		SECTION_COUNT
+ 	};
+ 
+ 	inline const char* GetSectionName(unsigned int section)
+ 	{
+-		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle", "SPUsync", "SPUread", "VIFdirect", "VIFunpack", "EEio", "EEkernel", "EEticks", "IOPio", "IOPkernel", "IOPticks", "IOPcounters", "IOPbios", "IOPdma", "IOPwait", "IOPdrain", "IOPlag", "IOPpark", "VU1relay", "VIFqueue", "VU1native", "VU1kick", "relayDirect", "relayWorld", "VU1hle", "VIFcmd", "VU1jit", "VIFlock", "VIFwake", "VIFcopy", "VIFunlock", "VU1sync", "VU1quiet"};
++		static const char* names[SECTION_COUNT] = {"other", "EE", "VU0", "VU1", "IOP", "SPU", "VIF", "GIF", "IPU", "SIF", "JIT", "GSwait", "idle", "SPUsync", "SPUread", "VIFdirect", "VIFunpack", "EEio", "EEkernel", "EEticks", "IOPio", "IOPkernel", "IOPticks", "IOPcounters", "IOPbios", "IOPdma", "IOPwait", "IOPdrain", "IOPlag", "IOPpark", "VU1relay", "VIFqueue", "VU1native", "VU1kick", "relayDirect", "relayWorld", "VU1hle", "VIFcmd", "VU1jit", "VIFlock", "VIFwake", "VIFcopy", "VIFunlock", "VU1sync", "VU1quiet", "EEioTimer", "EEioIntc", "EEioDma", "EEioGs", "EEioWait"};
+ 		return (section < SECTION_COUNT) ? names[section] : "?";
+ 	}
+ 
+diff --git a/Source/ee/Vif.h b/Source/ee/Vif.h
+--- a/Source/ee/Vif.h
++++ b/Source/ee/Vif.h
+@@ -10,6 +10,9 @@
+ #include "zip/ZipArchiveWriter.h"
+ #include "zip/ZipArchiveReader.h"
+ #include "SimdDefs.h"
++#if defined(__ARM_NEON) || defined(__ARM_NEON__)
++#include <arm_neon.h>
++#endif
+ 
+ #ifdef FRAMEWORK_SIMD_USE_SSE
+ #include <emmintrin.h>
+@@ -215,6 +218,33 @@
+ 			}
+ 		}
+ 
++		//Bulk reads (unpacks): once the 16-byte buffer is used up, the rest of the transfer is
++		//contiguous in the source. GetDirectBytes is 0 while the buffer still holds bytes.
++		inline uint32 GetDirectBytes() const
++		{
++			return ((m_bufferPosition >= BUFFERSIZE) && !m_tagIncluded) ? (m_endAddress - m_nextAddress) : 0;
++		}
++		inline const uint8* GetDirectReadPointer() const
++		{
++			return m_source + m_nextAddress;
++		}
++		//After reading 'bytes' at GetDirectReadPointer: a partly read qword goes back into the
++		//buffer, as the per value reads would have left it
++		inline void ConsumeDirect(uint32 bytes)
++		{
++			uint32 next = m_nextAddress + bytes;
++			if((next & 0x0F) == 0)
++			{
++				m_nextAddress = next;
++				m_bufferPosition = BUFFERSIZE;
++				return;
++			}
++			uint32 qword = next & ~0x0FU;
++			m_buffer = *reinterpret_cast<const uint128*>(&m_source[qword]);
++			m_nextAddress = qword + 0x10;
++			m_bufferPosition = next & 0x0F;
++		}
++
+ 		void Flush();
+ 		inline void Align32();
+ 		void SetDmaParams(uint32, uint32, bool);
+@@ -337,6 +367,14 @@
+ 	virtual void ExecuteCommand(StreamType&, CODE);
+ 	virtual void Cmd_UNPACK(StreamType&, CODE, uint32);
+ 
++public:
++	//V4-32/V4-16 unpacks without a mask read runs of values from the source (on; bulk_unpack)
++	static inline bool g_bulkUnpack = true;
++	static inline bool g_bulkUnpackNeon = true; //the NEON widening in it (bulk_unpack_neon; off: plain C)
++	static inline uint64 g_bulkValues = 0; //values unpacked by runs (diagnostics, not atomic)
++
++protected:
++
+ 	void Cmd_MPG(StreamType&, CODE);
+ 	void Cmd_STROW(StreamType&, CODE);
+ 	void Cmd_STCOL(StreamType&, CODE);
+@@ -606,6 +644,53 @@
+ 				uint32 tick = m_writeTick;
+ 				while(currentNum != 0)
+ 				{
++					//V4-32 and V4-16 without a mask (RE4: ~650,000 values per game frame): runs of
++					//values straight from the source once the stream's buffer is used up
++					if constexpr(!useMask && ((dataType == 0x0C) || (dataType == 0x0D)))
++					{
++						constexpr uint32 valueSize = (dataType == 0x0C) ? 16 : 8;
++						uint32 direct = g_bulkUnpack ? stream.GetDirectBytes() : 0;
++						uint32 count = std::min<uint32>(currentNum, direct / valueSize);
++						//A partly read last qword must lie inside the transfer (ConsumeDirect)
++						if((count != 0) && ((count * valueSize) & 0x0F) && (direct < ((count * valueSize + 0x0F) & ~0x0FU))) count--;
++						if(count != 0)
++						{
++							const uint8* source = stream.GetDirectReadPointer();
++							for(uint32 n = 0; n < count; n++)
++							{
++								auto dst = reinterpret_cast<uint128*>(vuMem + nDstAddr);
++								if constexpr(dataType == 0x0C)
++								{
++									memcpy(dst, source, 16);
++								}
++								else
++								{
++#if defined(__ARM_NEON) || defined(__ARM_NEON__)
++									if(g_bulkUnpackNeon)
++									{
++										uint16x4_t values = vld1_u16(reinterpret_cast<const uint16_t*>(source));
++										uint32x4_t wide = usn ? vmovl_u16(values) : vreinterpretq_u32_s32(vmovl_s16(vreinterpret_s16_u16(values)));
++										vst1q_u32(reinterpret_cast<uint32_t*>(dst), wide);
++									}
++									else
++#endif
++									{
++										uint16 values[4];
++										memcpy(values, source, 8);
++										for(unsigned int i = 0; i < 4; i++)
++											dst->nV[i] = usn ? static_cast<uint32>(values[i]) : static_cast<uint32>(static_cast<int32>(static_cast<int16>(values[i])));
++									}
++								}
++								source += valueSize;
++								nDstAddr = (nDstAddr + 0x10) & (vuMemSize - 1);
++							}
++							stream.ConsumeDirect(count * valueSize);
++							g_bulkValues += count;
++							currentNum -= count;
++							tick = (tick + count) % cl;
++							continue;
++						}
++					}
+ 					uint128 writeValue;
+ 					memset(&writeValue, 0, sizeof(writeValue)); //V2/V3 fill only some lanes
+ 					if(!Unpack_ReadValue<dataType, usn>(stream, writeValue)) break;
+diff --git a/Source/ee/Ee_SubSystem.cpp b/Source/ee/Ee_SubSystem.cpp
+--- a/Source/ee/Ee_SubSystem.cpp
++++ b/Source/ee/Ee_SubSystem.cpp
+@@ -1,3 +1,4 @@
++#include <chrono>
+ #include "Ee_SubSystem.h"
+ #include "../ParallelIop.h"
+ #include "EeExecutor.h"
+@@ -524,9 +525,32 @@
+ 	}
+ }
+ 
++namespace
++{
++	//Diagnostics (g_ioCounts): accesses and time per I/O register slot
++	struct IO_TIMER
++	{
++		uint64* ns = nullptr;
++		std::chrono::steady_clock::time_point start;
++		void Start(int write, uint32 address)
++		{
++			uint32 slot = ((address & 0xFFFF0000) == 0x10000000) ? ((address & 0xFFFF) >> 4) : ((address & 0xFF000000) == 0x12000000) ? 4096 : 4097;
++			Ee::CSubSystem::g_ioCount[write][slot]++;
++			ns = &Ee::CSubSystem::g_ioNs[write][slot];
++			start = std::chrono::steady_clock::now();
++		}
++		~IO_TIMER()
++		{
++			if(ns) *ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
++		}
++	};
++}
++
+ uint32 CSubSystem::IOPortReadHandler(uint32 nAddress)
+ {
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_EE_IO);
++	IO_TIMER ioTimer;
++	if(g_ioCounts) ioTimer.Start(0, nAddress);
+ 	uint32 nReturn = 0;
+ 	//The IPU works in parallel with the EE: a game polling it (or the DMA
+ 	//channels feeding it) must see the progress that is already possible,
+@@ -542,7 +566,7 @@
+ 	}
+ 	if(nAddress >= 0x10000000 && nAddress <= 0x1000183F)
+ 	{
+-		nReturn = m_timer.GetRegister(nAddress);
++		EmuProfile::CScope ioScope(EmuProfile::SECTION_EE_IO_TIMER); nReturn = m_timer.GetRegister(nAddress);
+ 	}
+ 	else if(nAddress >= 0x10002000 && nAddress <= 0x1000203F)
+ 	{
+@@ -562,15 +586,15 @@
+ 	}
+ 	else if(nAddress >= 0x10008000 && nAddress <= 0x1000EFFC)
+ 	{
+-		nReturn = m_dmac.GetRegister(nAddress);
++		EmuProfile::CScope ioScope(EmuProfile::SECTION_EE_IO_DMA); nReturn = m_dmac.GetRegister(nAddress);
+ 	}
+ 	else if(nAddress >= 0x1000F000 && nAddress <= 0x1000F01C)
+ 	{
+-		nReturn = m_intc.GetRegister(nAddress);
++		EmuProfile::CScope ioScope(EmuProfile::SECTION_EE_IO_INTC); nReturn = m_intc.GetRegister(nAddress);
+ 	}
+ 	else if(nAddress >= 0x1000F520 && nAddress <= 0x1000F59C)
+ 	{
+-		nReturn = m_dmac.GetRegister(nAddress);
++		EmuProfile::CScope ioScope(EmuProfile::SECTION_EE_IO_DMA); nReturn = m_dmac.GetRegister(nAddress);
+ 	}
+ 	else if(nAddress >= CVpu::EE_ADDR_VU1AREA_START && nAddress <= CVpu::EE_ADDR_VU1AREA_END)
+ 	{
+@@ -581,7 +605,7 @@
+ 	{
+ 		if(m_gs != NULL)
+ 		{
+-			nReturn = m_gs->ReadPrivRegister(nAddress);
++			EmuProfile::CScope ioScope(EmuProfile::SECTION_EE_IO_GS); nReturn = m_gs->ReadPrivRegister(nAddress);
+ 		}
+ 	}
+ 	else
+@@ -592,6 +616,7 @@
+ 
+ 	if(IsWaitStatusRegister(nAddress))
+ 	{
++		EmuProfile::CScope waitScope(EmuProfile::SECTION_EE_IO_WAIT);
+ 		//Some games will loop checking for the vblank start interrupt or vblank event
+ 		//This is usually a good sign indicating that the game is idling
+ 		//Games sensitive to changes in the scheme:
+@@ -669,9 +694,11 @@
+ uint32 CSubSystem::IOPortWriteHandler(uint32 nAddress, uint32 nData)
+ {
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_EE_IO);
++	IO_TIMER ioTimer;
++	if(g_ioCounts) ioTimer.Start(1, nAddress);
+ 	if(nAddress >= 0x10000000 && nAddress <= 0x1000183F)
+ 	{
+-		m_timer.SetRegister(nAddress, nData);
++		EmuProfile::CScope ioScope(EmuProfile::SECTION_EE_IO_TIMER); m_timer.SetRegister(nAddress, nData);
+ 	}
+ 	else if(nAddress >= 0x10002000 && nAddress <= 0x1000203F)
+ 	{
+@@ -709,12 +736,12 @@
+ 	}
+ 	else if(nAddress >= 0x10008000 && nAddress <= 0x1000EFFC)
+ 	{
+-		m_dmac.SetRegister(nAddress, nData);
++		EmuProfile::CScope ioScope(EmuProfile::SECTION_EE_IO_DMA); m_dmac.SetRegister(nAddress, nData);
+ 		ExecuteIpu();
+ 	}
+ 	else if(nAddress >= 0x1000F000 && nAddress <= 0x1000F01C)
+ 	{
+-		m_intc.SetRegister(nAddress, nData);
++		EmuProfile::CScope ioScope(EmuProfile::SECTION_EE_IO_INTC); m_intc.SetRegister(nAddress, nData);
+ 	}
+ 	else if(nAddress == 0x1000F180)
+ 	{
+@@ -747,7 +774,7 @@
+ 	{
+ 		if(m_gs != NULL)
+ 		{
+-			m_gs->WritePrivRegister(nAddress, nData);
++			EmuProfile::CScope ioScope(EmuProfile::SECTION_EE_IO_GS); m_gs->WritePrivRegister(nAddress, nData);
+ 		}
+ 	}
+ 	else
+diff --git a/Source/ee/Ee_SubSystem.h b/Source/ee/Ee_SubSystem.h
+--- a/Source/ee/Ee_SubSystem.h
++++ b/Source/ee/Ee_SubSystem.h
+@@ -38,6 +38,11 @@
+ 		//VU1 works; games that wait for their drawing do it through VIF1 status or GS
+ 		//FINISH/SIGNAL, which still wait for the worker (vu1_vblank_sync)
+ 		static inline bool g_vblankVu1Sync = true;
++		//Diagnostics (PC runner): EE I/O reads [0] and writes [1] per 16-byte register slot of
++		//0x10000000-0x1000FFFF (slot 4096: 0x12000000 GS registers, 4097: anything else)
++		static inline bool g_ioCounts = false;
++		static inline uint64 g_ioCount[2][4098] = {};
++		static inline uint64 g_ioNs[2][4098] = {}; //time inside the handlers (with g_ioCounts)
+ 		void CountTicks(int);
+ 
+ 		void NotifyVBlankStart();

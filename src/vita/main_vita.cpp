@@ -379,11 +379,14 @@ namespace
 		else if(key == "gpu_world_merge") CGSH_Hardware::g_retainedMerge = value != 0; //consecutive retained batches with the same uniforms as one draw (on)
 		else if(key == "vu1_vblank_sync") Ee::CSubSystem::g_vblankVu1Sync = value != 0; //threaded VU1: wait for the worker at each vblank (on)
 		else if(key == "gif_fast_packed") CGIF::g_fastPacked = value != 0; //GIF PACKED data by the loop with its state in registers (on)
+		else if(key == "bulk_unpack") CVif::g_bulkUnpack = value != 0; //V4-32/V4-16 unpacks in runs from the source (on)
+		else if(key == "bulk_unpack_neon") CVif::g_bulkUnpackNeon = value != 0;
 		else if(key == "gs_merged_submit") CGSHandler::g_mergedSubmit = value != 0; //RE4 world batch and the register writes before it as one GS call (on)
 		else if(key == "gs_fast_registers") CGSH_Primitives::g_fastRegisters = value != 0; //GS thread: per-vertex registers by a direct loop (on)
 		else if(key == "fine_timers") CGSH_Hardware::g_fineTimers = value != 0; //per primitive/batch timers in perf.csv (off: they cost a clock read each)
 		else if(key == "gpu_world_debug") CGSH_Hardware::g_gpuWorldDebug = value; //4: no culling, 64: the other faces (diagnostics)
 		else if(key == "gs_vertex_ring") CGSH_Hardware::g_vertexRing = value != 0; //with gs_shaders: vertices in GPU buffers (on)
+		else if(key == "gs_vertex_ring_kb") CGSH_Hardware::g_vertexRingKb = static_cast<uint32>(value); //size of each of the four ring buffers (1024)
 		else if(key == "re4_skip_dof") CGSH_Hardware::g_re4SkipDof = value; //RE4: draws left out after the depth blur starts (176)
 		else if(key == "vu_no_clamp") { if(value) CVuBasicBlock::g_extraCompileHints |= VUShared::COMPILEHINT_NO_CLAMPING; else CVuBasicBlock::g_extraCompileHints &= ~VUShared::COMPILEHINT_NO_CLAMPING; }
 		else if(key == "vu1_wait_on_stall") CVpu::g_waitOnVifStall = value != 0;

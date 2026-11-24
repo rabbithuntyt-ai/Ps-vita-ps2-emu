@@ -2437,11 +2437,11 @@ bool CGSH_Hardware::UploadToRing(const void* data, uint32 size, uint32& offset)
 			glBindBuffer(GL_ARRAY_BUFFER, m_vertexRing[i]);
 			//STATIC: vitaGL's plain GPU memory (DYNAMIC and STREAM can come from its scratch
 			//pool, which lives three frames)
-			glBufferData(GL_ARRAY_BUFFER, VERTEX_RING_SIZE, nullptr, GL_STATIC_DRAW);
+			glBufferData(GL_ARRAY_BUFFER, RingSize(), nullptr, GL_STATIC_DRAW);
 #ifdef __vita__
 			//vitaGL hands out the buffer's memory itself, without any synchronization: mapped
 			//once, written directly
-			m_vertexRingMemory[i] = static_cast<uint8*>(glMapBufferRange(GL_ARRAY_BUFFER, 0, VERTEX_RING_SIZE, GL_MAP_WRITE_BIT));
+			m_vertexRingMemory[i] = static_cast<uint8*>(glMapBufferRange(GL_ARRAY_BUFFER, 0, RingSize(), GL_MAP_WRITE_BIT));
 			if(!m_vertexRingMemory[i]) m_ringFailed = true;
 #endif
 		}
@@ -2465,7 +2465,7 @@ bool CGSH_Hardware::UploadToRing(const void* data, uint32 size, uint32& offset)
 		m_ringCurrent = (m_ringCurrent + 1) % VERTEX_RING_COUNT;
 		m_ringOffset = 0;
 	}
-	if(m_ringOffset + size > VERTEX_RING_SIZE)
+	if(m_ringOffset + size > RingSize())
 	{
 		m_stats.ringOverflows++;
 		g_ringOverflows++;

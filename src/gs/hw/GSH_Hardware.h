@@ -267,6 +267,10 @@ public:
 	// With gs_shaders: batch vertices in a ring of GPU buffers, one copy instead of vitaGL's
 	// copy per attribute (gs_vertex_ring, on)
 	static inline bool g_vertexRing = true;
+	// Size of each vertex ring buffer (gs_vertex_ring_kb, at most 4096; batches that do not fit go
+	// from client memory). Four 4 MB buffers left too little GPU memory: RE4 crashed in texture
+	// uploads (24 Nov 2026)
+	static inline uint32 g_vertexRingKb = 1024;
 	static inline uint64 g_ringDraws = 0, g_ringOverflows = 0, g_ringBytes = 0, g_stripShared = 0, g_stripCalls = 0, g_stripContinues = 0, g_triangles = 0;
 	static inline uint64 g_skippedDraws = 0;
 	static inline bool g_gpuWorld = false; //right on the PC, not yet run on the Vita (docs/RE4_GAMEPLAY.md)
@@ -568,9 +572,13 @@ private:
 	enum
 	{
 		VERTEX_RING_COUNT = 4,
-		VERTEX_RING_SIZE = 4 * 1024 * 1024, //RE4 gameplay: about 2.2 MB per game frame
+		VERTEX_RING_MAX = 4 * 1024 * 1024,
 	};
 	bool UploadToRing(const void* data, uint32 size, uint32& offset);
+	static uint32 RingSize()
+	{
+		return std::min<uint32>(std::max<uint32>(g_vertexRingKb, 64), 4096) * 1024;
+	}
 	GLuint m_vertexRing[VERTEX_RING_COUNT] = {};
 	uint8* m_vertexRingMemory[VERTEX_RING_COUNT] = {};
 	uint32 m_ringCurrent = 0;

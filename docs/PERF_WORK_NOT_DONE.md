@@ -554,6 +554,42 @@ for their own clock reads. RE4 gameplay on the Vita, warm, ms per game frame:
   nothing was saved. At best ~4 ms per game frame of uploads on the Vita: not worth a wrong
   picture. The read-backs stay; they are bound to the way RE4 reuses its blur buffer memory.
 
+### The emulation thread again: unpacks, I/O, the timer, a crash (24 Nov 2026, patch 0121)
+
+- **Bulk unpack** (`CVif::Unpack`, `bulk_unpack`, `--no-bulk-unpack`): RE4's unpacks are V4-16 and
+  V4-32 without a mask, offset mode or skipping (perf.csv `unpack_k_*`), but every value went
+  through the FIFO stream's 16-byte buffer one at a time (~120 ns each on the Vita). Once that
+  buffer is used up the rest of the transfer is contiguous, so runs of values are now widened
+  straight from the source (NEON `vmovl` for V4-16, `bulk_unpack_neon=0` for plain C), and a
+  partly read last qword goes back into the buffer as the per-value reads would have left it
+  (`CFifoStream::GetDirectBytes`, `ConsumeDirect`). PC: 40 million values by runs in the walk,
+  screenshots identical on and off. Vita, `gs_shaders=0`, alternating: the worker's unpack time
+  59-61 -> 21-28 ms per game frame, the emulation thread's wait for VU1 29-30 -> 15-20 ms; game
+  frames 303 and 323 against 304 and 296, because the emulation thread now waits on the GS
+  thread instead (67-71 ms against 56-57).
+- **EE I/O** (PC `--io-counts`: accesses per register; Vita sections `EEioTimer`, `EEioIntc`,
+  `EEioDma`, `EEioGs`, `EEioWait`): about 3,000 accesses per game frame, nearly all Timer 1 and
+  the interrupt controller (libtimer's TIMER1 interrupt). Those registers cost too little to show
+  in the Vita profile; the section's 10-11 ms per game frame is DMA register writes (`EEioDma`,
+  the transfers they start).
+- **The timer interrupt** is libtimer's handler at 0x2AA5C0-0x2AA9A0 (~3.7% of EE samples) plus
+  the BIOS dispatch at 0x1FC0xxxx (~1.7%): about 5 ms per game frame. Not addressed.
+- **RE4's own code** (~85 ms per game frame) has a flat profile: the hottest function is 3.2% of EE
+  samples, most of the top ones matrix and vector helpers (0x252000-0x258000), the kind whose
+  native overlays gained nothing (E3, branch `claude/ee-overlays-6f84d4`). The lever left there
+  is the JIT itself (block transitions, calls).
+- **`gs_shaders` crashes, found closer:** every crash dump of the main thread with it on stops in
+  SceLibKernel (0xE000E434, an undefined instruction: a deliberate trap) with r10 holding
+  vitaGL's `write_rgba8888`, its pixel conversion for texture uploads (the eboot runs 0x60000
+  above its link address). The ring's mapping is not the cause: vitaGL's `glMapBufferRange`
+  returns the buffer's own memory and only `glBufferData`, `glBufferSubData` or a delete replace
+  it, none of which the ring calls on the Vita. Suspect: GPU memory exhaustion, the ring taking
+  16 MB (four 4 MB buffers) when RE4 needs about 2.2 MB per game frame. The ring size is now
+  `gs_vertex_ring_kb` (default 1024, batches that do not fit go from client memory); not yet
+  run on the Vita.
+- Runs that end early without `crash.txt` are crashes too: `vitalab crashes --get` fetches the
+  dumps, `tools/psp2dmp.py` reads them.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an
