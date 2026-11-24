@@ -276,6 +276,9 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-target-blocks")) CGSH_Hardware::g_targetPixelBlocks = false; //target_pixel_blocks=0
 		else if(!std::strcmp(argv[i], "--no-world-merge")) CGSH_Hardware::g_retainedMerge = false; //gpu_world_merge=0
 		else if(!std::strcmp(argv[i], "--no-vu1-vblank-sync")) Ee::CSubSystem::g_vblankVu1Sync = false; //vu1_vblank_sync=0
+		else if(!std::strcmp(argv[i], "--no-fast-packed")) CGIF::g_fastPacked = false; //gif_fast_packed=0
+		else if(!std::strcmp(argv[i], "--no-merged-submit")) CGSHandler::g_mergedSubmit = false; //gs_merged_submit=0
+		else if(!std::strcmp(argv[i], "--no-fast-registers")) CGSH_Primitives::g_fastRegisters = false; //gs_fast_registers=0
 		else if(!std::strcmp(argv[i], "--re4-skin")) CVpu::g_nativeProgram = Re4Skin::Run; //RE4 skinning programs natively (re4_skin)
 		else if(!std::strcmp(argv[i], "--skin-verify")) CVpu::g_programHook = Re4Skin::VerifyHook; //skinverify.txt (inline VU1)
 		else if(!std::strcmp(argv[i], "--vu-scalar-opmul")) VUShared::g_vectorOuterProduct = false; //old OPMULA/OPMSUB
@@ -627,6 +630,8 @@ int main(int argc, char** argv)
 			auto& a = CVpu::g_asyncStats;
 			std::printf("async VIF1: %llu packets, %.1f MB, %llu stalls, %llu quiet waits (%.0f ms), %llu PATH3 syncs\n", (unsigned long long)a.packets.load(),
 			            a.bytes.load() / 1048576.0, (unsigned long long)a.stalls.load(), (unsigned long long)a.quietWaits.load(), a.quietWaitUs.load() / 1000.0, (unsigned long long)a.path3Syncs.load());
+			std::printf("relay: %llu kicks (%.1f MB), %llu DIRECT (%.1f MB), %llu replaced; %llu register writes\n",(unsigned long long)a.kicks.load(), a.kickBytes.load() / 1048576.0,
+			            (unsigned long long)a.directs.load(), a.directBytes.load() / 1048576.0, (unsigned long long)a.customs.load(), (unsigned long long)CGSHandler::g_writeBufferTotal);
 		}
 #ifdef VITAPS2_HAS_GL
 		if(Re4Vu1Hle::IsEnabled())

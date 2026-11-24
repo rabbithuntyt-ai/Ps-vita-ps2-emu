@@ -1,0 +1,301 @@
+diff --git a/Source/ee/GIF.cpp b/Source/ee/GIF.cpp
+--- a/Source/ee/GIF.cpp
++++ b/Source/ee/GIF.cpp
+@@ -105,6 +105,154 @@
+ 
+ uint32 CGIF::ProcessPacked(const uint8* memory, uint32 address, uint32 end)
+ {
++	CGSHandler* gs = m_gs;
++	uint32 room = 0;
++	CGSHandler::RegisterWrite* out = gs->GetWriteCursor(room);
++	//Each qword makes at most one write; when they might not fit, Play's loop (it counts the
++	//writes that do not fit)
++	if(!g_fastPacked || (((end - address + 0xF) / 0x10) > room))
++	{
++		return ProcessPackedSlow(memory, address, end);
++	}
++
++	uint32 start = address;
++	uint32 loops = m_loops;
++	uint32 regs = m_regs;
++	uint32 regsTemp = m_regsTemp;
++	uint32 qtemp = m_qtemp;
++	uint8 descs[16];
++	for(uint32 i = 0; i < 16; i++)
++	{
++		descs[i] = static_cast<uint8>((m_regList >> (i * 4)) & 0x0F);
++	}
++	uint32 count = 0;
++	auto put = [&](uint8 reg, uint64 value) {
++		out[count].first = reg;
++		out[count].second = value;
++		count++;
++	};
++
++	while((loops != 0) && (address < end))
++	{
++		while((regsTemp != 0) && (address < end))
++		{
++			uint32 regDesc = descs[regs - regsTemp];
++			const uint8* qword = memory + address;
++			uint32 v0, v1, v2, v3;
++			uint64 d0, d1;
++			memcpy(&v0, qword + 0, 4);
++			memcpy(&v1, qword + 4, 4);
++			memcpy(&v2, qword + 8, 4);
++			memcpy(&v3, qword + 12, 4);
++			d0 = static_cast<uint64>(v0) | (static_cast<uint64>(v1) << 32);
++			d1 = static_cast<uint64>(v2) | (static_cast<uint64>(v3) << 32);
++
++			switch(regDesc)
++			{
++			case 0x00:
++				//PRIM
++				put(GS_REG_PRIM, v0);
++				break;
++			case 0x01:
++				//RGBA
++				put(GS_REG_RGBAQ, (v0 & 0xFF) | ((v1 & 0xFF) << 8) | ((v2 & 0xFF) << 16) | (static_cast<uint64>(v3 & 0xFF) << 24) | (static_cast<uint64>(qtemp) << 32));
++				break;
++			case 0x02:
++				//ST
++				qtemp = v2;
++				put(GS_REG_ST, d0);
++				break;
++			case 0x03:
++				//UV
++				put(GS_REG_UV, (v0 & 0x7FFF) | ((v1 & 0x7FFF) << 16));
++				break;
++			case 0x04:
++			{
++				//XYZF2
++				uint64 temp = (v0 & 0xFFFF) | ((v1 & 0xFFFF) << 16);
++				temp |= static_cast<uint64>(v2 & 0x0FFFFFF0) << 28;
++				temp |= static_cast<uint64>(v3 & 0x00000FF0) << 52;
++				put((v3 & 0x8000) ? GS_REG_XYZF3 : GS_REG_XYZF2, temp);
++			}
++			break;
++			case 0x05:
++			{
++				//XYZ2
++				uint64 temp = (v0 & 0xFFFF) | ((v1 & 0xFFFF) << 16);
++				temp |= static_cast<uint64>(v2) << 32;
++				put((v3 & 0x8000) ? GS_REG_XYZ3 : GS_REG_XYZ2, temp);
++			}
++			break;
++			case 0x06:
++				put(GS_REG_TEX0_1, d0);
++				break;
++			case 0x07:
++				put(GS_REG_TEX0_2, d0);
++				break;
++			case 0x08:
++				put(GS_REG_CLAMP_1, d0);
++				break;
++			case 0x09:
++				put(GS_REG_CLAMP_2, d0);
++				break;
++			case 0x0A:
++				//FOG
++				put(GS_REG_FOG, (d1 >> 36) << 56);
++				break;
++			case 0x0D:
++				put(GS_REG_XYZ3, d0);
++				break;
++			case 0x0E:
++				//A + D
++				{
++					uint8 reg = static_cast<uint8>(d1);
++					if(reg == GS_REG_SIGNAL)
++					{
++						//Check if there's already a signal pending
++						auto csr = gs->ReadPrivRegister(CGSHandler::GS_CSR);
++						if((m_signalState == SIGNAL_STATE_ENCOUNTERED) || ((csr & CGSHandler::CSR_SIGNAL_EVENT) != 0))
++						{
++							//If there is, we need to wait for previous signal to be cleared
++							m_signalState = SIGNAL_STATE_PENDING;
++							gs->CommitWrites(count);
++							m_loops = static_cast<uint16>(loops);
++							m_regsTemp = static_cast<uint8>(regsTemp);
++							m_qtemp = qtemp;
++							return address - start;
++						}
++						m_signalState = SIGNAL_STATE_ENCOUNTERED;
++					}
++					put(reg, d0);
++				}
++				break;
++			case 0x0F:
++				//NOP
++				break;
++			default:
++				assert(0);
++				break;
++			}
++
++			address += 0x10;
++			regsTemp--;
++		}
++
++		if(regsTemp == 0)
++		{
++			loops--;
++			regsTemp = regs;
++		}
++	}
++
++	gs->CommitWrites(count);
++	m_loops = static_cast<uint16>(loops);
++	m_regsTemp = static_cast<uint8>(regsTemp);
++	m_qtemp = qtemp;
++	return address - start;
++}
++
++uint32 CGIF::ProcessPackedSlow(const uint8* memory, uint32 address, uint32 end)
++{
+ 	uint32 start = address;
+ 
+ 	while((m_loops != 0) && (address < end))
+diff --git a/Source/ee/GIF.h b/Source/ee/GIF.h
+--- a/Source/ee/GIF.h
++++ b/Source/ee/GIF.h
+@@ -91,6 +91,12 @@
+ 	};
+ 
+ 	uint32 ProcessPacked(const uint8*, uint32, uint32);
++	uint32 ProcessPackedSlow(const uint8*, uint32, uint32);
++	//PACKED data with the loop state in locals and register writes stored straight into the GS
++	//write buffer (on by default; off: Play's loop, which reloads its state after every write)
++public:
++	static inline bool g_fastPacked = true;
++private:
+ 	uint32 ProcessRegList(const uint8*, uint32, uint32);
+ 	uint32 ProcessImage(const uint8*, uint32, uint32, uint32);
+ 
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -385,6 +385,8 @@
+ 	PENDING_KICK kick;
+ 	kick.packet.assign(data, data + size);
+ 	kick.path = 2;
++	g_asyncStats.directs.fetch_add(1, std::memory_order_relaxed);
++	g_asyncStats.directBytes.fetch_add(size, std::memory_order_relaxed);
+ 	std::lock_guard<std::mutex> lock(m_kickMutex);
+ 	m_pendingKicks.push_back(std::move(kick));
+ 	m_hasPendingKicks = true;
+@@ -607,6 +609,8 @@
+ 	{
+ 		std::lock_guard<std::mutex> lock(m_kickMutex);
+ 		PENDING_KICK kick;
++		g_asyncStats.kicks.fetch_add(1, std::memory_order_relaxed);
++		g_asyncStats.kickBytes.fetch_add(size, std::memory_order_relaxed);
+ 		kick.packet = std::move(packet);
+ 		m_pendingKicks.push_back(std::move(kick));
+ 		m_hasPendingKicks = true;
+@@ -756,6 +760,7 @@
+ 					std::lock_guard<std::mutex> lock(m_kickMutex);
+ 					PENDING_KICK kick;
+ 					kick.custom = std::move(custom);
++					g_asyncStats.customs.fetch_add(1, std::memory_order_relaxed);
+ 					m_pendingKicks.push_back(std::move(kick));
+ 					m_hasPendingKicks = true;
+ 				}
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -28,6 +28,12 @@
+ 	std::atomic<uint64> quietWaits = 0;
+ 	std::atomic<uint64> quietWaitUs = 0;
+ 	std::atomic<uint64> path3Syncs = 0;
++	//Relay: XGKICK packets, VIF1 DIRECT transfers, replaced programs' output
++	std::atomic<uint64> kicks = 0;
++	std::atomic<uint64> kickBytes = 0;
++	std::atomic<uint64> directs = 0;
++	std::atomic<uint64> directBytes = 0;
++	std::atomic<uint64> customs = 0;
+ };
+ 
+ class CVpu
+diff --git a/Source/gs/GSHandler.cpp b/Source/gs/GSHandler.cpp
+--- a/Source/gs/GSHandler.cpp
++++ b/Source/gs/GSHandler.cpp
+@@ -777,6 +777,26 @@
+ 	m_writeBufferSubmitIndex = m_writeBufferSize;
+ }
+ 
++void CGSHandler::SubmitWriteBufferThen(CMailBox::FunctionType&& function)
++{
++	if(!g_mergedSubmit || (m_writeBufferSubmitIndex == m_writeBufferSize))
++	{
++		SubmitWriteBuffer();
++		SendGSCall(std::move(function));
++		return;
++	}
++	auto bufferStart = m_currentWriteBuffer + m_writeBufferSubmitIndex;
++	auto bufferEnd = m_currentWriteBuffer + m_writeBufferSize;
++	SendGSCall(
++	    [this, bufferStart, bufferEnd, function = std::move(function)]() {
++		    uint64 submitStart = g_sectionClock ? g_sectionClock() : 0;
++		    SubmitWriteBufferImpl(bufferStart, bufferEnd);
++		    if(g_sectionClock) { g_submitUs += g_sectionClock() - submitStart; g_submitCalls++; g_registerWrites += bufferEnd - bufferStart; }
++		    function();
++	    });
++	m_writeBufferSubmitIndex = m_writeBufferSize;
++}
++
+ void CGSHandler::FlushWriteBuffer()
+ {
+ 	//Everything should be processed at this point
+@@ -784,6 +804,7 @@
+ 	//Make sure everything is submitted
+ 	SubmitWriteBuffer();
+ 	g_writeBufferPeak = std::max(g_writeBufferPeak, m_writeBufferSize);
++	g_writeBufferTotal += m_writeBufferSize;
+ 	m_writeBufferSize = 0;
+ 	m_writeBufferProcessIndex = 0;
+ 	m_writeBufferSubmitIndex = 0;
+diff --git a/Source/gs/GSHandler.h b/Source/gs/GSHandler.h
+--- a/Source/gs/GSHandler.h
++++ b/Source/gs/GSHandler.h
+@@ -893,8 +893,23 @@
+ 		m_currentWriteBuffer[m_writeBufferSize++] = write;
+ 	}
+ 
++	//Direct access for the GIF's PACKED loop: the free entries at the end of the write buffer,
++	//then how many of them it filled
++	inline RegisterWrite* GetWriteCursor(uint32& room)
++	{
++		room = REGISTERWRITEBUFFER_SIZE - m_writeBufferSize;
++		return m_currentWriteBuffer + m_writeBufferSize;
++	}
++	inline void CommitWrites(uint32 count)
++	{
++		m_writeBufferSize += count;
++	}
++
+ 	void ProcessWriteBuffer(const CGsPacketMetadata*);
+ 	void SubmitWriteBuffer();
++	//SubmitWriteBuffer, then a call on the GS thread, as one mailbox call
++	void SubmitWriteBufferThen(CMailBox::FunctionType&&);
++	static inline bool g_mergedSubmit = true; //off: two calls (gs_merged_submit)
+ 	void FlushWriteBuffer();
+ 
+ 	virtual void SetCrt(bool, unsigned int, bool);
+@@ -1076,7 +1091,7 @@
+ 	virtual void WriteRegisterImpl(uint8, uint64);
+ 	void FeedImageDataImpl(const uint8*, uint32);
+ 	void ReadImageDataImpl(void*, uint32);
+-	void SubmitWriteBufferImpl(const RegisterWrite*, const RegisterWrite*);
++	virtual void SubmitWriteBufferImpl(const RegisterWrite*, const RegisterWrite*);
+ 
+ 	void UpdateFrameDumpState();
+ 
+@@ -1154,6 +1169,7 @@
+ 	static inline int g_framesAhead = 2;
+ 	//Diagnostics: the most register writes in one vblank, and writes dropped on a full buffer
+ 	static inline uint32 g_writeBufferPeak = 0;
++	static inline uint64 g_writeBufferTotal = 0; //register writes, all frames
+ 	static inline uint64 g_writeBufferOverflows = 0;
+ 
+ protected:

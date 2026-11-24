@@ -449,6 +449,39 @@ for their own clock reads. RE4 gameplay on the Vita, warm, ms per game frame:
 - **Where that leaves it:** the emulation thread waits for the GS thread 62-85 ms per game frame
   again; game code 83-88, the relay ~50, queueing ~37. The GS thread is the limit once more.
 
+### The relay and the GS register path (24 Nov 2026, patch 0120)
+
+- **What the relay handles** (PC count, RE4 walk, per game frame): about 640 XGKICK packets
+  (1.2 MB), 1,700 VIF1 DIRECT transfers (1.6 MB), 1,500 RE4 world batches, and 84,500 GS
+  register writes (`relay:` line of the PC runner). Handing calls to the GS thread is only
+  ~8 ms of it (4,000 mailbox calls, perf.csv `gs_send_ms`).
+- **GIF PACKED loop** (`CGIF::ProcessPacked`, `gif_fast_packed`, `--no-fast-packed`): Play's
+  loop stores each write through `m_gs` (a reference to a pointer) into the write buffer as a
+  pair with a `uint8`, which may alias anything, so the compiler reloaded the loop state, the
+  GS pointer and the buffer index after every write. The loop now keeps them in locals and
+  stores into the buffer directly (`GetWriteCursor`/`CommitWrites`); when the writes might
+  not fit, Play's loop runs (it counts the overflow).
+- **GS thread register loop** (`CGSH_Primitives::SubmitWriteBufferImpl`, `gs_fast_registers`,
+  `--no-fast-registers`): RGBAQ, ST, UV, FOG and the four positions are stored and kicked
+  directly, everything else goes through `WriteRegisterImpl` as before (it was a virtual call,
+  two switches and a profiler scope per write).
+- **RE4 world batches as one GS call** (`CGSHandler::SubmitWriteBufferThen`,
+  `gs_merged_submit`, `--no-merged-submit`): the register writes before a batch and the batch
+  itself were two mailbox calls; now one. GS calls per game frame 3,600-4,300 -> 2,250-2,400.
+- **Exact:** RE4's PC screenshots are identical with each part on and off.
+- **Vita, 120 s, same build, alternating:** the two loops on 307, 305, 300 game frames, off 294,
+  278, 290 (about +5%). Per game frame: PATH1 relay 15 against 20-23 ms, GS thread "other"
+  (the register loop around the writes) 49-51 against 60-63, registers 13 against 15-16, the
+  emulation thread's wait on the GS thread 61-62 against 69-71. The merged world call: world
+  relay 7-8 against 11-13 ms; game frames 302 and 311 against 310 and 285 (inside the noise),
+  kept on.
+- **Where that leaves it (ms per game frame):** emulation thread: game code 83, waiting for the
+  GS thread ~60, relay ~37 (DIRECT 15, PATH1 15, world 7), queueing VIF1 data ~33. GS thread:
+  other ~49 (of which image data into GS memory 40), world 38, flush 37, targets 26,
+  read-backs 25, uploads 20, idle ~20. The target round trips (read-backs, uploads, targets:
+  ~71) are the largest GS thread item left; removing them needs dirty areas by GS block and the
+  GPU pass for the PSMT8H depth trick (`runs/re4/alpha_clut16.diff`, local).
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an

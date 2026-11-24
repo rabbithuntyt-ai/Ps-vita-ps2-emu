@@ -62,6 +62,49 @@ void CGSH_Primitives::WriteRegisterImpl(uint8 registerId, uint64 data)
 	}
 }
 
+void CGSH_Primitives::SubmitWriteBufferImpl(const RegisterWrite* writeStart, const RegisterWrite* writeEnd)
+{
+#if defined(_DEBUG) || LOGGING_ENABLED
+	const bool fast = false; //the base counts transfers and logs writes
+#else
+	const bool fast = g_fastRegisters;
+#endif
+	if(!fast)
+	{
+		CGSHandler::SubmitWriteBufferImpl(writeStart, writeEnd);
+		return;
+	}
+	GsProfile::CScope gsSection(GsProfile::SECTION_REGISTERS);
+	for(auto write = writeStart; write != writeEnd; write++)
+	{
+		uint8 registerId = write->first;
+		uint64 data = write->second;
+		//What WriteRegisterImpl does for these (here and in CGSHandler): store, mark the
+		//registers dirty, kick on positions; no state change
+		switch(registerId)
+		{
+		case GS_REG_RGBAQ:
+		case GS_REG_ST:
+		case GS_REG_UV:
+		case GS_REG_FOG:
+			m_nReg[registerId] = data;
+			m_regsDirty = true;
+			break;
+		case GS_REG_XYZ2:
+		case GS_REG_XYZ3:
+		case GS_REG_XYZF2:
+		case GS_REG_XYZF3:
+			m_nReg[registerId] = data;
+			m_regsDirty = true;
+			VertexKick(registerId, data);
+			break;
+		default:
+			WriteRegisterImpl(registerId, data);
+			break;
+		}
+	}
+}
+
 void CGSH_Primitives::BeginPrimitive(uint64 data)
 {
 	if(m_stripLive) g_stripBreaks[0]++;

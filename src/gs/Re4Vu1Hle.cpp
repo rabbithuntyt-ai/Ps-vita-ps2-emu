@@ -92,9 +92,8 @@ namespace
 			gs->WriteRegister(CGSHandler::RegisterWrite(static_cast<uint8>(GS_REG_PRIM), (batch->tagLow >> 47) & 0x7FF));
 		}
 		gs->ProcessWriteBuffer(nullptr);
-		gs->SubmitWriteBuffer();
 		auto primitives = static_cast<CGSH_Primitives*>(gs);
-		gs->SendGSCall([primitives, batch]() { primitives->DrawWorldBatch(*batch); });
+		gs->SubmitWriteBufferThen([primitives, batch]() { primitives->DrawWorldBatch(*batch); });
 	}
 }
 

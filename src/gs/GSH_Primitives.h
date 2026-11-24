@@ -44,8 +44,13 @@ public:
 	//the EE, IOP and VU1 allow
 	static inline bool g_gsCeiling = false;
 
+	//GS thread: register writes by a loop that stores per-vertex registers itself and kicks
+	//vertices directly (on); off: every write through WriteRegisterImpl (gs_fast_registers)
+	static inline bool g_fastRegisters = true;
+
 protected:
 	void WriteRegisterImpl(uint8, uint64) override;
+	void SubmitWriteBufferImpl(const RegisterWrite*, const RegisterWrite*) override;
 
 	// Called before a drawing kick when any state register changed.
 	virtual void OnStateChanged() = 0;
