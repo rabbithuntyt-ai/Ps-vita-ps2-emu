@@ -814,6 +814,13 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
   - matrix and sampled vertices 4.7; hash and lookup 3.1; building and box test 2.8
   - flush and run setup 9.9: mostly the FlushBatch of whatever other path was pending
   - uniforms 2.3
+- **Read-back memory placement: no effect (R44-R45, 26 Nov 2026).** Vita self-test, glReadPixels of a
+  512x448 render target:
+  - in video RAM (vitaGL's choice): 10.37 ms
+  - texture data moved to vitaGL's system RAM pool (vglOverloadTexDataPointer): 10.50 ms
+  - with vitaGL's pools cached (vglUseCachedMem before vglInit): 10.35 ms
+  - The cost is inside vitaGL's glReadPixels (scene end, GPU wait, its copy), not the memory
+    type. The experiments are not kept. Read-backs only get cheaper by having fewer of them.
 - **GPU read-backs with vglReadPixels: tried, not kept (R36-R39, 26 Nov 2026).**
   - Vita self-test on a cleared 512x448 target (a 1x1 glReadPixels first, to end the scene):
     vglReadPixels into a heap buffer plus memcpy took 5.2 ms against 10.4 for glReadPixels,
