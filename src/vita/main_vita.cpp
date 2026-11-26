@@ -426,6 +426,8 @@ namespace
 		else if(key == "feed_compare") GsTransferWrite::g_compare = value != 0; //transfer writes compare old bytes (skips unchanged transfers; on)
 		else if(key == "gs_wait_split") g_gsWaitSplit = value != 0; //GS sections split into running/ready/blocked samples (measuring, off)
 		else if(key == "clip_reject") CGSH_Hardware::g_clipReject = value != 0; //world triangles wholly outside one clip plane skip the CPU clipper (exact; on)
+		else if(key == "world_share_slots") CGSH_Hardware::g_worldShareSlots = value != 0; //world batches with the same constants share a draw (exact; on)
+		else if(key == "strip_merge") CGSH_Hardware::g_stripMerge = value != 0; //a sprite redrawn for the next scissor column joins the previous draw (exact; on)
 		else if(key == "gpu_skin") Re4Skin::g_gpuSkin = value != 0; //RE4: one-matrix skinning batches drawn by the GPU world path (off)
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
@@ -2014,6 +2016,8 @@ namespace
 				for(int k = 0; k < 4; k++)
 					std::fprintf(stateFile, "world batches, %s: %llu, vertices %llu\n", worldKinds[k], static_cast<unsigned long long>(CGSH_Hardware::g_worldBatchesByKind[k]),
 					             static_cast<unsigned long long>(CGSH_Hardware::g_worldVerticesByKind[k]));
+				std::fprintf(stateFile, "world batches that joined the open slot: %llu\n", static_cast<unsigned long long>(CGSH_Hardware::g_worldSlotShares));
+				std::fprintf(stateFile, "sprites that joined the previous column's draw: %llu\n", static_cast<unsigned long long>(CGSH_Hardware::g_stripMerges));
 				std::fprintf(stateFile, "triangles to the CPU clipper: %llu, rejected before clipping: %llu\n", static_cast<unsigned long long>(CGSH_Hardware::g_worldClipCalls),
 				             static_cast<unsigned long long>(CGSH_Hardware::g_worldClipRejected));
 				std::fprintf(stateFile, "game frames: %u\n", CGSH_Hardware::g_gameFrames);

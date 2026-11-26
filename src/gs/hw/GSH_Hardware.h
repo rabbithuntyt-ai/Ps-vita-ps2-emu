@@ -250,6 +250,14 @@ public:
 	//clip_reject (on): triangles the clipper would return nothing for (Re4Vu1::ClipRejects) skip it;
 	//g_clipRejectCheck (host --clip-reject-check) runs the clipper on them anyway and counts any it draws
 	static inline bool g_clipReject = true, g_clipRejectCheck = false;
+	//world_share_slots (on): a world batch with the open slot's constants (bit for bit) joins its draw
+	static inline bool g_worldShareSlots = true;
+	static inline uint64 g_worldSlotShares = 0; //batches that joined the open slot (whole run)
+	static inline bool g_stripMerge = true; //strip_merge (see m_stripMergeOk)
+	static inline uint64 g_stripMerges = 0; //sprites drawn by joining the previous column's draw (whole run)
+	static inline bool g_stateBreaks = false; //host --state-breaks: fixed function draws ended by a state change, by the fields that changed
+	static inline std::map<std::string, std::pair<uint64, uint64>> g_stateBreakCounts; //fields: draws, vertices
+	static inline uint64 g_drawsWithClippedWorld = 0, g_drawsWithClippedWorldVertices = 0; //fixed function draws carrying CPU-clipped world triangles
 	static inline uint64 g_worldClipRejected = 0, g_clipRejectMismatches = 0;
 	static inline uint64 g_feedBytesByPsm[64] = {}, g_feedCallsByPsm[64] = {}; //image data written, by destination format (whole run)
 	static inline uint64 g_transfersInTotal = 0, g_unchangedTransfersTotal = 0; //host to local transfers, and those that changed no byte (whole run)
@@ -420,6 +428,20 @@ private:
 	};
 	std::vector<WORLD_GPU_VERTEX> m_worldVertices;
 	std::vector<float> m_worldSoa; //gpu_world_soa: one array per attribute
+	bool m_batchHasClippedWorld = false; //m_batch holds CPU-clipped world triangles (counts only)
+	// strip_merge: a sprite drawn again, unchanged, with only the scissor moved to the next
+	// column (RE4 draws full-screen passes in 32/64 pixel columns) joins the draw of the first
+	// one, under the union of the columns: every pixel gets the same values and one write, as
+	// before. Only while the batch holds nothing but that sprite (and no world vertices,
+	// points or retained draw are waiting), the sprite does not sample its own target, the RE4
+	// draw-skip rule is idle and the strip-cover logic (W1) would do nothing.
+	bool m_stripMergeOk = false;      //m_batch holds exactly one sprite, m_stripSprite
+	bool m_stripUnionActive = false;  //the GL scissor is m_stripUnion, not m_state's
+	bool m_stripExpectSprite = false; //a scissor change was taken in; the next primitive must be the sprite again
+	bool m_boundFeedback = false;     //the bound texture is the copy of the target being drawn
+	CSoftwareRasterizer::VERTEX m_stripSprite[2] = {};
+	int32 m_stripUnion[4] = {};       //x0, y0, x1, y1 (inclusive pixels)
+	int m_batchScissorFit = 0; //m_batch's primitives against their scissors: 0 strictly inside, 1 an edge on the scissor's, 2 crossing
 	std::vector<uint16> m_worldIndices;
 	float m_worldMatrix[WORLD_SLOTS * 16] = {};
 	float m_worldColorOffset[WORLD_SLOTS * 4] = {}, m_worldColorScale[WORLD_SLOTS * 4] = {}, m_worldTexOffset[WORLD_SLOTS * 4] = {};
@@ -575,6 +597,9 @@ private:
 	void ApplyState();
 	bool SkipDrawRule();
 	bool WouldSkipDraw() const;
+	bool WouldSkipDrawFor(const CSoftwareRasterizer::STATE&) const;
+	void FlushBatchImpl();
+	bool StripMergeAllowed(const CSoftwareRasterizer::STATE&) const;
 	uint32 m_skipDraws = 0;
 	// Batch program (gs_shaders)
 	bool BuildBatchProgram();

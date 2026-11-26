@@ -246,6 +246,13 @@ frame dumps) or results compared bit for bit.
       draw submission, split".
     - What the GS thread spends per draw: vitaGL takes about 25 µs per draw call even for VBO
       draws, so about 790 draws per game frame cost about 26 ms there.
+18. **Fewer draws: world batches with the open slot's constants share its draw
+    (`world_share_slots`), and full-screen sprites redrawn per scissor column are one draw
+    (`strip_merge`). Both on, both exact on the PC.**
+    - World slot draws −56%; fixed-function draws −21% (PC counts).
+    - Vita: `world_share_slots` alone measured 3.91/4.00/3.81 against 3.55/3.66/3.73 (+7.1%);
+      both together 3.78/3.87 against 3.57/3.64/3.55 (+6.6%).
+    - Details: [PERF_WORK_NOT_DONE.md](PERF_WORK_NOT_DONE.md), "Fewer draws".
 
 ### VU recompiler (helps every game)
 

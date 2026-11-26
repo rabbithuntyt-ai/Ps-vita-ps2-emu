@@ -281,6 +281,10 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-feed-compare")) GsTransferWrite::g_compare = false; //transfer writes store without comparing
 		else if(!std::strcmp(argv[i], "--no-clip-reject")) CGSH_Hardware::g_clipReject = false; //every clipped world triangle through the CPU clipper
 		else if(!std::strcmp(argv[i], "--clip-reject-check")) CGSH_Hardware::g_clipRejectCheck = true; //rejected triangles clipped anyway: any drawn is a mismatch
+		else if(!std::strcmp(argv[i], "--no-world-share-slots")) CGSH_Hardware::g_worldShareSlots = false; //one draw per world slot batch
+		else if(!std::strcmp(argv[i], "--world-slots") && (i + 1 < argc)) CGSH_Hardware::g_gpuWorldSlots = std::atoi(argv[++i]); //batches per world draw (Vita: 1)
+		else if(!std::strcmp(argv[i], "--state-breaks")) CGSH_Hardware::g_stateBreaks = true; //fixed function draws ended by state changes, by changed fields
+		else if(!std::strcmp(argv[i], "--no-strip-merge")) CGSH_Hardware::g_stripMerge = false; //each scissor column's sprite its own draw
 		else if(!std::strcmp(argv[i], "--feed-shapes")) CGSH_Hardware::g_feedShapes = true; //host to local transfers by format, size and alignment
 		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
 		else if(!std::strcmp(argv[i], "--reuse-scan")) CVpu::g_reuseScan = CGSHandler::g_shadowRegs = true; //relayed GIF data repeated across frames
@@ -666,6 +670,22 @@ int main(int argc, char** argv)
 				const char* kinds[4] = {"batch program", "fixed function", "world slot", "retained world"};
 				for(int k = 0; k < 4; k++)
 					std::printf("GL draws, %s: %llu, vertices or indices %llu\n", kinds[k], (unsigned long long)CGSH_Hardware::g_drawsByKind[k], (unsigned long long)CGSH_Hardware::g_drawElementsByKind[k]);
+				std::printf("world batches that joined the open slot: %llu\n", (unsigned long long)CGSH_Hardware::g_worldSlotShares);
+				std::printf("sprites that joined the previous column's draw: %llu\n", (unsigned long long)CGSH_Hardware::g_stripMerges);
+				if(CGSH_Hardware::g_stateBreaks)
+				{
+					std::vector<std::pair<uint64, std::string>> breaks;
+					uint64 total = 0;
+					for(const auto& [fields, count] : CGSH_Hardware::g_stateBreakCounts)
+					{
+						breaks.emplace_back(count.first, fields + " (" + std::to_string(count.second) + " vertices)");
+						total += count.first;
+					}
+					std::sort(breaks.rbegin(), breaks.rend());
+					std::printf("fixed function draws ended by a state change: %llu\n", (unsigned long long)total);
+					for(size_t i = 0; i < std::min<size_t>(breaks.size(), 20); i++) std::printf("  state break %llu:%s\n", (unsigned long long)breaks[i].first, breaks[i].second.c_str());
+				}
+				std::printf("fixed function draws with CPU-clipped world triangles: %llu (%llu vertices)\n", (unsigned long long)CGSH_Hardware::g_drawsWithClippedWorld, (unsigned long long)CGSH_Hardware::g_drawsWithClippedWorldVertices);
 				std::printf("world triangles to the CPU clipper: %llu, rejected before clipping: %llu, of those the clipper would draw: %llu\n", (unsigned long long)CGSH_Hardware::g_worldClipCalls,
 				            (unsigned long long)CGSH_Hardware::g_worldClipRejected, (unsigned long long)CGSH_Hardware::g_clipRejectMismatches);
 				const char* worldKinds[4] = {"retained", "slot", "skinning slot", "other"};

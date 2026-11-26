@@ -712,6 +712,28 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
   - Steady game fps: 3.74/3.87/3.62 on against 3.65/3.79/3.77 off, a mean of 3.74 for both.
     The saving is about 2.5% of the frame, inside the run spread, so no speedup is claimed.
   - R24f (on) crashed at 103 s (next item).
+- **Fewer draws (25 Nov 2026).**
+  - **`world_share_slots` (on, exact).** A world batch whose constants are bit-identical to the
+    open slot's joins its draw: same shader arithmetic, and its triangles follow the slot's in
+    the one draw.
+    - PC, one slot per draw (as the Vita): world slot draws 42,334 → 18,643; screenshots
+      identical.
+    - Vita R25, interleaved: 3.91/4.00/3.81 on against 3.55/3.66/3.73 off steady game fps
+      (+7.1%, no overlap).
+  - **`strip_merge` (on, exact on the PC).** RE4 draws full-screen sprites again and again, each
+    time with the scissor moved to the next 32/64 pixel column. 19,572 of 44,534 fixed-function
+    draws ended only because of that scissor change, every time with the sprite crossing its
+    scissor.
+    - The same sprite (bit-identical vertices and state) redrawn for the adjacent column joins
+      the first draw under the union of the columns. It is merged only when:
+      - nothing else is waiting
+      - the sprite doesn't sample its own target
+      - the RE4 draw-skip rule is idle
+      - the strip-cover logic (W1) would do nothing (opaque sprites are left out for now)
+    - PC: 9,664 merges, fixed-function draws 44,422 → 34,869; screenshots identical in two
+      runs.
+    - Vita R26, both changes on against both off: 3.78/3.87 against 3.57/3.64/3.55 (+6.6%).
+      R26f (on) crashed at 32 s in the vitaGL texture allocation below.
 - **Crashes in vitaGL texture memory (pre-existing).**
   - R24f: OnDraw → FindTarget → AllocateTargetGl → glTexImage2D → vitaGL `gpu_alloc_texture` →
     fault in SceLibKernel (pc e000e434, the same as five earlier dumps). vitaGL failed to

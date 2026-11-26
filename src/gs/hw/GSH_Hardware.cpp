@@ -197,6 +197,65 @@ namespace
 	// Update SameState when fields are added to the drawing state.
 	static_assert((sizeof(void*) != 8) || (sizeof(CSoftwareRasterizer::STATE) == 180), "STATE changed");
 
+	// The fields that differ between two states, by name (host --state-breaks)
+	std::string StateDifference(const CSoftwareRasterizer::STATE& a, const CSoftwareRasterizer::STATE& b)
+	{
+		std::string out;
+		if(a.gouraud != b.gouraud) out += " gouraud";
+		if(a.textured != b.textured) out += " textured";
+		if(a.fog != b.fog) out += " fog";
+		if(a.alphaBlend != b.alphaBlend) out += " alphaBlend";
+		if(a.fst != b.fst) out += " fst";
+		if(a.fbp != b.fbp) out += " fbp";
+		if(a.fbw != b.fbw) out += " fbw";
+		if(a.fpsm != b.fpsm) out += " fpsm";
+		if(a.fbmsk != b.fbmsk) out += " fbmsk";
+		if(a.zbp != b.zbp) out += " zbp";
+		if(a.zpsm != b.zpsm) out += " zpsm";
+		if(a.zmsk != b.zmsk) out += " zmsk";
+		if(a.scax0 != b.scax0) out += " scax0";
+		if(a.scax1 != b.scax1) out += " scax1";
+		if(a.scay0 != b.scay0) out += " scay0";
+		if(a.scay1 != b.scay1) out += " scay1";
+		if(a.ate != b.ate) out += " ate";
+		if(a.atst != b.atst) out += " atst";
+		if(a.aref != b.aref) out += " aref";
+		if(a.afail != b.afail) out += " afail";
+		if(a.date != b.date) out += " date";
+		if(a.datm != b.datm) out += " datm";
+		if(a.zte != b.zte) out += " zte";
+		if(a.ztst != b.ztst) out += " ztst";
+		if(a.blendA != b.blendA) out += " blendA";
+		if(a.blendB != b.blendB) out += " blendB";
+		if(a.blendC != b.blendC) out += " blendC";
+		if(a.blendD != b.blendD) out += " blendD";
+		if(a.blendFix != b.blendFix) out += " blendFix";
+		if(a.pabe != b.pabe) out += " pabe";
+		if(a.fba != b.fba) out += " fba";
+		if(a.colClamp != b.colClamp) out += " colClamp";
+		if(a.fogColor != b.fogColor) out += " fogColor";
+		if(a.tbp != b.tbp) out += " tbp";
+		if(a.tbw != b.tbw) out += " tbw";
+		if(a.tpsm != b.tpsm) out += " tpsm";
+		if(a.tw != b.tw) out += " tw";
+		if(a.th != b.th) out += " th";
+		if(a.tcc != b.tcc) out += " tcc";
+		if(a.tfx != b.tfx) out += " tfx";
+		if(a.cpsm != b.cpsm) out += " cpsm";
+		if(a.csa != b.csa) out += " csa";
+		if(a.bilinear != b.bilinear) out += " bilinear";
+		if(a.wms != b.wms) out += " wms";
+		if(a.wmt != b.wmt) out += " wmt";
+		if(a.minu != b.minu) out += " minu";
+		if(a.maxu != b.maxu) out += " maxu";
+		if(a.minv != b.minv) out += " minv";
+		if(a.maxv != b.maxv) out += " maxv";
+		if(a.ta0 != b.ta0) out += " ta0";
+		if(a.ta1 != b.ta1) out += " ta1";
+		if(a.aem != b.aem) out += " aem";
+		return out;
+	}
+
 	bool SameState(const CSoftwareRasterizer::STATE& a, const CSoftwareRasterizer::STATE& b)
 	{
 		return (a.gouraud == b.gouraud) &&
@@ -1541,9 +1600,50 @@ void CGSH_Hardware::OnStateChanged()
 		m_stats.redundantStateChanges++;
 		return;
 	}
+	if(g_stripMerge && m_stateApplied && m_stripMergeOk && !m_stripExpectSprite && StripMergeAllowed(state))
+	{
+		// The next column: the batch stays, drawn later under the columns' union
+		m_state = state;
+		m_stripExpectSprite = true;
+		return;
+	}
+	if(g_stateBreaks && !m_batch.empty() && m_stateApplied)
+	{
+		//A fixed function draw ends here: what changed (and, for scissor changes, how the
+		//batch's primitives sat in the scissor they were drawn with)
+		std::string difference = StateDifference(state, m_state);
+		static const char* fits[3] = {" [inside]", " [on edge]", " [crossing]"};
+		if(difference.find("sca") != std::string::npos) difference += fits[m_batchScissorFit];
+		auto& count = g_stateBreakCounts[difference];
+		count.first++;
+		count.second += m_batch.size();
+	}
 	FlushBatch();
 	m_state = state;
 	m_stateApplied = false;
+}
+
+bool CGSH_Hardware::StripMergeAllowed(const CSoftwareRasterizer::STATE& next) const
+{
+	// Only the scissor differs, the new column is next to the union so far (same rows)
+	auto scissorless = [](CSoftwareRasterizer::STATE s) {
+		s.scax0 = s.scax1 = s.scay0 = s.scay1 = 0;
+		return s;
+	};
+	if(!SameState(scissorless(next), scissorless(m_state))) return false;
+	if((next.scay0 != m_stripUnion[1]) || (next.scay1 != m_stripUnion[3])) return false;
+	if((next.scax0 != m_stripUnion[2] + 1) && (next.scax1 + 1 != m_stripUnion[0])) return false;
+	if(next.scax1 < next.scax0) return false;
+	// Nothing else waiting for the GL scissor: one sprite in the batch, no world, points or retained draw
+	if((m_batch.size() != 6) || !m_points.empty() || !m_worldIndices.empty() || (m_worldSlots != 0) || m_retainedRun || m_retainedPending.active) return false;
+	if(m_boundFeedback || m_drawNothing) return false;
+	// The RE4 draw-skip rule counts state applications: only when it would do nothing
+	if(g_re4SkipDof && WouldSkipDrawFor(next)) return false;
+	// The strip-cover logic (W1) would act on an opaque sprite or a cover in progress
+	if(m_stripCover.target) return false;
+	bool opaqueOverwrite = !(next.alphaBlend || (next.fbmsk != 0) || next.date || (next.ate && (next.atst != ALPHA_TEST_ALWAYS)) || (next.zte && (next.ztst != DEPTH_TEST_ALWAYS)));
+	if(opaqueOverwrite) return false;
+	return true;
 }
 
 void CGSH_Hardware::BindTexture()
@@ -1557,6 +1657,7 @@ void CGSH_Hardware::BindTexture()
 	m_texScaleS = m_texScaleT = 1.0f;
 	m_texOffsetS = m_texOffsetT = 0.0f;
 	m_textureAlphaDoubled = false;
+	m_boundFeedback = false;
 
 	if(!s.textured)
 	{
@@ -1627,6 +1728,7 @@ void CGSH_Hardware::BindTexture()
 			}
 			m_depthSceneValid = false;
 			texture = m_feedbackTexture;
+			m_boundFeedback = true;
 		}
 		glBindTexture(GL_TEXTURE_2D, texture);
 		if(m_diagFile && (m_diagUploads.size() < 60000))
@@ -2552,6 +2654,7 @@ bool CGSH_Hardware::BuildWorldProgram()
 void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 {
 	GsProfile::CScope gsSection(GsProfile::SECTION_WORLD);
+	if(m_stripUnionActive || m_stripExpectSprite) FlushBatch(); //strip_merge: the sprite under its columns first
 	SettleStripCover(); //W1: a strip clear in progress ends here
 	if(!g_gpuWorld || (batch.count == 0) || g_gsCeiling)
 	{
@@ -2623,38 +2726,57 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 	// Projected skinning batches share one slot: their constants do not depend on the batch
 	// (only the fog factor), so consecutive ones are one draw as their packets were one batch
 	float fogFactor = s.fog ? static_cast<float>((m_nReg[GS_REG_FOG] >> 56) & 0xFF) / 255.0f : 1.0f;
-	bool shareSlot = batch.clipSpace && (m_worldSlots != 0) && m_worldSlotProjected && (m_worldTexOffset[(m_worldSlots - 1) * 4 + 2] == fogFactor);
-	if(!shareSlot && (m_worldSlots >= std::min<uint32>(std::max<uint32>(g_gpuWorldSlots, 1), WORLD_SLOTS))) FlushWorld();
-	g_gpuWorldBatches++;
-	uint32 slot = shareSlot ? (m_worldSlots - 1) : m_worldSlots++;
-	m_worldSlotProjected = batch.clipSpace;
-	// Constants: the matrix with the position scale folded in, colour offset and scale
-	float* m = m_worldMatrix + slot * 16;
+	// Constants: the matrix with the position scale folded in, colour offset and scale, texture
+	// offset, fog
+	float lm[16], lco[4], lcs[4], lto[4];
 	for(int r = 0; r < 4; r++)
 	{
 		float factor = (r < 3) ? batch.scale : 1.0f;
 		const auto& row = batch.projection[r];
-		m[r * 4 + 0] = row.x * factor;
-		m[r * 4 + 1] = row.y * factor;
-		m[r * 4 + 2] = row.z * factor;
-		m[r * 4 + 3] = row.w * factor;
+		lm[r * 4 + 0] = row.x * factor;
+		lm[r * 4 + 1] = row.y * factor;
+		lm[r * 4 + 2] = row.z * factor;
+		lm[r * 4 + 3] = row.w * factor;
 	}
-	float* co = m_worldColorOffset + slot * 4;
-	co[0] = batch.colorOffset.x;
-	co[1] = batch.colorOffset.y;
-	co[2] = batch.colorOffset.z;
-	co[3] = 0;
-	float* cs = m_worldColorScale + slot * 4;
-	cs[0] = batch.colorScale.x * batch.colorOffset.w;
-	cs[1] = batch.colorScale.y * batch.colorOffset.w;
-	cs[2] = batch.colorScale.z * batch.colorOffset.w;
-	cs[3] = 1;
-	float* to = m_worldTexOffset + slot * 4;
-	to[0] = batch.vf31.x;
-	to[1] = batch.vf31.y;
+	lco[0] = batch.colorOffset.x;
+	lco[1] = batch.colorOffset.y;
+	lco[2] = batch.colorOffset.z;
+	lco[3] = 0;
+	lcs[0] = batch.colorScale.x * batch.colorOffset.w;
+	lcs[1] = batch.colorScale.y * batch.colorOffset.w;
+	lcs[2] = batch.colorScale.z * batch.colorOffset.w;
+	lcs[3] = 1;
+	lto[0] = batch.vf31.x;
+	lto[1] = batch.vf31.y;
 	// The FOG register at the batch's kicks (the packet does not set it; games set it per object)
-	to[2] = fogFactor;
-	to[3] = batch.clipSpace ? 1.0f : 0.0f;
+	lto[2] = fogFactor;
+	lto[3] = batch.clipSpace ? 1.0f : 0.0f;
+	bool shareSlot = false;
+	if(m_worldSlots != 0)
+	{
+		uint32 last = m_worldSlots - 1;
+		if(batch.clipSpace)
+		{
+			shareSlot = m_worldSlotProjected && (m_worldTexOffset[last * 4 + 2] == fogFactor);
+		}
+		else if(g_worldShareSlots && !m_worldSlotProjected)
+		{
+			// world_share_slots: a batch whose constants are the open slot's, bit for bit (the
+			// next batch of the same object), joins its draw: the same shader arithmetic, its
+			// triangles after the slot's in the one draw, as the two draws were in order
+			shareSlot = (std::memcmp(lm, m_worldMatrix + last * 16, sizeof(lm)) == 0) && (std::memcmp(lco, m_worldColorOffset + last * 4, sizeof(lco)) == 0) &&
+			            (std::memcmp(lcs, m_worldColorScale + last * 4, sizeof(lcs)) == 0) && (std::memcmp(lto, m_worldTexOffset + last * 4, sizeof(lto)) == 0);
+			if(shareSlot) g_worldSlotShares++;
+		}
+	}
+	if(!shareSlot && (m_worldSlots >= std::min<uint32>(std::max<uint32>(g_gpuWorldSlots, 1), WORLD_SLOTS))) FlushWorld();
+	g_gpuWorldBatches++;
+	uint32 slot = shareSlot ? (m_worldSlots - 1) : m_worldSlots++;
+	m_worldSlotProjected = batch.clipSpace;
+	std::memcpy(m_worldMatrix + slot * 16, lm, sizeof(lm));
+	std::memcpy(m_worldColorOffset + slot * 4, lco, sizeof(lco));
+	std::memcpy(m_worldColorScale + slot * 4, lcs, sizeof(lcs));
+	std::memcpy(m_worldTexOffset + slot * 4, lto, sizeof(lto));
 	// Vertices, and triangles where the program does not set ADC for a restart. Culling and
 	// clipping are the GPU's: each triangle's order follows its winding sign so that GL_FRONT
 	// culling drops what the program's back face test drops.
@@ -2751,6 +2873,7 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 			{
 				Re4Vu1::WORLD_VERTEX last3[3] = {Re4Vu1::ReadWorldVertex(batch, i - 2), Re4Vu1::ReadWorldVertex(batch, i - 1), Re4Vu1::ReadWorldVertex(batch, i)};
 				DrawClippedWorldTriangle(last3);
+				m_batchHasClippedWorld = true;
 			}
 		}
 		if((i >= 2) && (raw[7] == 0) && !clipped)
@@ -3401,8 +3524,12 @@ bool CGSH_Hardware::SkipDrawRule()
 
 bool CGSH_Hardware::WouldSkipDraw() const
 {
-	//SkipDrawRule's answer for the current state, without counting
-	const auto& s = m_state;
+	return WouldSkipDrawFor(m_state);
+}
+
+bool CGSH_Hardware::WouldSkipDrawFor(const CSoftwareRasterizer::STATE& s) const
+{
+	//SkipDrawRule's answer for a state, without counting
 	if(m_skipDraws != 0) return true;
 	if(!s.textured || (s.fbp != 0x310000)) return false;
 	if((s.fpsm == CGSHandler::PSMCT32) && (s.tbp == 0x1C0000) && (s.tpsm == CGSHandler::PSMZ24)) return g_re4SkipDof != 0;
@@ -3929,6 +4056,29 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 	} regTimer{g_regSplitUs[2]}; //register path split (perf.csv reg_split)
 	g_primitiveCalls++;
 	if(m_diagFile) m_diagKinds[kind & 3]++;
+	if(m_stripExpectSprite)
+	{
+		m_stripExpectSprite = false;
+		auto same = [](const CSoftwareRasterizer::VERTEX& a, const CSoftwareRasterizer::VERTEX& b) {
+			return (a.x == b.x) && (a.y == b.y) && (a.z == b.z) && (a.r == b.r) && (a.g == b.g) && (a.b == b.b) && (a.a == b.a) && (a.fog == b.fog) &&
+			       (std::memcmp(&a.s, &b.s, sizeof(float)) == 0) && (std::memcmp(&a.t, &b.t, sizeof(float)) == 0) && (std::memcmp(&a.q, &b.q, sizeof(float)) == 0) &&
+			       (std::memcmp(&a.u, &b.u, sizeof(a.u)) == 0) && (std::memcmp(&a.v, &b.v, sizeof(a.v)) == 0);
+		};
+		if(m_stateApplied && (kind == CSoftwareRasterizer::PRIMITIVE_SPRITE) && same(vertices[0], m_stripSprite[0]) && same(vertices[1], m_stripSprite[1]))
+		{
+			const auto& s = m_state;
+			m_stripUnion[0] = std::min(m_stripUnion[0], s.scax0);
+			m_stripUnion[2] = std::max(m_stripUnion[2], s.scax1);
+			glScissor(m_stripUnion[0], m_stripUnion[1], m_stripUnion[2] - m_stripUnion[0] + 1, m_stripUnion[3] - m_stripUnion[1] + 1);
+			m_stripUnionActive = true;
+			g_stripMerges++;
+			return;
+		}
+		// Something else: the batch is drawn under the union so far, then this state applies as it
+		// would have at the scissor change
+		FlushBatch();
+		m_stateApplied = false;
+	}
 	if(!m_stateApplied)
 	{
 		// The first primitive after a state change: an opaque sprite over
@@ -4065,6 +4215,17 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 	{
 		for(size_t i = firstVertex; i < m_batch.size(); i++) m_batchIndices.push_back(static_cast<uint16>(i));
 	}
+	m_stripMergeOk = (kind == CSoftwareRasterizer::PRIMITIVE_SPRITE) && (firstVertex == 0) && (m_batch.size() == 6);
+	if(m_stripMergeOk)
+	{
+		m_stripSprite[0] = vertices[0];
+		m_stripSprite[1] = vertices[1];
+		const auto& s = m_state;
+		m_stripUnion[0] = s.scax0;
+		m_stripUnion[1] = s.scay0;
+		m_stripUnion[2] = s.scax1;
+		m_stripUnion[3] = s.scay1;
+	}
 	if(m_currentTarget)
 	{
 		int32 minX = vertices[0].x, maxX = vertices[0].x, minY = vertices[0].y, maxY = vertices[0].y;
@@ -4075,6 +4236,26 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 			maxX = std::max(maxX, vertices[i].x);
 			minY = std::min(minY, vertices[i].y);
 			maxY = std::max(maxY, vertices[i].y);
+		}
+		{
+			//The pixels this primitive can cover, against its scissor: 0 strictly inside (no
+			//pixel centre on or beyond an edge of the scissor rectangle), 1 inside with an edge on
+			//the rectangle's edge, 2 crossing it
+			const auto& sc = m_state;
+			int32 x0 = sc.scax0 * 16, x1 = (sc.scax1 + 1) * 16, y0 = sc.scay0 * 16, y1 = (sc.scay1 + 1) * 16;
+			int fit = 0;
+			if((minX < x0) || (maxX > x1) || (minY < y0) || (maxY > y1)) fit = 2;
+			else if((maxX == x1) || (maxY == y1)) fit = 1;
+			m_batchScissorFit = std::max(m_batchScissorFit, fit);
+			static int printed = 0;
+			if(g_stateBreaks && (fit == 2) && (kind == CSoftwareRasterizer::PRIMITIVE_SPRITE) && (printed < 40) && ((g_primitiveCalls % 97) == 0))
+			{
+				printed++;
+				std::printf("crossing sprite: %.2f,%.2f - %.2f,%.2f scissor %d,%d-%d,%d fb %X/%u tex %d fst %d %X/%u/%X %ux%u uv %.2f,%.2f-%.2f,%.2f st %.4f,%.4f-%.4f,%.4f blend %d zte %d\n",
+				            vertices[0].x / 16.0, vertices[0].y / 16.0, vertices[1].x / 16.0, vertices[1].y / 16.0, sc.scax0, sc.scay0, sc.scax1, sc.scay1, sc.fbp, sc.fbw,
+				            sc.textured ? 1 : 0, sc.fst ? 1 : 0, sc.tbp, sc.tbw, sc.tpsm, sc.tw, sc.th, vertices[0].u, vertices[0].v, vertices[1].u, vertices[1].v,
+				            vertices[0].s / vertices[0].q, vertices[0].t / vertices[0].q, vertices[1].s / vertices[1].q, vertices[1].t / vertices[1].q, sc.alphaBlend ? 1 : 0, sc.zte ? 1 : 0);
+			}
 		}
 		MarkTargetDirty(*m_currentTarget, minX >> 4, minY >> 4, (maxX >> 4) + 2, (maxY >> 4) + 2);
 	}
@@ -4091,6 +4272,8 @@ void CGSH_Hardware::OnDrawStripTriangle(const CSoftwareRasterizer::VERTEX* verti
 		~REG_TIMER() { if(g_fineTimers) total += NowUs() - start; }
 	} regTimer{g_regSplitUs[3]}; //register path split (perf.csv reg_split)
 	g_primitiveCalls++;
+	if(m_stripUnionActive || m_stripExpectSprite) FlushBatch(); //strip_merge: the sprite under its columns first
+	m_stripMergeOk = false;
 	if(m_stripCover.target) SettleStripCover(); //W1
 	g_stripCalls++;
 	if(continues) g_stripContinues++;
@@ -4215,6 +4398,19 @@ void CGSH_Hardware::FlushPoints()
 
 void CGSH_Hardware::FlushBatch()
 {
+	bool unionActive = m_stripUnionActive, expecting = m_stripExpectSprite;
+	m_stripUnionActive = m_stripExpectSprite = false;
+	FlushBatchImpl();
+	m_stripMergeOk = false;
+	if(unionActive || expecting)
+	{
+		//Drawn under the columns' union: the current state applies from here (its own scissor)
+		m_stateApplied = false;
+	}
+}
+
+void CGSH_Hardware::FlushBatchImpl()
+{
 	GsProfile::CScope gsSection(GsProfile::SECTION_FLUSH);
 	struct REG_TIMER
 	{
@@ -4254,6 +4450,7 @@ void CGSH_Hardware::FlushBatch()
 		GsProfile::CScope glSection(GsProfile::SECTION_GL_DRAW);
 		g_drawsByKind[1]++;
 		g_drawElementsByKind[1] += m_batch.size();
+		if(m_batchHasClippedWorld) { g_drawsWithClippedWorld++; g_drawsWithClippedWorldVertices += m_batch.size(); }
 		glDrawArrays(m_batchMode, 0, static_cast<GLsizei>(m_batch.size()));
 	}
 	if(m_alphaPass)
@@ -4278,6 +4475,8 @@ void CGSH_Hardware::FlushBatch()
 		}
 	}
 	m_batch.clear();
+	m_batchHasClippedWorld = false;
+	m_batchScissorFit = 0;
 	m_stats.drawCalls++;
 	if(m_currentTarget) m_currentTarget->drawBatches++;
 	if(m_diagFile && m_currentTarget) m_diagDraws[DiagKey(m_currentTarget->fbp, m_currentTarget->fbw, m_currentTarget->psm)]++;
