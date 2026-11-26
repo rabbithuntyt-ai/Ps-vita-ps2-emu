@@ -1,0 +1,109 @@
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -38,6 +38,8 @@
+ 	//wait for room (vif_ring_kb)
+ 	std::atomic<uint64> ringPeak = 0;
+ 	std::atomic<uint64> ringWaits = 0;
++	//vif_merge: DMA tag records joined with the data record after them
++	std::atomic<uint64> merged = 0;
+ };
+ 
+ class CVpu
+@@ -154,6 +156,8 @@
+ 	//(VIF1 stalled on an interrupt or a stopped program). VIF1 state is then the EE's.
+ 	bool IsAsyncQuiet() const
+ 	{
++		//EE thread only (as every caller): a held tag record is published before VIF1 state is judged
++		if(m_asyncHeld) const_cast<CVpu*>(this)->PublishHeld();
+ 		return (m_asyncQueued.load(std::memory_order_acquire) == 0) || m_asyncStalled.load(std::memory_order_acquire);
+ 	}
+ 	//EE thread: waits until IsAsyncQuiet()
+@@ -166,6 +170,12 @@
+ 	//on the Vita: a 4 MB ring misses the CPU caches on every write and every read by the worker;
+ 	//one that fits the shared L2 does not, if the worker keeps close enough behind
+ 	static inline uint32 g_asyncRingSize = 0x400000; //ASYNC_RING_SIZE
++	//vif_merge: a chain's DMA tag (TTE: one 16-byte record whose upper 8 bytes are VIF codes) and
++	//the data record after it go into the ring as one record. The tag record is held unpublished
++	//until the next record, or until the EE thread asks whether VIF1 is quiet. The worker reads the
++	//same words in the same order (the stream skips the tag's lower 8 bytes either way); RE4 queues
++	//about 15,000 records a game frame, half of them tags, each with its own atomics and wake check
++	static inline bool g_asyncMerge = false;
+ 	//Diagnostics (PC runner, --reuse-scan): GIF data the relay hands to the GS, hashed; a packet
+ 	//"repeats" when the same bytes were relayed in the last REUSE_WINDOW vblanks.
+ 	//[0] XGKICK packets, [1] VIF1 DIRECT transfers; counts and bytes, all and repeated
+@@ -323,6 +333,11 @@
+ 	std::deque<ASYNC_PACKET> m_asyncQueue;
+ 	std::atomic<bool> m_asyncOverflow = false; //records go to m_asyncQueue (ring write position frozen)
+ 	void QueueVifRecord(const uint8* data, uint32 size, bool tagIncluded);
++	//vif_merge (EE thread): a tag record written to the ring and not yet published
++	bool m_asyncHeld = false;
++	uint32 m_asyncHeldOffset = 0; //its ring offset
++	uint32 m_asyncHeldEnd = 0;    //ring position after it
++	void PublishHeld();
+ 	std::atomic<uint32> m_asyncQueued = 0; //records queued and not finished
+ 	std::atomic<bool> m_asyncStalled = false;
+ 	bool m_asyncInProgress = false; //worker only
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -321,6 +321,27 @@
+ 		m_asyncRingMemory.reset(new uint8[m_asyncRingSize + 64]);
+ 		m_asyncRing = reinterpret_cast<uint8*>((reinterpret_cast<uintptr_t>(m_asyncRingMemory.get()) + 63) & ~uintptr_t(63));
+ 	}
++	if(m_asyncHeld)
++	{
++		//vif_merge: the data after a held tag joins its record when it fits there, then both go
++		uint32 dataSize = (size + 15) & ~15u;
++		uint32 recordEnd = m_asyncHeldOffset + sizeof(ASYNC_RECORD) + 0x10;
++		if(!tagIncluded && !m_asyncOverflow.load(std::memory_order_acquire) && (recordEnd + dataSize <= m_asyncRingSize) &&
++		   ((m_asyncHeldEnd + dataSize - m_asyncRead.load(std::memory_order_acquire)) <= m_asyncRingSize))
++		{
++			{
++				EmuProfile::CScope copyScope(EmuProfile::SECTION_VIF_COPY);
++				auto record = reinterpret_cast<ASYNC_RECORD*>(m_asyncRing + m_asyncHeldOffset);
++				std::memcpy(m_asyncRing + recordEnd, data, size);
++				record->size = 0x10 + size;
++			}
++			m_asyncHeldEnd += dataSize;
++			g_asyncStats.merged.fetch_add(1, std::memory_order_relaxed);
++			PublishHeld();
++			return;
++		}
++		PublishHeld();
++	}
+ 	auto toOverflow = [&]() {
+ 		ASYNC_PACKET packet;
+ 		packet.data.assign(data, data + size);
+@@ -381,6 +402,14 @@
+ 		record->size = size;
+ 		record->flags = tagIncluded ? ASYNC_RECORD_TAG : 0;
+ 		std::memcpy(record + 1, data, size);
++		//vif_merge: a tag announcing data (QWC != 0) waits for it
++		if(g_asyncMerge && tagIncluded && (size == 0x10) && ((*reinterpret_cast<const uint32*>(data) & 0xFFFF) != 0))
++		{
++			m_asyncHeld = true;
++			m_asyncHeldOffset = offset;
++			m_asyncHeldEnd = write + need;
++			return;
++		}
+ 	}
+ 	g_asyncStats.packets.fetch_add(1, std::memory_order_relaxed);
+ 	m_asyncQueued.fetch_add(1, std::memory_order_acq_rel);
+@@ -388,6 +417,16 @@
+ 	EmuProfile::CScope wakeScope(EmuProfile::SECTION_VIF_WAKE);
+ 	WakeWorker();
+ }
++
++void CVpu::PublishHeld()
++{
++	m_asyncHeld = false;
++	g_asyncStats.packets.fetch_add(1, std::memory_order_relaxed);
++	m_asyncQueued.fetch_add(1, std::memory_order_acq_rel);
++	m_asyncWrite.store(m_asyncHeldEnd, std::memory_order_release);
++	EmuProfile::CScope wakeScope(EmuProfile::SECTION_VIF_WAKE);
++	WakeWorker();
++}
+ 
+ void CVpu::QueueDirect(const uint8* data, uint32 size)
+ {

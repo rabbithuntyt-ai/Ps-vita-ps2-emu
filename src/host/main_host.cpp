@@ -309,6 +309,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--feed-neon")) GsTransferWrite::g_columns = true; //PSMCT32 transfer blocks written by columns
 		else if(!std::strcmp(argv[i], "--image-no-copy")) CGSHandler::g_imageNoCopy = true; //DIRECT image data to the GS thread without a copy
 		else if(!std::strcmp(argv[i], "--vif-ring-kb") && (i + 1 < argc)) CVpu::g_asyncRingSize = static_cast<uint32>(std::atoi(argv[++i])) * 1024; //VIF1 ring size (power of 2, >= 128)
+		else if(!std::strcmp(argv[i], "--vif-merge")) CVpu::g_asyncMerge = true; //DMA tag records joined with their data records in the VIF1 ring
 		else if(!std::strcmp(argv[i], "--fine-timers")) CGSH_Hardware::g_fineTimers = true; //per batch timers: retained world segments printed at the end
 		else if(!std::strcmp(argv[i], "--feed-shapes")) CGSH_Hardware::g_feedShapes = true; //host to local transfers by format, size and alignment
 		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
@@ -671,7 +672,7 @@ int main(int argc, char** argv)
 			auto& a = CVpu::g_asyncStats;
 			std::printf("async VIF1: %llu packets, %.1f MB, %llu stalls, %llu quiet waits (%.0f ms), %llu PATH3 syncs\n", (unsigned long long)a.packets.load(),
 			            a.bytes.load() / 1048576.0, (unsigned long long)a.stalls.load(), (unsigned long long)a.quietWaits.load(), a.quietWaitUs.load() / 1000.0, (unsigned long long)a.path3Syncs.load());
-			std::printf("VIF1 ring: %u KB, most queued at once %llu KB, %llu records waited for room\n", CVpu::g_asyncRingSize / 1024, (unsigned long long)(a.ringPeak.load() / 1024), (unsigned long long)a.ringWaits.load());
+			std::printf("VIF1 ring: %u KB, most queued at once %llu KB, %llu records waited for room, %llu tags merged\n", CVpu::g_asyncRingSize / 1024, (unsigned long long)(a.ringPeak.load() / 1024), (unsigned long long)a.ringWaits.load(), (unsigned long long)a.merged.load());
 			std::printf("image data to the GS: %.1f MB by reference, %.1f MB copied\n", CGSHandler::g_imageNoCopyBytes / 1048576.0, CGSHandler::g_imageCopyBytes / 1048576.0);
 			std::printf("relay: %llu kicks (%.1f MB), %llu DIRECT (%.1f MB), %llu replaced; %llu register writes\n",(unsigned long long)a.kicks.load(), a.kickBytes.load() / 1048576.0,
 			            (unsigned long long)a.directs.load(), a.directBytes.load() / 1048576.0, (unsigned long long)a.customs.load(), (unsigned long long)CGSHandler::g_writeBufferTotal);

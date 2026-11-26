@@ -968,6 +968,27 @@ headers and comments. The ideas worth testing are in the brief's "Not done yet" 
   - Threads pinned one per core with individual-queue priorities.
   - Counters published once per vsync to avoid cross-core atomics per draw.
 
+### VIF1 ring: DMA tags joined with their data (26 Nov 2026, patch 0133, `vif_merge`, off)
+
+- **What a ring record is here:** one DMA transfer, not one unpack. In a source chain with TTE the
+  DMAC hands VIF1 the tag first (one qword, `tagIncluded`: its upper 8 bytes are VIF codes), then
+  the tag's data. So every chain step was two records: a 16-byte tag, then ~260 bytes of data,
+  each with its own header, two atomics, a publish and a wake check on the emulation thread, and
+  its own `ProcessPacket` setup on the worker.
+- **Now:** a tag whose QWC is not 0 is written to the ring but not published. The next record, if
+  it is untagged and fits after it, is copied behind the tag in the same record and both are
+  published together; anything else publishes the tag first. The EE thread also publishes it
+  whenever it asks whether VIF1 is quiet (every caller is on the EE thread; `CountTicks` asks
+  every tick), so a held tag never waits long. The worker's stream reads the same words in the
+  same order: it skips the tag's lower 8 bytes at a record's start either way.
+- Merging further (several tag/data pairs in one record) would need the stream to skip a tag's
+  lower half in the middle of a record; replacing it by VIF NOPs is wrong when a command spans the
+  tag, which the EE thread cannot see. Not done.
+- **PC (RE4 walk, 420 vblanks):** records 2,363,183 to 1,386,960 (976,223 tags merged, -41%),
+  same 594 MB, no stalls or waits for room; all 8 screenshots identical, same primitive count.
+- **Vita:** not measured (offline). Expected on the emulation thread: part of VIFqueue (12 ms a
+  game frame without the copy) and VIFwake.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an
