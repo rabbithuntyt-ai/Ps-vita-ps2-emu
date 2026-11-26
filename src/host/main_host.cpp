@@ -307,6 +307,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--solid-readback-check")) CGSH_Hardware::g_solidReadbackCheck = true; //solid read-backs also read the GPU and count differences
 		else if(!std::strcmp(argv[i], "--no-mailbox-batch")) CMailBox::g_batched = false; //one lock and one notify per mailbox call
 		else if(!std::strcmp(argv[i], "--feed-neon")) GsTransferWrite::g_columns = true; //PSMCT32 transfer blocks written by columns
+		else if(!std::strcmp(argv[i], "--fine-timers")) CGSH_Hardware::g_fineTimers = true; //per batch timers: retained world segments printed at the end
 		else if(!std::strcmp(argv[i], "--feed-shapes")) CGSH_Hardware::g_feedShapes = true; //host to local transfers by format, size and alignment
 		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
 		else if(!std::strcmp(argv[i], "--reuse-scan")) CVpu::g_reuseScan = CGSHandler::g_shadowRegs = true; //relayed GIF data repeated across frames
@@ -688,6 +689,7 @@ int main(int argc, char** argv)
 			std::printf("solid colours not learned (read-back not one colour): %llu; first difference at %u,%u: GPU %08X, written %08X\n", (unsigned long long)CGSH_Hardware::g_solidLearnFailures, CGSH_Hardware::g_solidFirstMismatch[0], CGSH_Hardware::g_solidFirstMismatch[1], CGSH_Hardware::g_solidFirstMismatch[2], CGSH_Hardware::g_solidFirstMismatch[3]);
 			std::printf("solid uploads: %llu (%llu pixels), pixels differing from memory %llu\n", (unsigned long long)CGSH_Hardware::g_solidUploads, (unsigned long long)CGSH_Hardware::g_solidUploadPixels, (unsigned long long)CGSH_Hardware::g_solidUploadMismatches);
 			std::printf("world batches taken from the pool: %llu, allocated: %llu\n", (unsigned long long)Re4Vu1::g_batchesPooled, (unsigned long long)Re4Vu1::g_batchesAllocated);
+			if(CGSH_Hardware::g_fineTimers) std::printf("retained world ms: matrix %.0f, hash %.0f, box %.0f, flush/setup %.0f, uniforms %.0f, draw %.0f; slot path %.0f\n", CGSH_Hardware::g_retainedSegmentUs[0] / 1000.0, CGSH_Hardware::g_retainedSegmentUs[1] / 1000.0, CGSH_Hardware::g_retainedSegmentUs[2] / 1000.0, CGSH_Hardware::g_retainedSegmentUs[3] / 1000.0, CGSH_Hardware::g_retainedSegmentUs[4] / 1000.0, CGSH_Hardware::g_retainedSegmentUs[5] / 1000.0, CGSH_Hardware::g_worldSlotUs / 1000.0);
 			for(int psm = 0; psm < 64; psm++)
 			{
 				if(CGSH_Hardware::g_feedCallsByPsm[psm] == 0) continue;
