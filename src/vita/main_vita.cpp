@@ -428,6 +428,10 @@ namespace
 		else if(key == "clip_reject") CGSH_Hardware::g_clipReject = value != 0; //world triangles wholly outside one clip plane skip the CPU clipper (exact; on)
 		else if(key == "world_share_slots") CGSH_Hardware::g_worldShareSlots = value != 0; //world batches with the same constants share a draw (exact; on)
 		else if(key == "strip_merge") CGSH_Hardware::g_stripMerge = value != 0; //a sprite redrawn for the next scissor column joins the previous draw (exact; on)
+		else if(key == "world_uniforms_used") CGSH_Hardware::g_worldUniformsUsed = value != 0; //world draws upload only the uniform slots in use (exact; on)
+		else if(key == "target_pool_lru") CGSH_Hardware::g_targetPoolLru = value != 0; //full target pool drops its oldest entry; stale entries freed (on)
+		else if(key == "target_pool_max_age") CGSH_Hardware::g_targetPoolMaxAge = static_cast<uint32_t>(value); //frames a pooled target may wait (300)
+		else if(key == "target_pool_min_age") CGSH_Hardware::g_targetPoolMinAge = static_cast<uint32_t>(value); //frames before a pooled target is reused (1)
 		else if(key == "gpu_skin") Re4Skin::g_gpuSkin = value != 0; //RE4: one-matrix skinning batches drawn by the GPU world path (off)
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
@@ -905,7 +909,7 @@ namespace
 				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop");
 				//The IOP thread's sections (iop_thread)
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",iopt_%s", EmuProfile::GetSectionName(i));
-				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3,gs_feed_ms,gs_feed_calls,gs_feed_kb,gs_regs_ms,gs_reg_calls,gs_reg_writes,gs_mail_calls,world_ms,targets_pooled,gs_send_ms,gs_send_calls,vif1_readback_ms,vif1_readbacks,vif1_readback_kb,gs_wait_ms,gs_wait_calls,world_hits,world_misses,world_cache_mb,world_runs,world_seg,world_slot_ms,reg_split,apply_calls,draw_calls,apply_split,prim_calls,gs_sections,gs_ready_sections,gs_blocked_sections,vu1_sections,gs_wb_peak,gs_wb_overflows");
+				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3,gs_feed_ms,gs_feed_calls,gs_feed_kb,gs_regs_ms,gs_reg_calls,gs_reg_writes,gs_mail_calls,world_ms,targets_pooled,gs_send_ms,gs_send_calls,vif1_readback_ms,vif1_readbacks,vif1_readback_kb,gs_wait_ms,gs_wait_calls,world_hits,world_misses,world_cache_mb,gl_free_mb,gl_free_min_mb,gl_target_allocs,targets_live,targets_pool,world_runs,world_seg,world_slot_ms,reg_split,apply_calls,draw_calls,apply_split,prim_calls,gs_sections,gs_ready_sections,gs_blocked_sections,vu1_sections,gs_wb_peak,gs_wb_overflows");
 				std::fprintf(perfFile, "\n");
 			}
 		}
@@ -1717,6 +1721,17 @@ namespace
 								lastWaits = CGSHandler::g_waitCalls;
 								static uint64 lastHits = 0, lastMisses = 0;
 								std::fprintf(perfFile, ",%llu,%llu,%.1f", (unsigned long long)(CGSH_Hardware::g_retainedHits - lastHits), (unsigned long long)(CGSH_Hardware::g_retainedMisses - lastMisses), CGSH_Hardware::g_retainedMegabytes);
+								{
+									//vitaGL's free memory now and its lowest before a render target allocation (since the last row)
+									static uint64 lastAllocs = 0;
+									auto hw = GetHardwareGs(session.get());
+									uint64 freeMin = (CGSH_Hardware::g_glFreeMin == UINT64_MAX) ? CGSH_Hardware::GlFreeBytes() : CGSH_Hardware::g_glFreeMin;
+									std::fprintf(perfFile, ",%.1f,%.1f,%llu,%u,%u", CGSH_Hardware::GlFreeBytes() / 1048576.0, freeMin / 1048576.0,
+									             (unsigned long long)(CGSH_Hardware::g_targetAllocs - lastAllocs), hw ? static_cast<unsigned>(hw->GetTargetCount()) : 0u,
+									             hw ? static_cast<unsigned>(hw->GetTargetPoolSize()) : 0u);
+									lastAllocs = CGSH_Hardware::g_targetAllocs;
+									CGSH_Hardware::g_glFreeMin = UINT64_MAX;
+								}
 								lastHits = CGSH_Hardware::g_retainedHits;
 								lastMisses = CGSH_Hardware::g_retainedMisses;
 								static uint64 lastRuns = 0;

@@ -734,6 +734,30 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
       runs.
     - Vita R26, both changes on against both off: 3.78/3.87 against 3.57/3.64/3.55 (+6.6%).
       R26f (on) crashed at 32 s in the vitaGL texture allocation below.
+- **Render target pool: memory and churn (`target_pool_lru`, on; R27-R29, 25 Nov 2026).**
+  - New perf.csv columns: `gl_free_mb` and `gl_free_min_mb` (vitaGL VRAM + RAM free, and the
+    lowest before a new render target), `gl_target_allocs`, `targets_live`, `targets_pool`.
+  - Before: vitaGL free memory sank through every run (about 50 MB at 18 s, about 31 MB at
+    88 s). Render targets were created about 2 times per game frame (about 760 per 120 s run).
+    - The pool kept 1024x1024, 1024x768 and 1024x544 targets from the menus for good, about
+      18.6 MB never reused.
+    - `ShrinkTarget` deleted the old GL objects instead of pooling them, so the 256x512 target
+      RE4 shrinks to 384 rows and grows back every frame was created anew each time.
+  - Now:
+    - a full pool drops its oldest entry; entries not reused within 300 frames are freed
+    - shrinks pool the old objects
+    - a pooled target is reused only from a previous frame (`target_pool_min_age=1`; reusing
+      one still in use made uploads 7 ms slower: vitaGL copies a texture written while in use)
+    - pool size 12
+  - PC: target creations 320 to 172, screenshots identical.
+  - Vita, interleaved (R29): 4.09/3.94/4.07 against 3.72/3.84/3.67 steady game fps (+7.7%).
+    - The GS target section fell from 34 to 25 ms, uploads from 23 to about 20 ms.
+    - Free GL memory stays about 46-50 MB (30-34 MB and sinking without).
+    - 74-113 target creations per run against about 760.
+    - No crash in the 12 runs since. The two vitaGL texture-allocation crashes below came
+      during this churn, but 12 runs don't prove them gone.
+  - `world_uniforms_used` (on, exact): world draws upload only the uniform slots in use (on
+    the Vita, 7 vec4s instead of 112). No separate fps measurement.
 - **Crashes in vitaGL texture memory (pre-existing).**
   - R24f: OnDraw → FindTarget → AllocateTargetGl → glTexImage2D → vitaGL `gpu_alloc_texture` →
     fault in SceLibKernel (pc e000e434, the same as five earlier dumps). vitaGL failed to

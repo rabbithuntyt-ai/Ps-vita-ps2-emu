@@ -12,6 +12,7 @@
 #ifdef __vita__
 #include <psp2/gxm.h>
 #include <psp2/kernel/processmgr.h>
+#include <vitaGL.h>
 #endif
 
 namespace
@@ -497,6 +498,21 @@ void CGSH_Hardware::MarkNewFrame()
 {
 	FlushBatch();
 	m_frameNumber++;
+	if(g_targetPoolLru)
+	{
+		//target_pool_lru: pooled targets not reused for a while give their memory back
+		for(auto it = m_targetPool.begin(); it != m_targetPool.end();)
+		{
+			if(m_frameNumber - it->releasedFrame > g_targetPoolMaxAge)
+			{
+				DeletePooledTarget(*it);
+				it = m_targetPool.erase(it);
+				g_targetPoolEvictions++;
+			}
+			else
+				++it;
+		}
+	}
 	SealRetainedChunk(); //W2: this frame's new batches into a chunk
 	TrimRetainedWorld(); //W2
 	g_retainedMegabytes = static_cast<float>(m_retainedBytes) / (1024.0f * 1024.0f);
@@ -562,10 +578,17 @@ void CGSH_Hardware::DeleteTarget(TARGET& target)
 	}
 	if(m_currentTarget == &target) m_currentTarget = nullptr;
 	if(m_lastDisplayedTarget == &target) m_lastDisplayedTarget = nullptr;
+	if(g_targetPool && g_targetPoolLru && target.framebuffer && target.colorTexture && target.depthBuffer && (m_targetPool.size() >= TARGET_POOL_SIZE))
+	{
+		//target_pool_lru: room for this one, the oldest goes (entries are in release order)
+		DeletePooledTarget(m_targetPool.front());
+		m_targetPool.erase(m_targetPool.begin());
+		g_targetPoolEvictions++;
+	}
 	if(g_targetPool && target.framebuffer && target.colorTexture && target.depthBuffer && (m_targetPool.size() < TARGET_POOL_SIZE))
 	{
 		//W1: keep the GL objects for the next target of this size (a new one costs ~19 ms on the Vita)
-		m_targetPool.push_back({target.width, target.height, target.framebuffer, target.colorTexture, target.depthBuffer});
+		m_targetPool.push_back({target.width, target.height, target.framebuffer, target.colorTexture, target.depthBuffer, m_frameNumber});
 	}
 	else
 	{
@@ -576,14 +599,16 @@ void CGSH_Hardware::DeleteTarget(TARGET& target)
 	target.framebuffer = target.colorTexture = target.depthBuffer = 0;
 }
 
+void CGSH_Hardware::DeletePooledTarget(const POOLED_TARGET& pooled)
+{
+	glDeleteFramebuffers(1, &pooled.framebuffer);
+	glDeleteTextures(1, &pooled.colorTexture);
+	glDeleteRenderbuffers(1, &pooled.depthBuffer);
+}
+
 void CGSH_Hardware::ReleaseTargetPool()
 {
-	for(const auto& pooled : m_targetPool)
-	{
-		glDeleteFramebuffers(1, &pooled.framebuffer);
-		glDeleteTextures(1, &pooled.colorTexture);
-		glDeleteRenderbuffers(1, &pooled.depthBuffer);
-	}
+	for(const auto& pooled : m_targetPool) DeletePooledTarget(pooled);
 	m_targetPool.clear();
 }
 
@@ -1036,6 +1061,15 @@ void CGSH_Hardware::RelayoutTarget(TARGET& old, TARGET& target)
 	}
 }
 
+uint64 CGSH_Hardware::GlFreeBytes()
+{
+#ifdef __vita__
+	return static_cast<uint64>(vglMemFree(VGL_MEM_VRAM)) + static_cast<uint64>(vglMemFree(VGL_MEM_RAM));
+#else
+	return 0;
+#endif
+}
+
 void CGSH_Hardware::AllocateTargetGl(TARGET& target)
 {
 	GsProfile::CScope gsSection(GsProfile::SECTION_TARGET);
@@ -1044,6 +1078,10 @@ void CGSH_Hardware::AllocateTargetGl(TARGET& target)
 	for(auto it = m_targetPool.begin(); it != m_targetPool.end(); ++it)
 	{
 		if((it->width != target.width) || (it->height != target.height)) continue;
+		//target_pool_lru: only objects released a few frames ago (the GPU is done with them; writing
+		//a texture still in use makes vitaGL copy all of it). The pool is in release order: the
+		//first match is the oldest.
+		if(g_targetPoolLru && (m_frameNumber - it->releasedFrame < g_targetPoolMinAge)) continue;
 		target.framebuffer = it->framebuffer;
 		target.colorTexture = it->colorTexture;
 		target.depthBuffer = it->depthBuffer;
@@ -1070,6 +1108,19 @@ void CGSH_Hardware::AllocateTargetGl(TARGET& target)
 		char text[64];
 		std::snprintf(text, sizeof(text), " N%X/%u:%ux%u", target.fbp, target.fbw, target.width, target.height);
 		m_diagUploads += text;
+	}
+#ifdef __vita__
+	g_glFreeBeforeTarget = GlFreeBytes();
+	g_glFreeMin = std::min(g_glFreeMin, g_glFreeBeforeTarget);
+#endif
+	g_targetAllocs++;
+	if(g_stateBreaks)
+	{
+		//host --state-breaks: render targets not served by the pool, by size, and what the pool held
+		std::string key = std::to_string(target.width) + "x" + std::to_string(target.height) + " (pool:";
+		for(const auto& pooled : m_targetPool) key += " " + std::to_string(pooled.width) + "x" + std::to_string(pooled.height);
+		key += ")";
+		g_targetMisses[key]++;
 	}
 	glGenTextures(1, &target.colorTexture);
 	glBindTexture(GL_TEXTURE_2D, target.colorTexture);
@@ -1098,14 +1149,30 @@ void CGSH_Hardware::ShrinkTarget(TARGET& target, uint32 rows)
 	// GPU (callers make sure no depth was drawn and the rest is not dirty).
 	FlushBatch();
 	GLuint oldFramebuffer = target.framebuffer, oldColor = target.colorTexture, oldDepth = target.depthBuffer;
+	uint32 oldHeight = target.height;
 	target.height = rows;
 	AllocateTargetGl(target);
 	glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
 	glBindTexture(GL_TEXTURE_2D, target.colorTexture);
 	glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, target.width, rows);
-	glDeleteFramebuffers(1, &oldFramebuffer);
-	glDeleteTextures(1, &oldColor);
-	glDeleteRenderbuffers(1, &oldDepth);
+	if(g_targetPoolLru)
+	{
+		// target_pool_lru: the old GL objects to the pool like a released target of the old size
+		// (as TrimTargetFront): RE4 shrinks a 256x512 target to 384 rows and grows it back every frame
+		TARGET old;
+		old.width = target.width;
+		old.height = oldHeight;
+		old.framebuffer = oldFramebuffer;
+		old.colorTexture = oldColor;
+		old.depthBuffer = oldDepth;
+		DeleteTarget(old);
+	}
+	else
+	{
+		glDeleteFramebuffers(1, &oldFramebuffer);
+		glDeleteTextures(1, &oldColor);
+		glDeleteRenderbuffers(1, &oldDepth);
+	}
 	target.validRows = std::min(target.validRows, rows);
 	target.drawnRows = std::min(target.drawnRows, rows);
 	target.staleEnd = std::min(target.staleEnd, rows);
@@ -2946,10 +3013,13 @@ void CGSH_Hardware::FlushWorld()
 	const auto& s = m_state;
 	const auto& target = *m_currentTarget;
 	glUseProgram(m_worldProgram);
-	glUniform4fv(m_worldLocations[0], WORLD_SLOTS * 4, m_worldMatrix);
-	glUniform4fv(m_worldLocations[1], WORLD_SLOTS, m_worldColorOffset);
-	glUniform4fv(m_worldLocations[2], WORLD_SLOTS, m_worldColorScale);
-	glUniform4fv(m_worldLocations[3], WORLD_SLOTS, m_worldTexOffset);
+	//world_uniforms_used: only the slots this draw's vertices use (slot < m_worldSlots); the
+	//others keep older values no vertex reads (the Vita draws one slot: 7 vec4s instead of 112)
+	GLsizei slots = g_worldUniformsUsed ? static_cast<GLsizei>(m_worldSlots) : static_cast<GLsizei>(WORLD_SLOTS);
+	glUniform4fv(m_worldLocations[0], slots * 4, m_worldMatrix);
+	glUniform4fv(m_worldLocations[1], slots, m_worldColorOffset);
+	glUniform4fv(m_worldLocations[2], slots, m_worldColorScale);
+	glUniform4fv(m_worldLocations[3], slots, m_worldTexOffset);
 	auto offset = make_convertible<XYOFFSET>(m_nReg[GS_REG_XYOFFSET_1 + m_primitiveMode.nContext]);
 	glUniform4f(m_worldLocations[4], 2.0f / target.width, 2.0f / target.height, 0.5f - offset.nOffsetX / 16.0f, 0.5f - offset.nOffsetY / 16.0f);
 	glUniform1f(m_worldLocations[5], static_cast<float>(32.0 / static_cast<double>(ZMaxForPsm(s.zpsm))));

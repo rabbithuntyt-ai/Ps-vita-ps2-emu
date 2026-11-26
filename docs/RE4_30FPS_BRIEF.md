@@ -253,6 +253,15 @@ frame dumps) or results compared bit for bit.
     - Vita: `world_share_slots` alone measured 3.91/4.00/3.81 against 3.55/3.66/3.73 (+7.1%);
       both together 3.78/3.87 against 3.57/3.64/3.55 (+6.6%).
     - Details: [PERF_WORK_NOT_DONE.md](PERF_WORK_NOT_DONE.md), "Fewer draws".
+19. **Render target pool fixed (`target_pool_lru`, on).**
+    - The pool held 18.6 MB of menu-sized targets forever, while the target RE4 shrinks and
+      grows back every frame was created anew each time: about 2 new render targets per game
+      frame, with vitaGL's free memory sinking all run.
+    - Now: oldest-first eviction, an age limit, shrinks go to the pool, and reuse only from a
+      previous frame.
+    - Vita: 4.09/3.94/4.07 against 3.72/3.84/3.67 steady game fps (+7.7%). Free GL memory
+      stays about 48 MB instead of sinking to about 30 MB.
+    - This is the likely cause of the vitaGL texture-allocation crashes; none in 12 runs since.
 
 ### VU recompiler (helps every game)
 

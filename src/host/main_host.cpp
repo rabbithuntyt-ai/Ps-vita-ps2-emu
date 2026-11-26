@@ -285,6 +285,9 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--world-slots") && (i + 1 < argc)) CGSH_Hardware::g_gpuWorldSlots = std::atoi(argv[++i]); //batches per world draw (Vita: 1)
 		else if(!std::strcmp(argv[i], "--state-breaks")) CGSH_Hardware::g_stateBreaks = true; //fixed function draws ended by state changes, by changed fields
 		else if(!std::strcmp(argv[i], "--no-strip-merge")) CGSH_Hardware::g_stripMerge = false; //each scissor column's sprite its own draw
+		else if(!std::strcmp(argv[i], "--all-world-uniforms")) CGSH_Hardware::g_worldUniformsUsed = false; //world draws upload all 16 uniform slots
+		else if(!std::strcmp(argv[i], "--no-target-pool-lru")) CGSH_Hardware::g_targetPoolLru = false; //full pool deletes the released target; no ageing
+		else if(!std::strcmp(argv[i], "--target-pool-min-age") && (i + 1 < argc)) CGSH_Hardware::g_targetPoolMinAge = std::atoi(argv[++i]);
 		else if(!std::strcmp(argv[i], "--feed-shapes")) CGSH_Hardware::g_feedShapes = true; //host to local transfers by format, size and alignment
 		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
 		else if(!std::strcmp(argv[i], "--reuse-scan")) CVpu::g_reuseScan = CGSHandler::g_shadowRegs = true; //relayed GIF data repeated across frames
@@ -683,6 +686,11 @@ int main(int argc, char** argv)
 					}
 					std::sort(breaks.rbegin(), breaks.rend());
 					std::printf("fixed function draws ended by a state change: %llu\n", (unsigned long long)total);
+					std::vector<std::pair<uint64, std::string>> misses;
+					for(const auto& [key, count] : CGSH_Hardware::g_targetMisses) misses.emplace_back(count, key);
+					std::sort(misses.rbegin(), misses.rend());
+					std::printf("render targets created (not from the pool): %llu, pool evictions %llu\n", (unsigned long long)CGSH_Hardware::g_targetAllocs, (unsigned long long)CGSH_Hardware::g_targetPoolEvictions);
+					for(size_t i = 0; i < std::min<size_t>(misses.size(), 15); i++) std::printf("  target miss %llu: %s\n", (unsigned long long)misses[i].first, misses[i].second.c_str());
 					for(size_t i = 0; i < std::min<size_t>(breaks.size(), 20); i++) std::printf("  state break %llu:%s\n", (unsigned long long)breaks[i].first, breaks[i].second.c_str());
 				}
 				std::printf("fixed function draws with CPU-clipped world triangles: %llu (%llu vertices)\n", (unsigned long long)CGSH_Hardware::g_drawsWithClippedWorld, (unsigned long long)CGSH_Hardware::g_drawsWithClippedWorldVertices);

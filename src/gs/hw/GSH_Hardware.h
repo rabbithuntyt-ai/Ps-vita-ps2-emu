@@ -252,6 +252,7 @@ public:
 	static inline bool g_clipReject = true, g_clipRejectCheck = false;
 	//world_share_slots (on): a world batch with the open slot's constants (bit for bit) joins its draw
 	static inline bool g_worldShareSlots = true;
+	static inline bool g_worldUniformsUsed = true; //world_uniforms_used (on): world draws upload only the slots in use
 	static inline uint64 g_worldSlotShares = 0; //batches that joined the open slot (whole run)
 	static inline bool g_stripMerge = true; //strip_merge (see m_stripMergeOk)
 	static inline uint64 g_stripMerges = 0; //sprites drawn by joining the previous column's draw (whole run)
@@ -313,6 +314,21 @@ public:
 	static inline uint32 g_gpuWorldGuard = 0;
 	static inline uint64 g_mailCalls = 0; //GPU thread mailbox calls received (G0: W5 sizes the queue records)
 	static inline bool g_targetPool = true; //W1: reuse released targets' GL objects (target_pool)
+	//target_pool_lru (on): a full pool makes room by deleting its oldest entry (not the target released
+	//now), and entries not reused within g_targetPoolMaxAge frames are deleted (RE4 kept 18 MB of
+	//1024-wide targets from its menus in the pool for good while the 256x512/256x384 targets it
+	//uses every frame were created and deleted twice a game frame)
+	static inline bool g_targetPoolLru = true;
+	static inline uint32 g_targetPoolMaxAge = 300;
+	static inline uint32 g_targetPoolMinAge = 1; //target_pool_min_age: frames before a pooled target is reused
+	static inline uint64 g_targetPoolEvictions = 0;
+	//vitaGL's free memory (VRAM + RAM pools, bytes) before each new render target's GL objects, and the
+	//lowest seen (perf.csv gl_free_mb, gl_free_min_mb; Vita); new allocations (not from the pool)
+	static inline std::map<std::string, uint64> g_targetMisses; //host --state-breaks: new render targets by size and pool contents
+	static inline uint64 g_glFreeBeforeTarget = 0, g_glFreeMin = UINT64_MAX, g_targetAllocs = 0;
+	static uint64 GlFreeBytes();
+	size_t GetTargetPoolSize() const { return m_targetPool.size(); }
+	size_t GetTargetCount() const { return m_targets.size(); }
 	static inline uint64 g_targetsPooledTotal = 0; //targets that got pooled GL objects (perf.csv targets_pooled)
 	//World vertices in one array per attribute (gpu_world_soa, on)
 	static inline bool g_gpuWorldSoa = false;
@@ -530,8 +546,10 @@ private:
 	{
 		uint32 width, height;
 		GLuint framebuffer, colorTexture, depthBuffer;
+		uint32 releasedFrame = 0; //m_frameNumber when it went into the pool
 	};
-	enum { TARGET_POOL_SIZE = 8 };
+	void DeletePooledTarget(const POOLED_TARGET&);
+	enum { TARGET_POOL_SIZE = 12 };
 	std::vector<POOLED_TARGET> m_targetPool;
 	uint32 m_diagFirstKind = 4; //diagnostics: kind of the primitive that applied the state (S entries)
 	void ReleaseTargetPool();
