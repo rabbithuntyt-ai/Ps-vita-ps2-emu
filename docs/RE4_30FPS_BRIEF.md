@@ -341,6 +341,27 @@ frame dumps) or results compared bit for bit.
 | A new VU recompiler (V2 complete) | Large for VU-heavy games | RE4's heavy VU programs are already native |
 | Run the game's draw phase every second tick (R2) | Halves draw work | A fallback (not a true 30); gate G5 never run |
 
+Ideas taken from VitaSX2 (a separate Vita PS2 emulator built on PCSX2, GPL-3.0: read for ideas only,
+nothing copied; details and sources in [PERF_WORK_NOT_DONE.md](PERF_WORK_NOT_DONE.md), "Ideas from
+VitaSX2"). None tested here yet.
+
+| Idea | Thread / section it targets | Why it looks promising |
+|---|---|---|
+| EE wait-loop fast-forward in closed form: loops that poll GS CSR VSINT, a DMAC channel's CHCR.STR, a RAM flag, or count down are jumped straight to the next scheduler event (cycles computed, not spun) | Emulation thread, EE game code (93 ms) and EE I/O | Exact if done at event seams; we have idle-loop and thread-lock HLE, but not per-poll-shape skipping. Check first how much RE4 time sits in such loops (eehot.txt) |
+| EE JIT: guest registers kept in host registers across linked blocks, with a "compatible entry" per link signature, dirty write-back at block end (VitaSX2 pins 5 GPR low words; a Q-register cache of 8 GPRs) | EE game code | Our hot code spends 10-12% of instructions on guest register loads/stores; adds the mechanism to the existing EE JIT rework item |
+| EE JIT: compare consumed only by its branch keeps the result in flags; 64-bit high words rematerialized from a sign/zero-extension fact instead of stored | EE game code | Cuts instructions per EE instruction (ours: 23) without fastmem |
+| EE JIT: loop-level memory preflight - an affine address range proven RAM (and free of compiled code) once at loop entry, then loads/stores in the body skip the per-access VTLB and code-overwrite checks | EE game code | The Vita has no page faults, so per-access checks are the price of every load; VitaSX2 reports its first such loop >=2x |
+| EE JIT: exact loop-shape recognizers for zero-fill, word-fill, word-copy and scan loops compiled as bulk operations inside the block (not function overlays) | EE game code | Our overlays of whole library functions lost to call overhead; in-block folding has none |
+| EE JIT: code-overwrite detection by a byte per 4 KB page plus a bit per 64-byte chunk | EE game code (stores) | Cheaper than checking whole pages for every store |
+| EE MMI (128-bit) ops as one NEON instruction per lane-wise op | EE game code | Check what CodeGen emits for RE4's MMI use |
+| VIF1: adjacent V4-32 unpack records merged in place before the worker can see them | Emulation thread (VIFqueue 12, VIFcopy 20), worker unpack | RE4 queues ~15,400 records of ~260 bytes a game frame; fewer, larger records cut per-record work on both threads |
+| VIF1: the EE does not wait for the VU1 worker except when it reads VU state; VIF1's finish is scheduled from a cycle estimate | Emulation thread, VU1 wait (32 ms) | Our per-vblank wait off moved the time to the GS wait; VitaSX2 removes waits at their source instead. Needs care with RE4's sync points |
+| VU JIT: all 16 NEON Q registers (D16-D31 reloaded only after helper calls), MAC/STATUS flag liveness so unread flags are not computed, flags held in registers until the block end, per-lane normalization tracking | VU1 worker (VU1 JIT 14 ms; other games much more) | Our allocator has 8 NEON registers and that was the wall (PERF_WORK_NOT_DONE.md, V2) |
+| GS: render targets kept on the GPU between uses with versioned "needs store" flags; read-backs through the GPU copy engine with a completion fence (not glReadPixels) | GS thread, read-backs (13-23 ms) | Also fixes the stale vitaGL read-back bug (26 Nov); needs our own GXM calls next to vitaGL or the W6 GXM path |
+| GS: ~40 shader variants compiled offline, chosen per draw by exactness predicates; blending through the shader patcher's fixed-function blend where it is exact | GS thread, draw cost | Part of W6; shows how to keep GXM draws cheap |
+| GS mailbox: entries carry pointers to the packet data (no payload copies), adjacent PATH1 reservations merged, counters published once per vsync | Emulation thread relay, GS "other" | Matches the DIRECT no-copy work started on 26 Nov |
+| GPU-VU (VU1 programs on the GPU): lesson only | - | Their own measurements: GXM jobs (about 120 a second) dominate, small batches are slower than the CPU; only one SDK sample gained (2 to 8 fps). Not worth it for RE4 beyond the vertex shaders we already use |
+
 ## Why 30 is far away
 
 - **All three threads need cutting together.** Even with no waiting at all, the emulation

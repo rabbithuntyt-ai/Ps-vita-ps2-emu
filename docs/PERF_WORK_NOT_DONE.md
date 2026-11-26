@@ -912,6 +912,62 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
   (R53): about 226 fixed function, 119 world slot, 183 retained; world batches about 915 retained,
   268 slot, 432 skinning.
 
+### Ideas from VitaSX2 (read 26 Nov 2026)
+
+VitaSX2 (github.com/shoui520/vitasx2) is a Vita-only redesign of PCSX2: its own AArch32
+recompilers for the EE, IOP, VU and VIF, PCSX2's hardware renderer on GXM directly, and VU1
+programs run on the GPU. GPL-3.0, so nothing was copied (this project is BSD-2): its headers,
+comments and shaders were read for ideas. Last visible commits 22 Sep 2026. Its README reports
+retail games at 2-9 fps and says it "does not play PS2 games at full speed and never will".
+Large .cpp files were read only in part, so implementation details below come mostly from
+headers and comments. The ideas worth testing are in the brief's "Not done yet" table.
+
+- **EE:** two tiers. Tier zero is a per-block compiler with up to 5 guest GPR low words pinned in
+  callee-saved registers. Direct links enter a "compatible entry" that keeps the predecessor's
+  pinned registers, and dirty pins are written back at block end. Above it is a region tier: an
+  SSA IR with 128-bit GPR values split into 32-bit words, a reference interpreter and a verifier.
+  - Regions are formed from loops seen 8+ times. A compile is kept only if a Cortex-A9 cost
+    estimate shows a 2x break-even.
+  - Optimizations: store-to-load forwarding, compare-to-branch flag folding, and high-word
+    rematerialization from extension facts.
+  - Loop memory preflight: counted and bounded address ranges are checked once at loop entry.
+  - No fastmem ("the Vita has no user-mode mprotect, no page-fault handler, and no multi-mapping
+    of physical pages"): every guest access goes through a software VTLB table.
+  - Code-overwrite guard: a byte per 4 KB page plus a bit per 64-byte chunk.
+  - Wait loops fast-forwarded in closed form: poll calls, GS CSR VSINT, DMAC CHCR.STR, RAM flags,
+    signed countdowns.
+  - Exact zero-fill, fill and copy loops compiled as bulk operations. MMI ops one NEON instruction
+    each. VU0 macro mode inlined under a VU0-idle guard.
+  - Its own measurements: the first loop-preflight loop >=2x; VU0 affine streams 1.47-2.6x.
+- **VU1:** threaded (EE core 0, VU core 1, GS core 2, core 3 left to the system). The worker does
+  the VIF unpack with NEON burst paths and prefetch, the EE waits only when it reads VU state,
+  and VIF1's finish is scheduled from an estimate. Adjacent V4-32 unpacks are merged before
+  publication. In the VU JIT:
+  - MAC/STATUS flag liveness, flags deferred to the block end, per-lane normalization tracking;
+  - constants kept in Q8-Q15 and reloaded after helper calls;
+  - MADD/MSUB accumulator chains kept in scalar VFP ("1-ULP drift ... through NEON");
+  - fast reciprocal/rsqrt only as an opt-in speedhack ("not by itself lower latency").
+  Code is compiled on the EE thread because the Vita's VM-domain write mode is process-wide.
+- **GS:** PCSX2's GSRendererHW and texture cache on a GXM device.
+  - Targets stay resident in a tiled render store, with load flags and versions. Read-backs use
+    the GXM transfer engine with fence serials.
+  - About 40 TFX fragment variants are compiled offline and chosen by exactness predicates.
+  - At most 8 scenes per render target ("the ninth scene serialises").
+  - The mailbox is a 256 KB ring of 16-byte tags pointing at the payload in place.
+- **GPU-VU:** VU1 microcode is interpreted by a vertex shader, or per-loop Cg is generated and
+  compiled with ShaccCg on the console. Results stay on the GPU until a CPU observer reads them,
+  with exact and "playable" arithmetic profiles. Their findings:
+  - GXM firmware jobs (about 120 a second) are the bottleneck;
+  - 7-pair epochs fell from 36 to 12-13 vsync/s on the GPU;
+  - ShaccCg aborted on 31-32 KB shaders.
+  Only one SDK sample is reported faster (2 to 8 fps), and product admission is still closed.
+- **Platform:**
+  - A 22 MB JIT arena through kubridge (RWX); a 77 MB newlib heap.
+  - `std::mutex` did not serialize in their product ELF (a weak gthread probe), so they use
+    `sceKernelLwMutex` with priority ordering.
+  - Threads pinned one per core with individual-queue priorities.
+  - Counters published once per vsync to avoid cross-core atomics per draw.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an
