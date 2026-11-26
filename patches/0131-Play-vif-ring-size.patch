@@ -1,0 +1,81 @@
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -34,6 +34,10 @@
+ 	std::atomic<uint64> directs = 0;
+ 	std::atomic<uint64> directBytes = 0;
+ 	std::atomic<uint64> customs = 0;
++	//VIF1 ring: the most bytes queued and not yet taken by the worker, and the records that had to
++	//wait for room (vif_ring_kb)
++	std::atomic<uint64> ringPeak = 0;
++	std::atomic<uint64> ringWaits = 0;
+ };
+ 
+ class CVpu
+@@ -157,6 +161,11 @@
+ 	//EE thread, after it changed VIF1 state: a stalled worker tries again
+ 	void ResumeAsync();
+ 	static inline VPU_ASYNC_STATS g_asyncStats;
++	//vif_ring_kb: the ring's size (a power of 2, at least 128 KB; set before VIF1 data is queued).
++	//Resident Evil 4 copies about 3.9 MB a game frame through it in ~260 byte records, at ~200 MB/s
++	//on the Vita: a 4 MB ring misses the CPU caches on every write and every read by the worker;
++	//one that fits the shared L2 does not, if the worker keeps close enough behind
++	static inline uint32 g_asyncRingSize = 0x400000; //ASYNC_RING_SIZE
+ 	//Diagnostics (PC runner, --reuse-scan): GIF data the relay hands to the GS, hashed; a packet
+ 	//"repeats" when the same bytes were relayed in the last REUSE_WINDOW vblanks.
+ 	//[0] XGKICK packets, [1] VIF1 DIRECT transfers; counts and bytes, all and repeated
+@@ -302,6 +311,7 @@
+ 	};
+ 	std::unique_ptr<uint8[]> m_asyncRingMemory;
+ 	uint8* m_asyncRing = nullptr;
++	uint32 m_asyncRingSize = ASYNC_RING_SIZE; //fixed when the ring is made
+ 	std::atomic<uint32> m_asyncWrite = 0; //EE thread
+ 	std::atomic<uint32> m_asyncRead = 0;  //worker
+ 	struct ASYNC_PACKET
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -240,7 +240,7 @@
+ 			uint32 read = m_asyncRead.load(std::memory_order_relaxed);
+ 			if(read != m_asyncWrite.load(std::memory_order_acquire))
+ 			{
+-				auto record = reinterpret_cast<const ASYNC_RECORD*>(m_asyncRing + (read & (ASYNC_RING_SIZE - 1)));
++				auto record = reinterpret_cast<const ASYNC_RECORD*>(m_asyncRing + (read & (m_asyncRingSize - 1)));
+ 				if(record->flags & ASYNC_RECORD_SKIP)
+ 				{
+ 					m_asyncRead.store(read + record->size, std::memory_order_release);
+@@ -314,7 +314,10 @@
+ {
+ 	if(!m_asyncRing)
+ 	{
+-		m_asyncRingMemory.reset(new uint8[ASYNC_RING_SIZE + 64]);
++		uint32 ringSize = g_asyncRingSize;
++		if((ringSize < 0x20000) || (ringSize & (ringSize - 1))) ringSize = ASYNC_RING_SIZE;
++		m_asyncRingSize = ringSize;
++		m_asyncRingMemory.reset(new uint8[m_asyncRingSize + 64]);
+ 		m_asyncRing = reinterpret_cast<uint8*>((reinterpret_cast<uintptr_t>(m_asyncRingMemory.get()) + 63) & ~uintptr_t(63));
+ 	}
+ 	auto toOverflow = [&]() {
+@@ -337,15 +340,18 @@
+ 	}
+ 	uint32 need = sizeof(ASYNC_RECORD) + ((size + 15) & ~15u);
+ 	uint32 write = m_asyncWrite.load(std::memory_order_relaxed);
+-	uint32 offset = write & (ASYNC_RING_SIZE - 1);
+-	uint32 filler = (offset + need > ASYNC_RING_SIZE) ? (ASYNC_RING_SIZE - offset) : 0;
+-	if((write + filler + need - m_asyncRead.load(std::memory_order_acquire)) > ASYNC_RING_SIZE)
++	uint32 offset = write & (m_asyncRingSize - 1);
++	uint32 filler = (offset + need > m_asyncRingSize) ? (m_asyncRingSize - offset) : 0;
++	uint32 occupied = write + filler + need - m_asyncRead.load(std::memory_order_acquire);
++	if(occupied > g_asyncStats.ringPeak.load(std::memory_order_relaxed)) g_asyncStats.ringPeak.store(occupied, std::memory_order_relaxed);
++	if(occupied > m_asyncRingSize)
+ 	{
++		g_asyncStats.ringWaits.fetch_add(1, std::memory_order_relaxed);
+ 		//Full: wait for the worker, unless it cannot make room (stalled on the EE) or takes
+ 		//too long; then the overflow queue
+ 		EmuProfile::CScope waitScope(EmuProfile::SECTION_VIF_LOCK);
+ 		auto start = std::chrono::steady_clock::now();
+-		for(uint32 spins = 0; (write + filler + need - m_asyncRead.load(std::memory_order_acquire)) > ASYNC_RING_SIZE; spins++)
++		for(uint32 spins = 0; (write + filler + need - m_asyncRead.load(std::memory_order_acquire)) > m_asyncRingSize; spins++)
+ 		{
+ 			bool stalled = m_asyncStalled.load(std::memory_order_acquire);
+ 			if(stalled || (((spins & 63) == 63) && (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(2))))
