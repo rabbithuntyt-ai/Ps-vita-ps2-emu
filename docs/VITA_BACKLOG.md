@@ -50,6 +50,21 @@ sound, then measure what was built blind, then the new work. Background and numb
   with `perf_audit.py`. Add the result to `docs/COMPATIBILITY.md`, whose SH2 row (2 Nov) has
   only menus and the movie.
 - Repeat the A/Bs of section 2 for `vif_merge` and `spu_adma_full_fast` on SH2.
+- **Check the old gameplay freeze first.** The user saw SH2 gameplay on the Vita freeze on a
+  picture of a single floating wall (date not recorded). It is not documented anywhere else.
+  - On the PC runner, with SH2's profile settings (`threaded_vu1=1`, threaded SPU, no
+    `vu1_async`), James leaves the restroom without a freeze.
+  - The route on the PC: walk to the far end of the restroom, turn left, walk forward. It is
+    outside from about vblank 4300, and every shot through 5300 changes.
+  - The PC does not run the ARM JIT, vitaGL or the Vita's memory limits, so this says nothing
+    about the Vita.
+  - Fixed since early November, and possible causes: the threaded VU1 hang (queued XGKICKs
+    entering the GIF mid-packet, fixed 10 Nov), and vitaGL texture allocation failures from the
+    old render target pool (`target_pool_lru`, 25 Nov).
+  - If it still freezes: note where, then try `threaded_vu1=0` to see if it is a VU1 or GS
+    path problem.
+- Also seen on the PC: in one restroom run, a wall panel was drawn with garbled texture for a
+  few shots. Compare with Vita frame dumps.
 
 ## 4. GS thread toward 33 ms a game frame (biggest section first)
 
