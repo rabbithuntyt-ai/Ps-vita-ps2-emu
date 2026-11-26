@@ -788,6 +788,20 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
   - Self-test: 0 of 100 rectangles differ from the per-pixel versions.
   - Vita A/B (R34): 3.99/4.19/4.25 against 3.95/4.04/4.06 steady game fps; the sets overlap,
     so no fps claim. GS read-backs 26 to 23 ms, uploads 16-17 to 14-15 ms per game frame.
+- **Read-back liveness (host `--readback-liveness`, 26 Nov 2026).**
+  - Each 256-byte block a read-back writes to GS memory is followed until something reads it
+    (texture, CLUT, transfer, display, a target upload), a transfer overwrites it, or a later
+    read-back replaces it. RE4 walk, blocks per run:
+  - Transfers (cause 5): 610,176 read back.
+    - 323,948 read afterwards: target uploads 256,316, textures 63,460.
+    - 258,072 overwritten by a transfer unread; 26,142 replaced unread.
+  - Strip cover settles (cause 11): 57,216 read back, 15,004 read afterwards.
+  - CLUT loads (cause 8): 38,656 read back, 604 read afterwards.
+  - So about half the read-back data is never needed. Most of the rest goes straight back to
+    the GPU as an upload into a target.
+  - The fix: per-block (8x8) stale and dirty tracking in place of the row ranges. A transfer
+    makes its own blocks stale, uploads send those blocks only, and the GPU's other pixels never
+    make the round trip. That removes both the wasted read-backs and most uploads.
 - **Read-backs and uploads, what they are (PC diagnostics, 25 Nov 2026).**
   - About 45 ms per game frame on the Vita (download 25, upload 20).
   - RE4 streams its textures and palettes every frame into 0x348000-0x3F0000. That is the same

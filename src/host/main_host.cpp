@@ -291,6 +291,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-strip-merge-opaque")) CGSH_Hardware::g_stripMergeOpaque = false; //opaque strip sprites each their own draw
 		else if(!std::strcmp(argv[i], "--no-gpu-upload")) CGSH_Hardware::g_gpuUpload = false; //target uploads with glTexSubImage2D
 		else if(!std::strcmp(argv[i], "--no-texture-index")) CTextureCache::g_indexedLookup = false; //texture cache lookups compare every entry
+		else if(!std::strcmp(argv[i], "--readback-liveness")) CGSH_Hardware::g_readbackLiveness = true; //read-back blocks later read or not
 		else if(!std::strcmp(argv[i], "--feed-shapes")) CGSH_Hardware::g_feedShapes = true; //host to local transfers by format, size and alignment
 		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
 		else if(!std::strcmp(argv[i], "--reuse-scan")) CVpu::g_reuseScan = CGSHandler::g_shadowRegs = true; //relayed GIF data repeated across frames
@@ -677,6 +678,19 @@ int main(int argc, char** argv)
 				for(int k = 0; k < 4; k++)
 					std::printf("GL draws, %s: %llu, vertices or indices %llu\n", kinds[k], (unsigned long long)CGSH_Hardware::g_drawsByKind[k], (unsigned long long)CGSH_Hardware::g_drawElementsByKind[k]);
 				std::printf("world batches that joined the open slot: %llu\n", (unsigned long long)CGSH_Hardware::g_worldSlotShares);
+				if(CGSH_Hardware::g_readbackLiveness)
+				{
+					for(int cause = 0; cause < 16; cause++)
+					{
+						if(CGSH_Hardware::g_liveDownloaded[cause] == 0) continue;
+						std::printf("read-back blocks, cause %d: %llu written to GS memory, %llu read afterwards, %llu replaced by a later read-back unread, %llu overwritten by a transfer unread\n", cause,
+						            (unsigned long long)CGSH_Hardware::g_liveDownloaded[cause], (unsigned long long)CGSH_Hardware::g_liveNeeded[cause], (unsigned long long)CGSH_Hardware::g_liveSuperseded[cause],
+						            (unsigned long long)CGSH_Hardware::g_liveOverwritten[cause]);
+						std::printf("  read by:");
+						for(int r = 0; r < 16; r++) if(CGSH_Hardware::g_liveNeededBy[cause][r]) std::printf(" %d:%llu", r, (unsigned long long)CGSH_Hardware::g_liveNeededBy[cause][r]);
+						std::printf("\n");
+					}
+				}
 				std::printf("sprites that joined the previous column's draw: %llu (opaque: %llu)\n", (unsigned long long)CGSH_Hardware::g_stripMerges, (unsigned long long)CGSH_Hardware::g_stripMergesOpaque);
 				if(CGSH_Hardware::g_stateBreaks)
 				{

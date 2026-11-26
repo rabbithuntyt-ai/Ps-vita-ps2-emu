@@ -1276,6 +1276,12 @@ void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 wi
 		std::snprintf(text, sizeof(text), " U%X:%u,%u+%ux%u", target.fbp, x0, y0, width, height);
 		m_diagUploads += text;
 	}
+	if(g_readbackLiveness)
+	{
+		uint32 readStart = 0, readEnd = 0;
+		RowsToBytes(target, y0, y0 + height, readStart, readEnd);
+		LivenessRead(readStart, readEnd - readStart, 5 + std::min<uint32>(m_roundTripCause, 15) % 10);
+	}
 	m_transferPixels.resize(width * height);
 	uint32* pixels = m_transferPixels.data();
 	uint64 swizzleStart = NowUs();
@@ -1399,6 +1405,7 @@ void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEn
 		TargetPixels::WritePixels(m_pRAM, target.psm, target.fbp, target.fbw, x0, y0, width, height, pixels, width);
 	uint32 start = 0, end = 0;
 	RowsToBytes(target, y0, y0 + height, start, end);
+	if(g_readbackLiveness) LivenessDownloaded(start, end);
 	m_textureCache.MarkBytesWritten(start, end - start);
 	DiscardDirtyRows(target, y0, y1);
 	if(!target.gpuDirty) target.alphaDirty = false;
@@ -1428,6 +1435,30 @@ bool CGSH_Hardware::DiscardDirtyRows(TARGET& target, uint32 rowBegin, uint32 row
 		return (rowEnd <= target.dirtyY0) || (rowBegin >= target.dirtyY1);
 	}
 	return true;
+}
+
+void CGSH_Hardware::LivenessDownloaded(uint32 start, uint32 end)
+{
+	if(g_liveBlocks.empty()) g_liveBlocks.resize(RAMSIZE / 256, 0);
+	uint32 cause = std::min<uint32>(m_roundTripCause, 15);
+	for(uint32 b = start / 256; (b < (end + 255) / 256) && (b < g_liveBlocks.size()); b++)
+	{
+		if(g_liveBlocks[b]) g_liveSuperseded[g_liveBlocks[b] - 1]++;
+		g_liveBlocks[b] = static_cast<uint8>(1 + cause);
+		g_liveDownloaded[cause]++;
+	}
+}
+
+void CGSH_Hardware::LivenessRead(uint32 start, uint32 size, uint32 reader)
+{
+	if(g_liveBlocks.empty()) return;
+	for(uint32 b = start / 256; (b < (start + size + 255) / 256) && (b < g_liveBlocks.size()); b++)
+	{
+		if(!g_liveBlocks[b]) continue;
+		g_liveNeeded[g_liveBlocks[b] - 1]++;
+		g_liveNeededBy[g_liveBlocks[b] - 1][reader]++;
+		g_liveBlocks[b] = 0;
+	}
 }
 
 void CGSH_Hardware::DownloadTargetsOverlapping(uint32 start, uint32 size, bool overwritten, bool alphaOnly)
@@ -1552,6 +1583,22 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
 	auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
 	auto [start, size] = GsTransfer::GetDstRange(bltBuf, trxReg, trxPos);
+	if(g_readbackLiveness && !g_liveBlocks.empty())
+	{
+		//The 256-byte blocks the transfer's pixels land in no longer hold read-back data
+		GS_SURFACE surface;
+		if(surface.Init(bltBuf.nDstPsm, bltBuf.GetDstPtr(), bltBuf.nDstWidth))
+		{
+			for(uint32 y = 0; y < trxReg.nRRH; y++)
+				for(uint32 x = 0; x < trxReg.nRRW; x++)
+				{
+					uint32 px = (trxPos.nDSAX + x) % 2048, py = (trxPos.nDSAY + y) % 2048;
+					uint32 byte = surface.nibbles ? (surface.NibbleOffset(px, py) >> 1) : surface.Offset(px, py);
+					uint32 block = (byte & (RAMSIZE - 1)) / 256;
+					if(g_liveBlocks[block]) { g_liveOverwritten[g_liveBlocks[block] - 1]++; g_liveBlocks[block] = 0; }
+				}
+		}
+	}
 	if(g_feedShapes)
 	{
 		char shape[96];
@@ -1630,6 +1677,7 @@ void CGSH_Hardware::ProcessLocalToHostTransfer()
 	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
 	auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
 	auto [start, size] = GsTransfer::GetSrcRange(bltBuf, trxReg, trxPos);
+	if(g_readbackLiveness) LivenessRead(start, size, 3);
 	DownloadTargetsOverlapping(start, size);
 }
 
@@ -1646,6 +1694,7 @@ void CGSH_Hardware::ProcessLocalToLocalTransfer()
 	auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
 	auto [srcStart, srcSize] = GsTransfer::GetSrcRange(bltBuf, trxReg, trxPos);
 	auto [dstStart, dstSize] = GsTransfer::GetDstRange(bltBuf, trxReg, trxPos);
+	if(g_readbackLiveness) LivenessRead(srcStart, srcSize, 2);
 	DownloadTargetsOverlapping(srcStart, srcSize);
 	DownloadTargetsOverlapping(dstStart, dstSize);
 
@@ -1676,6 +1725,7 @@ void CGSH_Hardware::SyncCLUT(const TEX0& tex0)
 	if(tex0.nCLD != 0)
 	{
 		FlushBatch();
+		if(g_readbackLiveness) LivenessRead(tex0.GetCLUTPtr(), 0x400, 1);
 		DownloadTargetsOverlapping(tex0.GetCLUTPtr(), 0x400);
 	}
 	CGSH_Primitives::SyncCLUT(tex0);
@@ -1908,6 +1958,7 @@ void CGSH_Hardware::BindTexture()
 	{
 		return;
 	}
+	if(g_readbackLiveness) LivenessRead(firstPage * 8192, pageCount * 8192, 0);
 	DownloadTargetsOverlapping(firstPage * 8192, pageCount * 8192, false, alphaTexture);
 
 	uint64 lookupStart = NowUs();
@@ -4785,6 +4836,7 @@ void CGSH_Hardware::FlipImpl(const DISPLAY_INFO& dispInfo)
 			GS_SURFACE surface;
 			bool tabled = surface.Init(layer.psm, layer.bufPtr, bufWidth) && !surface.nibbles;
 			uint32 pageRows = ((layer.offsetY + height) + surface.phMask) >> surface.phShift;
+			if(g_readbackLiveness) LivenessRead(layer.bufPtr, std::max<uint32>(surface.pagesPerRow, 1) * pageRows * 8192, 4);
 			DownloadTargetsOverlapping(layer.bufPtr, std::max<uint32>(surface.pagesPerRow, 1) * pageRows * 8192);
 			m_frameBuffer.resize(width * height);
 			bool is16 = (layer.psm == CGSHandler::PSMCT16) || (layer.psm == CGSHandler::PSMCT16S);

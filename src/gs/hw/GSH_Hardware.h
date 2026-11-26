@@ -321,6 +321,14 @@ public:
 	//1024-wide targets from its menus in the pool for good while the 256x512/256x384 targets it
 	//uses every frame were created and deleted twice a game frame)
 	static inline bool g_targetPoolLru = true;
+	//host --readback-liveness: GS memory blocks (256 bytes) filled by read-backs, and whether anything
+	//reads them before a later read-back replaces them (what a deferred read-back could skip)
+	static inline bool g_readbackLiveness = false;
+	static inline std::vector<uint8> g_liveBlocks; //0 none, else 1 + the read-back's cause
+	static inline uint64 g_liveDownloaded[16] = {}, g_liveNeeded[16] = {}, g_liveSuperseded[16] = {}, g_liveOverwritten[16] = {};
+	void LivenessDownloaded(uint32 start, uint32 end);
+	void LivenessRead(uint32 start, uint32 size, uint32 reader);
+	static inline uint64 g_liveNeededBy[16][16] = {}; //reader: 0 texture, 1 CLUT, 2 local copy, 3 local to host, 4 display, 5+ upload (by cause % 10)
 	static inline bool g_gpuUpload = true; //gpu_upload (on): target uploads drawn from a scratch texture (see UploadTarget)
 	static inline uint64 g_gpuUploads = 0;
 	static inline uint32 g_targetPoolMaxAge = 300;
