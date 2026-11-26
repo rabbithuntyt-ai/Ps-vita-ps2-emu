@@ -793,6 +793,22 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
   - Vita R35: the GS texture stage fell from 22.4-23.3 to 19.1-19.4 ms per game frame.
   - Steady game fps 4.03/4.02/3.92 on against 4.11/4.19 off: noise in the other direction, so
     no fps claim.
+- **GPU read-backs with vglReadPixels: tried, not kept (R36-R39, 26 Nov 2026).**
+  - Vita self-test on a cleared 512x448 target (a 1x1 glReadPixels first, to end the scene):
+    vglReadPixels into a heap buffer plus memcpy took 5.2 ms against 10.4 for glReadPixels,
+    with the same pixels 6 of 6 times.
+  - In gameplay, with a check against glReadPixels:
+    - 3,723 of 4,294 read-backs differed
+    - after reading 8-pixel-aligned rectangles (the GXM transfer writes padded rows; unaligned
+      widths had overflowed the buffer and crashed the Vita), still 3,364 of 3,942 differed
+    - only uniform areas matched, under any row order or y origin
+    - another crash
+  - vglReadPixels does not read what glReadPixels sees for these render targets. Dropped.
+- **Block coherency, conclusion so far.** With every transfer handled by blocks, the transfer
+  read-backs disappear on the PC. But the dirty 0x310000 target is then read back whole when
+  FindTarget removes it (cause 1, 36M pixels), and the total rises from 43.3M to 56.4M pixels.
+  Read-backs at target removal can only go away with lazy ("ghost") copies of removed targets,
+  read back per block when the bytes are actually read.
 - **Per-block coherency: implemented behind `block_coherency` (off), not exact yet.** See
   [BLOCK_COHERENCY.md](BLOCK_COHERENCY.md).
 - **Read-back liveness (host `--readback-liveness`, 26 Nov 2026).**
