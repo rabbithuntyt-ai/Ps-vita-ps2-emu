@@ -788,6 +788,13 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
   - Self-test: 0 of 100 rectangles differ from the per-pixel versions.
   - Vita A/B (R34): 3.99/4.19/4.25 against 3.95/4.04/4.06 steady game fps; the sets overlap,
     so no fps claim. GS read-backs 26 to 23 ms, uploads 16-17 to 14-15 ms per game frame.
+- **`texture_index` (on, exact): texture cache lookups by key hash.**
+  - The cache used to compare the key of every entry, up to 512, on each lookup.
+  - Vita R35: the GS texture stage fell from 22.4-23.3 to 19.1-19.4 ms per game frame.
+  - Steady game fps 4.03/4.02/3.92 on against 4.11/4.19 off: noise in the other direction, so
+    no fps claim.
+- **Per-block coherency: implemented behind `block_coherency` (off), not exact yet.** See
+  [BLOCK_COHERENCY.md](BLOCK_COHERENCY.md).
 - **Read-back liveness (host `--readback-liveness`, 26 Nov 2026).**
   - Each 256-byte block a read-back writes to GS memory is followed until something reads it
     (texture, CLUT, transfer, display, a target upload), a transfer overwrites it, or a later

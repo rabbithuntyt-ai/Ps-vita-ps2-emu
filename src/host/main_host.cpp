@@ -292,6 +292,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-gpu-upload")) CGSH_Hardware::g_gpuUpload = false; //target uploads with glTexSubImage2D
 		else if(!std::strcmp(argv[i], "--no-texture-index")) CTextureCache::g_indexedLookup = false; //texture cache lookups compare every entry
 		else if(!std::strcmp(argv[i], "--readback-liveness")) CGSH_Hardware::g_readbackLiveness = true; //read-back blocks later read or not
+		else if(!std::strcmp(argv[i], "--block-coherency")) CGSH_Hardware::g_blockCoherency = true; //per-block stale/clean target tracking
 		else if(!std::strcmp(argv[i], "--feed-shapes")) CGSH_Hardware::g_feedShapes = true; //host to local transfers by format, size and alignment
 		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
 		else if(!std::strcmp(argv[i], "--reuse-scan")) CVpu::g_reuseScan = CGSHandler::g_shadowRegs = true; //relayed GIF data repeated across frames
@@ -678,6 +679,11 @@ int main(int argc, char** argv)
 				for(int k = 0; k < 4; k++)
 					std::printf("GL draws, %s: %llu, vertices or indices %llu\n", kinds[k], (unsigned long long)CGSH_Hardware::g_drawsByKind[k], (unsigned long long)CGSH_Hardware::g_drawElementsByKind[k]);
 				std::printf("world batches that joined the open slot: %llu\n", (unsigned long long)CGSH_Hardware::g_worldSlotShares);
+				if(CGSH_Hardware::g_blockCoherency)
+					std::printf("block mapping check: %u failures\n", static_cast<CGSH_Hardware*>(session.GetVm()->GetGSHandler())->CheckBlockMapping());
+				if(CGSH_Hardware::g_blockCoherency)
+					std::printf("block coherency: %llu transfers by blocks, %llu blocks read back, %llu stale runs uploaded, %llu targets flattened\n", (unsigned long long)CGSH_Hardware::g_blockTransfers,
+					            (unsigned long long)CGSH_Hardware::g_blockReadBacks, (unsigned long long)CGSH_Hardware::g_blockResolves, (unsigned long long)CGSH_Hardware::g_blockFlattens);
 				if(CGSH_Hardware::g_readbackLiveness)
 				{
 					for(int cause = 0; cause < 16; cause++)
@@ -707,6 +713,10 @@ int main(int argc, char** argv)
 					for(const auto& [key, count] : CGSH_Hardware::g_targetMisses) misses.emplace_back(count, key);
 					std::sort(misses.rbegin(), misses.rend());
 					std::printf("render targets created (not from the pool): %llu, pool evictions %llu\n", (unsigned long long)CGSH_Hardware::g_targetAllocs, (unsigned long long)CGSH_Hardware::g_targetPoolEvictions);
+					std::vector<std::pair<uint64, std::string>> downloads;
+					for(const auto& [key, count] : CGSH_Hardware::g_downloadCauses) downloads.emplace_back(count.second, key + " : " + std::to_string(count.first) + " read-backs");
+					std::sort(downloads.rbegin(), downloads.rend());
+					for(size_t i = 0; i < std::min<size_t>(downloads.size(), 16); i++) std::printf("  read-back %llu px: %s\n", (unsigned long long)downloads[i].first, downloads[i].second.c_str());
 					for(size_t i = 0; i < std::min<size_t>(misses.size(), 15); i++) std::printf("  target miss %llu: %s\n", (unsigned long long)misses[i].first, misses[i].second.c_str());
 					for(size_t i = 0; i < std::min<size_t>(breaks.size(), 20); i++) std::printf("  state break %llu:%s\n", (unsigned long long)breaks[i].first, breaks[i].second.c_str());
 				}

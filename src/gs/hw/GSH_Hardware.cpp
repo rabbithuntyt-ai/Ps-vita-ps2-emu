@@ -1,6 +1,7 @@
 #include "GSH_Hardware.h"
 #include "TargetPixels.h"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include "GsMemory.h"
@@ -444,6 +445,7 @@ void CGSH_Hardware::ReleaseImpl()
 	if(!m_gpuInitialized) return;
 	m_gpuInitialized = false;
 	FlushBatch();
+	m_blockTransfers.clear(); //block_coherency
 	// The GPU idle before the deletes: twice (R21w, R30b) the Vita crashed inside glDeleteTextures
 	// here at session end, with vitaGL's garbage collector thread freeing deleted objects alongside
 	// (a mitigation; not shown to be the cause)
@@ -487,6 +489,7 @@ void CGSH_Hardware::ReleaseImpl()
 void CGSH_Hardware::ResetImpl()
 {
 	FlushBatch();
+	m_blockTransfers.clear(); //block_coherency
 	ResetPrimitiveState();
 	for(auto& target : m_targets)
 	{
@@ -573,6 +576,9 @@ bool CGSH_Hardware::RowsOverlap(const TARGET& target, uint32 rowBegin, uint32 ro
 
 void CGSH_Hardware::DeleteTarget(TARGET& target)
 {
+	//block_coherency: a transfer in progress no longer refers to it
+	m_blockTransfers.erase(std::remove_if(m_blockTransfers.begin(), m_blockTransfers.end(), [&target](const BLOCK_TRANSFER& entry) { return entry.target == &target; }),
+	                       m_blockTransfers.end());
 	//W1: a strip clear cut short by removal: GS memory still holds the columns not drawn
 	if(m_stripCover.target == &target) m_stripCover.target = nullptr;
 	if(m_pointTarget == &target)
@@ -846,6 +852,7 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 
 void CGSH_Hardware::TrimTargetFront(TARGET& target, uint32 rows)
 {
+	FlattenBlockFlags(target); //block_coherency
 	GsProfile::CScope gsSection(GsProfile::SECTION_TARGET);
 	// W1: the first 'rows' rows (whole page rows) leave the target: it starts after them,
 	// its other rows move up on the GPU (callers: no depth, no stale rows)
@@ -946,6 +953,7 @@ bool CGSH_Hardware::CanRelayout(const TARGET& old, const TARGET& target, uint32 
 	if(PsmClass(old.psm) != PsmClass(target.psm)) return false;
 	if(old.fbp < target.fbp) return false;
 	if(old.staleBegin < old.staleEnd) return false;
+	if(old.flaggedBlocks != 0) return false; //block_coherency: read back (skipping its flagged blocks) instead
 	if(old.validRows == 0) return false;
 	// Everything it holds (its valid rows) must land inside the new target.
 	uint32 oldStart = 0, oldEnd = 0;
@@ -1065,6 +1073,269 @@ void CGSH_Hardware::RelayoutTarget(TARGET& old, TARGET& target)
 	}
 }
 
+uint32 CGSH_Hardware::CheckBlockMapping()
+{
+	//Every 8x8 (16x8) block of a few target layouts: the GS block of its top left pixel maps back to it
+	uint32 failures = 0;
+	const uint32 psms[] = {PSMCT32, PSMCT16};
+	const uint32 widths[] = {1, 2, 4, 8, 10};
+	for(uint32 psm : psms)
+		for(uint32 fbw : widths)
+		{
+			TARGET t;
+			t.psm = psm;
+			t.fbw = fbw;
+			t.fbp = 0x2D8000;
+			t.width = fbw * 64;
+			t.height = 256;
+			const auto& layout = TargetPixels::GetBlockLayout(psm);
+			GS_SURFACE surface;
+			surface.Init(psm, t.fbp, fbw);
+			for(uint32 y = 0; y < t.height; y += layout.height)
+				for(uint32 x = 0; x < t.width; x += layout.width)
+				{
+					uint32 index = 0;
+					bool found = TargetBlockOf(t, surface.Offset(x, y) & ~255u, index);
+					if(!found || (index != (y / layout.height) * (t.width / layout.width) + (x / layout.width))) failures++;
+					//every pixel of the block lies in the same 256 bytes
+					for(uint32 py = y; py < y + layout.height; py++)
+						for(uint32 px = x; px < x + layout.width; px++)
+							if((surface.Offset(px, py) & ~255u) != (surface.Offset(x, y) & ~255u)) failures++;
+				}
+		}
+	return failures;
+}
+
+bool CGSH_Hardware::BlockCoherencyApplies(const TARGET& target) const
+{
+	if(!g_blockCoherency || ((target.fbp % 8192) != 0)) return false;
+	const auto& layout = TargetPixels::GetBlockLayout(target.psm);
+	return layout.valid && (target.width % layout.width == 0);
+}
+
+// The target block holding GS byte 'address' (false: not inside the target's rows)
+bool CGSH_Hardware::TargetBlockOf(TARGET& target, uint32 address, uint32& index) const
+{
+	if(address < target.fbp) return false;
+	const auto& layout = TargetPixels::GetBlockLayout(target.psm);
+	GS_SURFACE surface;
+	surface.Init(target.psm, target.fbp, target.fbw);
+	uint32 pagesPerRow = std::max<uint32>(surface.pagesPerRow, 1);
+	uint32 pageW = surface.pwMask + 1, pageH = surface.phMask + 1;
+	uint32 rel = address - target.fbp;
+	uint32 page = rel / 8192, inPage = (rel % 8192) & ~255u;
+	uint32 pageX = page % pagesPerRow, pageY = page / pagesPerRow;
+	// The block of the page at this offset (the page's blocks from its offset table)
+	for(uint32 by = 0; by < pageH; by += layout.height)
+	{
+		for(uint32 bx = 0; bx < pageW; bx += layout.width)
+		{
+			if((surface.RowTable(by)[bx] & ~255u) != inPage) continue;
+			uint32 x = pageX * pageW + bx, y = pageY * pageH + by;
+			if((x >= target.width) || (y >= target.height)) return false;
+			index = (y / layout.height) * (target.width / layout.width) + (x / layout.width);
+			return true;
+		}
+	}
+	return false;
+}
+
+void CGSH_Hardware::SetBlockFlag(TARGET& target, uint32 index, uint8 flag)
+{
+	const auto& layout = TargetPixels::GetBlockLayout(target.psm);
+	if(target.blockFlags.empty())
+	{
+		target.blockW = layout.width;
+		target.blockH = layout.height;
+		target.blocksW = target.width / layout.width;
+		target.blockFlags.assign(target.blocksW * ((target.height + layout.height - 1) / layout.height), 0);
+	}
+	if(index >= target.blockFlags.size()) return;
+	uint8& f = target.blockFlags[index];
+	if(f == 0) target.flaggedBlocks++;
+	if((f & BLOCK_STALE) && !(flag & BLOCK_STALE)) target.staleBlocks--;
+	if(!(f & BLOCK_STALE) && (flag & BLOCK_STALE)) target.staleBlocks++;
+	f = flag;
+	if(f == 0) target.flaggedBlocks--;
+}
+
+// Blocks inside [x0, x1) x [y0, y1) lose 'flags' (drawn into: no longer CLEAN)
+void CGSH_Hardware::ClearBlockFlags(TARGET& target, uint8 flags, uint32 x0, uint32 y0, uint32 x1, uint32 y1)
+{
+	if(target.flaggedBlocks == 0) return;
+	uint32 bw = target.blockW, bh = target.blockH;
+	uint32 rowsOfBlocks = static_cast<uint32>(target.blockFlags.size()) / target.blocksW;
+	for(uint32 by = y0 / bh; (by < (y1 + bh - 1) / bh) && (by < rowsOfBlocks); by++)
+		for(uint32 bx = x0 / bw; (bx < (x1 + bw - 1) / bw) && (bx < target.blocksW); bx++)
+		{
+			uint32 index = by * target.blocksW + bx;
+			uint8 f = target.blockFlags[index];
+			if(f & flags) SetBlockFlag(target, index, f & ~flags);
+		}
+}
+
+// These blocks' GPU pixels into GS memory now (blocks a transfer writes only in part)
+void CGSH_Hardware::ReadBackBlocks(TARGET& target, const std::vector<uint32>& blocks)
+{
+	GsProfile::CScope gsSection(GsProfile::SECTION_DOWNLOAD);
+	FlushBatch();
+	const auto& layout = TargetPixels::GetBlockLayout(target.psm);
+	uint32 bw = layout.width, bh = layout.height, blocksW = target.width / bw;
+	glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
+	for(uint32 index : blocks)
+	{
+		uint32 x = (index % blocksW) * bw, y = (index / blocksW) * bh;
+		if(y + bh > target.height) continue;
+		m_transferPixels.resize(bw * bh);
+		glReadPixels(x, y, bw, bh, GL_RGBA, GL_UNSIGNED_BYTE, m_transferPixels.data());
+		TargetPixels::Write(m_pRAM, target.psm, target.fbp, target.fbw, x, y, bw, bh, m_transferPixels.data());
+		{
+			//Textures decoded from these bytes are out of date
+			GS_SURFACE surface;
+			surface.Init(target.psm, target.fbp, target.fbw);
+			m_textureCache.MarkBytesWritten(surface.Offset(x, y) & ~255u, 256);
+		}
+		GetTimes().downloadPixels += bw * bh;
+		g_roundTripPixels[0][std::min<uint32>(m_roundTripCause, 15)] += bw * bh;
+		g_blockReadBacks++;
+	}
+	m_depthSceneValid = false;
+	m_stateApplied = false;
+}
+
+// Stale blocks from GS memory into the GPU copy (runs of a block row at once); inside the dirty
+// rectangle they become CLEAN
+void CGSH_Hardware::ResolveStaleBlocks(TARGET& target)
+{
+	if(target.staleBlocks == 0) return;
+	uint32 bw = target.blockW, bh = target.blockH;
+	uint32 rowsOfBlocks = static_cast<uint32>(target.blockFlags.size()) / target.blocksW;
+	for(uint32 by = 0; by < rowsOfBlocks; by++)
+	{
+		for(uint32 bx = 0; bx < target.blocksW;)
+		{
+			if(!(target.blockFlags[by * target.blocksW + bx] & BLOCK_STALE))
+			{
+				bx++;
+				continue;
+			}
+			uint32 end = bx + 1;
+			while((end < target.blocksW) && (target.blockFlags[by * target.blocksW + end] & BLOCK_STALE)) end++;
+			{
+				//Other targets holding newer data for these bytes go back to memory first (as UploadStaleRows)
+				uint32 start = 0, stop = 0;
+				RowsToBytes(target, by * bh, std::min((by + 1) * bh, target.height), start, stop);
+				RemoveTargetsOverlapping(&target, start, stop - start);
+			}
+			UploadTarget(target, bx * bw, by * bh, (end - bx) * bw, bh);
+			for(uint32 x = bx; x < end; x++)
+			{
+				uint32 px = x * bw, py = by * bh;
+				bool inDirty = target.gpuDirty && (px < target.dirtyX1) && (px + bw > target.dirtyX0) && (py < target.dirtyY1) && (py + bh > target.dirtyY0);
+				SetBlockFlag(target, by * target.blocksW + x, inDirty ? BLOCK_CLEAN : 0);
+			}
+			g_blockResolves++;
+			bx = end;
+		}
+	}
+}
+
+// Back to the row model: dirty pixels (not flagged ones) into GS memory, stale blocks as stale rows
+void CGSH_Hardware::FlattenBlockFlags(TARGET& target)
+{
+	if(target.flaggedBlocks == 0) return;
+	g_blockFlattens++;
+	if(target.gpuDirty) DownloadTarget(target);
+	uint32 bh = target.blockH;
+	uint32 rowsOfBlocks = static_cast<uint32>(target.blockFlags.size()) / target.blocksW;
+	//Stale blocks as one stale row range (the target is not dirty now: rows re-uploaded beyond the stale
+	//blocks hold GS memory's own pixels). No upload or target removal here: callers iterate m_targets
+	GS_SURFACE surface;
+	surface.Init(target.psm, target.fbp, target.fbw);
+	uint32 bw = target.blockW;
+	for(uint32 by = 0; by < rowsOfBlocks; by++)
+		for(uint32 bx = 0; bx < target.blocksW; bx++)
+		{
+			if(!(target.blockFlags[by * target.blocksW + bx] & BLOCK_STALE)) continue;
+			uint32 address = surface.Offset(bx * bw, by * bh) & ~255u;
+			bool otherDirty = false;
+			for(const auto& other : m_targets)
+			{
+				uint32 rowBegin = 0, rowEnd = 0;
+				if((other.get() != &target) && other->gpuDirty && BytesToRows(*other, address, 256, rowBegin, rowEnd) && (rowBegin < other->dirtyY1) && (rowEnd > other->dirtyY0))
+					otherDirty = true;
+			}
+			if(!otherDirty)
+			{
+				//GS memory is the newest holder of these bytes: the block alone back to the GPU copy
+				UploadTarget(target, bx * bw, by * bh, bw, bh);
+				continue;
+			}
+			uint32 rowBegin = by * bh, rowEnd = std::min((by + 1) * bh, target.height);
+			bool hasStale = target.staleBegin < target.staleEnd;
+			target.staleBegin = hasStale ? std::min(target.staleBegin, rowBegin) : rowBegin;
+			target.staleEnd = hasStale ? std::max(target.staleEnd, rowEnd) : rowEnd;
+		}
+	target.blockFlags.clear();
+	target.staleBlocks = target.flaggedBlocks = 0;
+}
+
+// A transfer into this dirty target, in another layout: the blocks it writes, read back first only
+// where it writes them in part (false: the row model handles it)
+bool CGSH_Hardware::BeginBlockTransfer(TARGET& target, uint32 start, uint32 size)
+{
+	auto bltBuf = make_convertible<BITBLTBUF>(m_nReg[GS_REG_BITBLTBUF]);
+	auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
+	auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
+	if(!BlockCoherencyApplies(target) || !target.gpuDirty) return false;
+	if((trxPos.nDSAX + trxReg.nRRW > 2048) || (trxPos.nDSAY + trxReg.nRRH > 2048) || (trxReg.nRRW == 0) || (trxReg.nRRH == 0)) return false;
+	// The transfer format's block size (formats writing part of each pixel: every block in part)
+	uint32 tbw = 8, tbh = 8;
+	bool partialPixels = false;
+	switch(bltBuf.nDstPsm)
+	{
+	case PSMCT32: case PSMZ32: case PSMCT24: case PSMZ24: tbw = 8; tbh = 8; partialPixels = (bltBuf.nDstPsm == PSMCT24) || (bltBuf.nDstPsm == PSMZ24); break;
+	case PSMCT16: case PSMCT16S: case PSMZ16: case PSMZ16S: tbw = 16; tbh = 8; break;
+	case PSMT8: tbw = 16; tbh = 16; break;
+	case PSMT4: tbw = 32; tbh = 16; break;
+	case PSMT8H: case PSMT4HL: case PSMT4HH: tbw = 8; tbh = 8; partialPixels = true; break;
+	default: return false;
+	}
+	GS_SURFACE surface;
+	if(!surface.Init(bltBuf.nDstPsm, bltBuf.GetDstPtr(), bltBuf.nDstWidth)) return false;
+	BLOCK_TRANSFER entry;
+	entry.target = &target;
+	std::vector<uint32> readBack;
+	uint32 x0 = trxPos.nDSAX, y0 = trxPos.nDSAY, x1 = x0 + trxReg.nRRW, y1 = y0 + trxReg.nRRH;
+	const auto& layout = TargetPixels::GetBlockLayout(target.psm);
+	for(uint32 gy = y0 / tbh; gy * tbh < y1; gy++)
+	{
+		for(uint32 gx = x0 / tbw; gx * tbw < x1; gx++)
+		{
+			uint32 bx0 = gx * tbw, by0 = gy * tbh;
+			bool full = !partialPixels && (bx0 >= x0) && (bx0 + tbw <= x1) && (by0 >= y0) && (by0 + tbh <= y1);
+			uint32 byte = surface.nibbles ? (surface.NibbleOffset(bx0, by0) >> 1) : surface.Offset(bx0, by0);
+			uint32 index = 0;
+			if(!TargetBlockOf(target, byte & ~255u, index)) continue;
+			uint32 ty = (index / (target.width / layout.width)) * layout.height;
+			if(ty >= target.validRows) continue; //rows the GPU copy does not hold yet: filled from memory when used
+			uint8 flags = target.blockFlags.empty() ? 0 : target.blockFlags[index];
+			if(!full && !(flags & (BLOCK_STALE | BLOCK_CLEAN)))
+			{
+				uint32 tx = (index % (target.width / layout.width)) * layout.width;
+				bool inDirty = (tx < target.dirtyX1) && (tx + layout.width > target.dirtyX0) && (ty < target.dirtyY1) && (ty + layout.height > target.dirtyY0);
+				if(inDirty) readBack.push_back(index);
+			}
+			entry.blocks.push_back(index);
+		}
+	}
+	if(!readBack.empty()) ReadBackBlocks(target, readBack);
+	target.inBlockTransfer = true;
+	g_blockTransfers++;
+	m_blockTransfers.push_back(std::move(entry));
+	return true;
+}
+
 uint64 CGSH_Hardware::GlFreeBytes()
 {
 #ifdef __vita__
@@ -1149,6 +1420,7 @@ void CGSH_Hardware::AllocateTargetGl(TARGET& target)
 
 void CGSH_Hardware::ShrinkTarget(TARGET& target, uint32 rows)
 {
+	FlattenBlockFlags(target); //block_coherency
 	// The first 'rows' rows of the color buffer move to a smaller one on the
 	// GPU (callers make sure no depth was drawn and the rest is not dirty).
 	FlushBatch();
@@ -1247,6 +1519,7 @@ void CGSH_Hardware::EnsureValidRows(TARGET& target, uint32 rows)
 {
 	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 4);
 	rows = std::min(rows, target.height);
+	ResolveStaleBlocks(target); //block_coherency (callers already allow target removal here)
 	UploadStaleRows(target, rows);
 	if(rows <= target.validRows) return;
 	uint32 begin = target.validRows;
@@ -1343,6 +1616,7 @@ void CGSH_Hardware::MarkTargetDirty(TARGET& target, int32 x0, int32 y0, int32 x1
 	x1 = std::min<int32>({x1, s.scax1 + 1, static_cast<int32>(target.width)});
 	y1 = std::min<int32>({y1, s.scay1 + 1, static_cast<int32>(target.validRows)});
 	if((x0 >= x1) || (y0 >= y1)) return;
+	if(target.flaggedBlocks != 0) ClearBlockFlags(target, BLOCK_CLEAN, x0, y0, x1, y1); //block_coherency: drawn
 	target.drawnRows = std::max<uint32>(target.drawnRows, y1);
 	if(m_colorMask[3]) target.alphaDirty = true;
 	if(!target.gpuDirty)
@@ -1382,6 +1656,15 @@ void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEn
 	FlushBatch();
 	uint32 x0 = target.dirtyX0;
 	uint32 width = target.dirtyX1 - x0, height = y1 - y0;
+	if(g_stateBreaks)
+	{
+		char text[160];
+		std::snprintf(text, sizeof(text), "cause %u target %X/%u %ux%u asked %u-%u got %u-%u flagged %u%s", m_roundTripCause, target.fbp, target.fbw, target.width, target.height, rowBegin,
+		              std::min(rowEnd, 9999u), y0, y1, target.flaggedBlocks, m_blockTransfers.empty() ? "" : " (block transfer pending)");
+		auto& count = g_downloadCauses[text];
+		count.first++;
+		count.second += width * height;
+	}
 	if(m_diagFile && (m_diagUploads.size() < 60000))
 	{
 		char text[64];
@@ -1399,10 +1682,28 @@ void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEn
 	CPartTimer swizzleTimer(GPU_PART_DOWNLOAD_SWIZZLE);
 	GetTimes().downloadPixels += width * height;
 
+	std::vector<std::pair<uint32, std::array<uint8, 256>>> keep; //block_coherency: flagged blocks keep GS memory
+	if(target.flaggedBlocks != 0)
+	{
+		GS_SURFACE surface;
+		surface.Init(target.psm, target.fbp, target.fbw);
+		uint32 bw = target.blockW, bh = target.blockH;
+		for(uint32 by = y0 / bh; by * bh < y0 + height; by++)
+			for(uint32 bx = x0 / bw; bx * bw < x0 + width; bx++)
+			{
+				uint32 index = by * target.blocksW + bx;
+				if((index >= target.blockFlags.size()) || !target.blockFlags[index]) continue;
+				uint32 address = surface.Offset(bx * bw, by * bh) & ~255u;
+				keep.emplace_back();
+				keep.back().first = address;
+				std::memcpy(keep.back().second.data(), m_pRAM + address, 256);
+			}
+	}
 	if(g_targetPixelBlocks)
 		TargetPixels::Write(m_pRAM, target.psm, target.fbp, target.fbw, x0, y0, width, height, pixels);
 	else
 		TargetPixels::WritePixels(m_pRAM, target.psm, target.fbp, target.fbw, x0, y0, width, height, pixels, width);
+	for(const auto& [address, bytes] : keep) std::memcpy(m_pRAM + address, bytes.data(), 256);
 	uint32 start = 0, end = 0;
 	RowsToBytes(target, y0, y0 + height, start, end);
 	if(g_readbackLiveness) LivenessDownloaded(start, end);
@@ -1469,6 +1770,21 @@ void CGSH_Hardware::DownloadTargetsOverlapping(uint32 start, uint32 size, bool o
 	for(auto& target : m_targets)
 	{
 		if(!target->gpuDirty) continue;
+		if(target->inBlockTransfer) continue; //block_coherency: handled block by block
+		if((target->flaggedBlocks != 0) && (size <= 64 * 1024))
+		{
+			//block_coherency: every block of it in the range is flagged (GS memory current): nothing to read back
+			bool needed = false;
+			for(uint32 address = start & ~255u; (address < start + size) && !needed; address += 256)
+			{
+				uint32 index = 0;
+				if(!TargetBlockOf(*target, address, index)) continue;
+				uint32 tx = (index % target->blocksW) * target->blockW, ty = (index / target->blocksW) * target->blockH;
+				bool inDirty = (tx < target->dirtyX1) && (tx + target->blockW > target->dirtyX0) && (ty < target->dirtyY1) && (ty + target->blockH > target->dirtyY0);
+				if(inDirty && !target->blockFlags[index]) needed = true;
+			}
+			if(!needed) continue;
+		}
 		if(alphaOnly && !target->alphaDirty) continue;
 		uint32 rowBegin = 0, rowEnd = 0;
 		if(!BytesToRows(*target, start, size, rowBegin, rowEnd)) continue;
@@ -1514,7 +1830,29 @@ void CGSH_Hardware::UploadTargetsOverlapping(uint32 start, uint32 size)
 		uint32 rowBegin = 0, rowEnd = 0;
 		if(!BytesToRows(*target, start, size, rowBegin, rowEnd)) continue;
 		rowEnd = std::min(rowEnd, target->validRows);
-		if(rowBegin < rowEnd) UploadTarget(*target, 0, rowBegin, target->width, rowEnd - rowBegin);
+		if(rowBegin < rowEnd)
+		{
+			UploadTarget(*target, 0, rowBegin, target->width, rowEnd - rowBegin);
+			//block_coherency: stale blocks in these rows are current again (no target removal here: this
+			//loop runs over m_targets)
+			if(target->staleBlocks != 0)
+			{
+				uint32 bw = target->blockW, bh = target->blockH;
+				uint32 rowsOfBlocks = static_cast<uint32>(target->blockFlags.size()) / target->blocksW;
+				for(uint32 by = rowBegin / bh; (by * bh < rowEnd) && (by < rowsOfBlocks); by++)
+				{
+					if((by * bh < rowBegin) || ((by + 1) * bh > rowEnd)) continue; //only blocks inside the uploaded rows
+					for(uint32 bx = 0; bx < target->blocksW; bx++)
+					{
+						uint32 index = by * target->blocksW + bx;
+						if(!(target->blockFlags[index] & BLOCK_STALE)) continue;
+						uint32 px = bx * bw, py = by * bh;
+						bool inDirty = target->gpuDirty && (px < target->dirtyX1) && (px + bw > target->dirtyX0) && (py < target->dirtyY1) && (py + bh > target->dirtyY0);
+						SetBlockFlag(*target, index, inDirty ? BLOCK_CLEAN : 0);
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -1557,7 +1895,23 @@ void CGSH_Hardware::BeginTransferWrite()
 			if(target->gpuDirty && BytesToRows(*target, start, size, rowBegin, rowEnd)) m_transferDiscards = true;
 		}
 	}
+	m_blockTransfers.clear();
+	if(g_blockCoherency)
+	{
+		bool sameLayoutTarget = false;
+		for(auto& target : m_targets)
+		{
+			uint32 rowBegin = 0, rowEnd = 0;
+			if(!BytesToRows(*target, start, size, rowBegin, rowEnd)) continue;
+			bool sameLayout = (target->fbp == bltBuf.GetDstPtr()) && (target->fbw == bltBuf.nDstWidth) && (PsmClass(target->psm) == PsmClass(bltBuf.nDstPsm)) &&
+			                  IsColorPsm(bltBuf.nDstPsm);
+			if(sameLayout) sameLayoutTarget = true;
+			if(!sameLayout) BeginBlockTransfer(*target, start, size);
+		}
+		(void)sameLayoutTarget;
+	}
 	DownloadTargetsOverlapping(start, size, wholePages);
+	for(auto& target : m_targets) target->inBlockTransfer = false;
 	CGSH_Primitives::BeginTransferWrite();
 }
 
@@ -1609,6 +1963,11 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 		count.first++;
 		count.second += m_trxCtx.nRealSize;
 	}
+	for(auto& entry : m_blockTransfers)
+	{
+		//block_coherency: the written blocks are newer in GS memory than on the GPU
+		for(uint32 index : entry.blocks) SetBlockFlag(*entry.target, index, BLOCK_STALE);
+	}
 	if(!m_trxCtx.nDirty && !m_transferDiscards)
 	{
 		// Same bytes as already in memory (menus send the same images every
@@ -1631,6 +1990,9 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 	{
 		uint32 rowBegin = 0, rowEnd = 0;
 		if(!BytesToRows(*target, start, size, rowBegin, rowEnd)) continue;
+		bool byBlocks = false;
+		for(const auto& entry : m_blockTransfers) byBlocks |= (entry.target == target.get());
+		if(byBlocks) continue; //block_coherency: its written blocks are stale
 		rowEnd = std::min(rowEnd, target->validRows);
 		if(rowBegin >= rowEnd) continue;
 		bool sameLayout = (target->fbp == bltBuf.GetDstPtr()) && (target->fbw == bltBuf.nDstWidth) &&
@@ -1662,6 +2024,7 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 			MarkRowsStale(*target, rowBegin, rowEnd);
 		}
 	}
+	m_blockTransfers.clear();
 	m_stateApplied = false;
 }
 

@@ -329,6 +329,9 @@ public:
 	void LivenessDownloaded(uint32 start, uint32 end);
 	void LivenessRead(uint32 start, uint32 size, uint32 reader);
 	static inline uint64 g_liveNeededBy[16][16] = {}; //reader: 0 texture, 1 CLUT, 2 local copy, 3 local to host, 4 display, 5+ upload (by cause % 10)
+	static inline bool g_blockCoherency = false; //block_coherency (docs/BLOCK_COHERENCY.md)
+	static inline std::map<std::string, std::pair<uint64, uint64>> g_downloadCauses; //host --state-breaks: read-backs by cause and target
+	static inline uint64 g_blockTransfers = 0, g_blockReadBacks = 0, g_blockResolves = 0, g_blockFlattens = 0;
 	static inline bool g_gpuUpload = true; //gpu_upload (on): target uploads drawn from a scratch texture (see UploadTarget)
 	static inline uint64 g_gpuUploads = 0;
 	static inline uint32 g_targetPoolMaxAge = 300;
@@ -412,7 +415,36 @@ private:
 		bool alphaDirty = false;
 		uint32 dirtyX0 = 0, dirtyY0 = 0, dirtyX1 = 0, dirtyY1 = 0;
 		uint32 lastUse = 0;
+		// block_coherency (docs/BLOCK_COHERENCY.md): per GS block (256 bytes: 8x8 pixels at 32 bits,
+		// 16x8 at 16) BLOCK_STALE (GS memory newer: read-backs skip it, uploaded before use) or
+		// BLOCK_CLEAN (inside the dirty rectangle but equal to GS memory: read-backs skip it)
+		std::vector<uint8> blockFlags;
+		uint32 blocksW = 0, blockW = 0, blockH = 0;
+		uint32 staleBlocks = 0, flaggedBlocks = 0;
+		bool inBlockTransfer = false; //the transfer being started handles this target by blocks
 	};
+	enum : uint8
+	{
+		BLOCK_STALE = 1,
+		BLOCK_CLEAN = 2,
+	};
+	struct BLOCK_TRANSFER
+	{
+		TARGET* target = nullptr;
+		std::vector<uint32> blocks; //block indices (by * blocksW + bx) the transfer writes
+	};
+	std::vector<BLOCK_TRANSFER> m_blockTransfers; //BeginTransferWrite -> ProcessHostToLocalTransfer
+	bool BlockCoherencyApplies(const TARGET&) const;
+public:
+	uint32 CheckBlockMapping();
+private:
+	bool TargetBlockOf(TARGET&, uint32 address, uint32& index) const;
+	void SetBlockFlag(TARGET&, uint32 index, uint8 flag);
+	void ClearBlockFlags(TARGET&, uint8 flags, uint32 x0, uint32 y0, uint32 x1, uint32 y1);
+	void ReadBackBlocks(TARGET&, const std::vector<uint32>& blocks);
+	void ResolveStaleBlocks(TARGET&);
+	void FlattenBlockFlags(TARGET&);
+	bool BeginBlockTransfer(TARGET&, uint32 start, uint32 size);
 
 	struct BATCH_VERTEX
 	{
