@@ -41,6 +41,7 @@
 #include "EmuSession.h"
 #include "JitCacheSetup.h"
 #include "EmuProfile.h"
+#include "GsProfile.h"
 #include "ThreadProfiler.h"
 #include "PS2VM.h"
 #include "PadHandler.h"
@@ -211,6 +212,9 @@ int main(int argc, char** argv)
 	std::string statsPath;
 	uint32_t gsDiagLines = 0;
 	uint64_t hotFrom = ~0ULL; //sample the EE PC from this frame on (--hot-from)
+	uint64_t gsFrom = 0; //GS thread sections printed for the frames from this one on (--gs-from)
+	uint64_t gsBase[GsProfile::SECTION_COUNT] = {};
+	bool gsBaseTaken = false;
 	std::string ramDumpPath;
 	std::string loadStatePath; //--load-state: a save state (the Vita's too), loaded at frame 120
 	for(int i = 2; i < argc; i++)
@@ -261,6 +265,9 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--stats") && (i + 1 < argc)) statsPath = argv[++i];
 		else if(!std::strcmp(argv[i], "--gs-diag") && (i + 1 < argc)) gsDiagLines = std::atoi(argv[++i]);
 		else if(!std::strcmp(argv[i], "--hot-from") && (i + 1 < argc)) hotFrom = std::strtoull(argv[++i], nullptr, 10);
+		else if(!std::strcmp(argv[i], "--lazy-texels")) CTextureCache::g_lazyTexels = true; //texture cache entries allocate their texels on first decode
+		else if(!std::strcmp(argv[i], "--tex-shapes")) CTextureCache::g_createShapes = new std::unordered_map<uint64, uint64>(); //texture cache entries created, by format and size
+		else if(!std::strcmp(argv[i], "--gs-from") && (i + 1 < argc)) gsFrom = std::strtoull(argv[++i], nullptr, 10);
 		else if(!std::strcmp(argv[i], "--dump-ram") && (i + 1 < argc)) ramDumpPath = argv[++i];
 		else if(!std::strcmp(argv[i], "--load-state") && (i + 1 < argc)) loadStatePath = argv[++i];
 		else if(!std::strcmp(argv[i], "--vu1-stats")) EmuProfile::g_vu1Programs.enabled = true; //vu1prog.txt
@@ -452,7 +459,7 @@ int main(int argc, char** argv)
 			if(hardware)
 			{
 				std::fprintf(statsFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix"
-				                        ",draws,tex_up,rt_up,rt_dl,up_px,dl_px,targets_new,xfer_in,xfer_out,xfer_local,rt_deferred,rt_skip_rows,xfer_same");
+				                        ",draws,tex_up,rt_up,rt_dl,up_px,dl_px,targets_new,xfer_in,xfer_out,xfer_local,rt_deferred,rt_skip_rows,xfer_same,content_hits");
 			}
 #endif
 			std::fprintf(statsFile, "\n");
@@ -496,6 +503,11 @@ int main(int argc, char** argv)
 			}
 			uint64_t frame = session.GetVmFrameCount();
 			if(frame >= hotFrom) hotPcs[session.GetDebugState().eePc]++;
+			if(!gsBaseTaken && (frame >= gsFrom))
+			{
+				for(unsigned int i = 0; i < GsProfile::SECTION_COUNT; i++) gsBase[i] = GsProfile::g_samples[i].load();
+				gsBaseTaken = true;
+			}
 			if(shotEvery && (frame >= nextShot))
 			{
 				nextShot = frame - (frame % shotEvery) + shotEvery;
@@ -530,6 +542,7 @@ int main(int argc, char** argv)
 					std::fprintf(statsFile, ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u", f.drawCalls, f.textureUploads, f.targetUploads, f.targetDownloads,
 					             f.uploadedPixels, f.downloadedPixels, f.targetsCreated, f.transfersIn, f.transfersOut, f.transfersLocal,
 					             f.deferredUploads, f.skippedUploadRows, f.unchangedTransfers);
+					std::fprintf(statsFile, ",%u", f.contentTextureHits);
 					statsGpu = times;
 				}
 #endif
@@ -568,6 +581,36 @@ int main(int argc, char** argv)
 		for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++)
 			if(profile.share[i] >= 0.005f) std::printf(" %s %.0f%%", EmuProfile::GetSectionName(i), profile.share[i] * 100.0f);
 		std::printf("\n");
+		{
+			//GS thread sections (1 ms samples) from --gs-from on; PC times, only a hint of the Vita's
+			uint64_t gs[GsProfile::SECTION_COUNT], gsTotal = 0, gsBusy = 0;
+			for(unsigned int i = 0; i < GsProfile::SECTION_COUNT; i++)
+			{
+				gs[i] = GsProfile::g_samples[i].load() - (gsBaseTaken ? gsBase[i] : 0);
+				gsTotal += gs[i];
+				if(i != GsProfile::SECTION_IDLE) gsBusy += gs[i];
+			}
+			std::printf("GS thread from frame %llu (%llu samples, %llu busy):", (unsigned long long)gsFrom, (unsigned long long)gsTotal, (unsigned long long)gsBusy);
+			std::vector<std::pair<uint64_t, unsigned int>> order;
+			for(unsigned int i = 0; i < GsProfile::SECTION_COUNT; i++) if(i != GsProfile::SECTION_IDLE) order.emplace_back(gs[i], i);
+			std::sort(order.rbegin(), order.rend());
+			for(const auto& [n, i] : order)
+				if(gsBusy && (n * 200 >= gsBusy)) std::printf(" %s %.1f%%", GsProfile::GetSectionName(i), 100.0 * n / gsBusy);
+			std::printf(" (of busy)\n");
+#ifdef VITAPS2_HAS_GL
+			std::printf("texture cache: %llu lookups, %llu entries created, %llu evicted (%llu MB), %llu found rewritten (%llu with the same pages)\n", (unsigned long long)CTextureCache::g_gets,
+			            (unsigned long long)CTextureCache::g_creates, (unsigned long long)CTextureCache::g_evictions, (unsigned long long)(CTextureCache::g_evictedBytes >> 20),
+			            (unsigned long long)CTextureCache::g_rewritten, (unsigned long long)CTextureCache::g_rewrittenSame);
+			if(CTextureCache::g_createShapes)
+			{
+				std::vector<std::pair<uint64, uint64>> shapes;
+				for(const auto& [shape, n] : *CTextureCache::g_createShapes) shapes.emplace_back(n, shape);
+				std::sort(shapes.rbegin(), shapes.rend());
+				for(size_t i = 0; i < std::min<size_t>(shapes.size(), 12); i++)
+					std::printf("  created psm %02llX %llux%llu: %llu\n", (unsigned long long)(shapes[i].second >> 32), (unsigned long long)((shapes[i].second >> 16) & 0xFFFF), (unsigned long long)(shapes[i].second & 0xFFFF), (unsigned long long)shapes[i].first);
+			}
+#endif
+		}
 		auto debug = session.GetDebugState();
 		std::printf("EE pc %08X ra %08X  IOP pc %08X ra %08X thread %d  INTC %X/%X  DMAC %08X  VU1 %04X pc %04X %ums\n", debug.eePc,
 		            debug.eeRa, debug.iopPc, debug.iopRa, debug.iopThread, debug.intcStat, debug.intcMask, debug.dmacStat,

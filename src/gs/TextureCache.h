@@ -54,6 +54,22 @@ public:
 	static inline bool g_indexedLookup = true;
 	//texture_page_hash (on): page hashes cover only the pages a texture narrower than its buffer reads
 	static inline bool g_exactPageHash = true;
+	//texture_lazy_texels: an entry's decoded texel storage (tw x th x 4 bytes) is allocated when it
+	//is first decoded, not when the entry is made, and only allocated bytes count against the
+	//cache's byte budget. Games that draw one indexed texture with many CLUTs (Silent Hill 2:
+	//512x512 PSMT8 and 1024x512 PSMT4, a CLUT per draw) make an entry per CLUT; most are then
+	//found by content in the GL texture cache and never decoded, yet each allocated and zeroed 1-2
+	//MB, and the budget (48 MB) evicted them all every frame. Only caches that decode on one
+	//thread allow it (SetLazyTexels: the hardware renderer's; not the software rasterizer's)
+	static inline bool g_lazyTexels = false;
+	void SetLazyTexels(bool allowed)
+	{
+		m_lazyAllowed = allowed;
+	}
+	//Diagnostics (whole run): entries created, evicted (and of those, the bytes), entries found
+	//rewritten, and of those the ones whose pages hashed the same as before
+	static inline std::unordered_map<uint64, uint64>* g_createShapes = nullptr; //host --tex-shapes: creates by psm << 32 | tw << 16 | th
+	static inline uint64 g_creates = 0, g_evictions = 0, g_evictedBytes = 0, g_rewritten = 0, g_rewrittenSame = 0, g_gets = 0;
 
 	class CTexture
 	{
@@ -125,6 +141,7 @@ public:
 	private:
 		friend class CTextureCache;
 		void DecodeTile(uint32 tileX, uint32 tileY);
+		void EnsureTexels(); //texture_lazy_texels: allocates the texel storage on first use
 		// Texels [x0, x1) of row v, format resolved once per span (needs m_hasSurface).
 		void DecodeSpan(uint32* row, uint32 x0, uint32 x1, uint32 v) const;
 		uint32 DecodeTexel(uint32 u, uint32 v) const;
@@ -136,6 +153,7 @@ public:
 		GS_SURFACE m_surface;
 		bool m_hasSurface = false;
 		std::vector<uint32> m_texels;
+		size_t m_texelBytes = 0; //bytes of m_texels counted in the cache's budget
 		void DecodeCt32PageRow(uint32 pageRow);
 		std::vector<uint32> m_ct32Texel; //CT32 page: memory position -> texel position
 		uint32 m_ct32Width = 0;
@@ -248,4 +266,5 @@ private:
 	std::unordered_map<KEY, CTexture*, KEY_HASH> m_index; //m_textures by key (kept in step with it)
 	std::vector<std::unique_ptr<CTexture>> m_retired;
 	bool m_deferredRelease = false;
+	bool m_lazyAllowed = false;
 };

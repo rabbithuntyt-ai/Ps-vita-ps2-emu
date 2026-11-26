@@ -1091,6 +1091,34 @@ headers and comments. The ideas worth testing are in the brief's "Not done yet" 
 - **Vita:** not measured (offline); the eboot builds. Expected: SH2's GS thread spends about 420
   fewer draws a game frame in vitaGL (about 10-25 ms at 25-60 µs each); RE4 about 38 fewer.
 
+### Texture cache thrash: texel storage allocated on first decode (26 Nov 2026, `texture_lazy_texels`, off)
+
+- **New host diagnostics:** `--gs-from N` prints the GS thread's profiler sections from vblank N
+  on (PC times, only a hint of the Vita's). The texture cache line counts lookups, entries made,
+  evictions and rewritten entries; `--tex-shapes` gives entries made by format and size. Host
+  stats files have a `content_hits` column.
+- **Silent Hill 2 gameplay (PC, from vblank 2100):** `texCreate` (new texture cache entries) was
+  22-25% of the GS thread's busy time, as much as the GL draws.
+  - 26 entries were made a game frame, and 44,134 evicted in the run (56 GB of texel storage).
+  - Nearly all were indexed textures declared large: 512x512 PSMT8 (27,327, 1 MB of texels each)
+    and 1024x512 PSMT4 (14,145, 2 MB each).
+  - SH2 draws them with a different CLUT nearly every draw, and the CLUT is part of the key, so
+    each texture and CLUT pair is an entry of its own.
+  - Most of these entries are then found by content in the GL texture cache and never decoded: in
+    gameplay, about 120 content hits a frame and 0.6 GL texture uploads. Yet each entry allocated
+    and zeroed its 1-2 MB, and the 48 MB budget evicted them all again every frame.
+- **Change:** an entry allocates its texels when it is first decoded (`DecodeAll`, `DecodeRows`),
+  and only allocated bytes count against the budget. This is the hardware renderer's cache only:
+  the software rasterizer decodes tiles from several threads and keeps allocating up front.
+- **PC:**
+  - SH2: entries made 44,175 to 224, evictions 44,134 to 79. GS thread busy samples in gameplay
+    18,623 to 15,202 (-18%), and `texCreate` gone.
+  - RE4 (which does not thrash): unchanged, 987 entries.
+  - Screenshots identical in both games. The one SH2 movie shot that differs also differs between
+    two runs without the switch (same pixels).
+- **Vita:** not measured (offline); the eboot builds. On the Vita the zeroing alone was 1-2 MB
+  per entry, 26 entries a game frame.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an

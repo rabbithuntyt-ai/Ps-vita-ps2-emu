@@ -254,6 +254,7 @@ void CTextureCache::FillFromPictures(CTexture& texture)
 CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 {
 	m_useCounter++;
+	g_gets++;
 	ApplyPendingWrite();
 	CTexture* found = nullptr;
 	if(g_indexedLookup)
@@ -286,8 +287,10 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 						GsProfile::CScope hashSection(GsProfile::SECTION_TEX_HASH);
 						hash = HashPages(*texture);
 					}
+					g_rewritten++;
 					if((hash != 0) && (hash == texture->m_contentHash))
 					{
+						g_rewrittenSame++;
 						//Pages were rewritten with the same contents.
 						texture->m_decodeStamp = m_stamp;
 						return texture;
@@ -306,12 +309,15 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 	}
 
 	//Evict the least recently used textures
-	size_t newBytes = static_cast<size_t>(key.tw) * key.th * 4;
+	bool lazy = m_lazyAllowed && g_lazyTexels;
+	size_t newBytes = lazy ? 0 : static_cast<size_t>(key.tw) * key.th * 4;
 	while(!m_textures.empty() && ((m_textures.size() >= MAX_TEXTURES) || (m_textureBytes + newBytes > MAX_TEXTURE_BYTES)))
 	{
 		auto lru = std::min_element(m_textures.begin(), m_textures.end(),
 		                            [](const auto& a, const auto& b) { return a->m_lastUse < b->m_lastUse; });
-		m_textureBytes -= static_cast<size_t>((*lru)->m_key.tw) * (*lru)->m_key.th * 4;
+		m_textureBytes -= (*lru)->m_texelBytes;
+		g_evictions++;
+		g_evictedBytes += (*lru)->m_texelBytes;
 		m_index.erase((*lru)->m_key);
 		if(m_deferredRelease) m_retired.push_back(std::move(*lru));
 		m_textures.erase(lru);
@@ -320,6 +326,8 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 
 	GsProfile::CScope createSection(GsProfile::SECTION_TEX_CREATE);
 	static std::atomic<uint64> nextUniqueId{1};
+	g_creates++;
+	if(g_createShapes) (*g_createShapes)[(static_cast<uint64>(key.tpsm) << 32) | (key.tw << 16) | key.th]++;
 	auto texture = std::make_unique<CTexture>();
 	texture->m_uniqueId = nextUniqueId++;
 	texture->m_key = key;
@@ -327,7 +335,11 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 	texture->m_hasSurface = texture->m_surface.Init(key.tpsm, key.tbp, key.tbw);
 	texture->m_tilesW = (key.tw + 7) / 8;
 	uint32 tilesH = (key.th + 7) / 8;
-	texture->m_texels.resize(key.tw * key.th);
+	if(!lazy)
+	{
+		texture->m_texels.resize(key.tw * key.th);
+		texture->m_texelBytes = newBytes;
+	}
 	texture->m_tileCount = texture->m_tilesW * tilesH;
 	texture->m_tileValid = std::make_unique<std::atomic<uint8>[]>(texture->m_tileCount);
 	for(uint32 i = 0; i < texture->m_tileCount; i++)
@@ -632,8 +644,17 @@ void CTextureCache::CTexture::DecodeCt32PageRow(uint32 pageRow)
 	}
 }
 
+void CTextureCache::CTexture::EnsureTexels()
+{
+	if(!m_texels.empty()) return;
+	m_texels.resize(static_cast<size_t>(m_key.tw) * m_key.th);
+	m_texelBytes = m_texels.size() * 4;
+	m_cache->m_textureBytes += m_texelBytes;
+}
+
 void CTextureCache::CTexture::DecodeAll()
 {
+	EnsureTexels();
 	if((m_key.tpsm == CGSHandler::PSMCT32) && !m_cache->m_pictureSources.empty()) m_cache->FillFromPictures(*this);
 	uint32 tilesH = m_tileCount / m_tilesW;
 	bool ct32Pages = m_hasSurface && ((m_key.tpsm == CGSHandler::PSMCT32) || (m_key.tpsm == CGSHandler::PSMCT32_UNK)) &&
@@ -713,6 +734,7 @@ uint32 CTextureCache::GetPictureBand(const CTexture& texture, std::vector<PICTUR
 
 void CTextureCache::CTexture::DecodeRows(uint32 v0, uint32 v1)
 {
+	EnsureTexels();
 	uint32 tilesH = m_tileCount / m_tilesW;
 	uint32 ty1 = std::min((v1 + 7) / 8, tilesH);
 	for(uint32 ty = v0 / 8; ty < ty1; ty++)

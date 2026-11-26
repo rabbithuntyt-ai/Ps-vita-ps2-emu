@@ -407,6 +407,7 @@ void CGSH_Hardware::InitializeImpl()
 	if(m_gpuInitialized) return;
 	m_gpuInitialized = true;
 	m_textureCache.SetMemory(m_pRAM, m_pCLUT);
+	m_textureCache.SetLazyTexels(true); //decoded on this thread only
 	m_clutHash = XXH3_64bits(m_pCLUT, CLUTSIZE);
 
 	glDisable(GL_CULL_FACE);

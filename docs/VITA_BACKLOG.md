@@ -39,6 +39,7 @@ sound, then measure what was built blind, then the new work. Background and numb
 | `vif_merge=1` | 0133 | Emulation thread `VIFqueue` (13 ms) and `VIFwake`; worker `VIFcmd` (13 ms). Ring records -41% (RE4), -45% (SH2) | - |
 | `clut_load_keep_batch=1` | src | GS thread GL draw cost: SH2 fixed function draws -62% to -83%. Measure on SH2 too | Frame dumps right (palette textures) |
 | `pump_keep_batch=1` | src | GS thread GL draw cost: with the CLUT switch SH2 draws -91% (459 to 39 a game frame), RE4 -18% | UI and overlay still draw right; nothing drawn late after a flip |
+| `texture_lazy_texels=1` | src | GS thread `texCreate`: SH2 made 26 texture cache entries a game frame (1-2 MB allocated and zeroed each), 0.1 with it; PC GS busy -18% in SH2 gameplay | Textures right; free memory |
 | `spu_adma_full_fast=1` | 0134 | Emulation thread `SPUread` (~7 ms, all waiting). Paused SPU DMAs -92% (RE4), -95% (SH2) | `spu_wait_ms` and `spu_read_waits` in perf.csv; listen for audio glitches |
 
 - Turn on as the global default whatever is exact and cuts its section time, even if game fps
