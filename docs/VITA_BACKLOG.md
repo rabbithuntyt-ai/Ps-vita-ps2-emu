@@ -5,6 +5,12 @@ sound, then measure what was built blind, then the new work. Background and numb
 [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), [PERF_WORK_NOT_DONE.md](PERF_WORK_NOT_DONE.md).
 
 **Rules that apply throughout**
+- **General purpose first (decided 26 Nov 2026).** VitaPS2 is a general-purpose emulator, so
+  each improvement must help most games. Game-specific work (RE4-only paths, per-game hacks) is
+  limited from now on. If one seems genuinely necessary, say so and why, and get the user's OK
+  before building it. RE4 stays the game we measure with; check changes on a second game too
+  (Silent Hill 2 runs on the PC runner). A general switch that holds up becomes a global
+  default, not a game profile key.
 - Take the lock for manual commands: `source /c/Users/troy2/vita_lock.sh`, then `vita_lock NAME`
   (`gp.sh` takes it itself).
 - Never run `vitalab clock`, and never go above 444 MHz.
@@ -33,8 +39,9 @@ sound, then measure what was built blind, then the new work. Background and numb
 | `vif_merge=1` | 0133 | Emulation thread `VIFqueue` (13 ms) and `VIFwake`; worker `VIFcmd` (13 ms). Ring records -41% (RE4), -45% (SH2) | - |
 | `spu_adma_full_fast=1` | 0134 | Emulation thread `SPUread` (~7 ms, all waiting). Paused SPU DMAs -92% (RE4), -95% (SH2) | `spu_wait_ms` and `spu_read_waits` in perf.csv; listen for audio glitches |
 
-- Turn on by default (RE4's profile, `assets/game_profiles.ini`, or the global default) whatever
-  is exact and cuts its section time, even if game fps stays within the spread. Commit with
+- Turn on as the global default whatever is exact and cuts its section time, even if game fps
+  stays within the spread. All five are general mechanisms; use a game profile only for a
+  measured reason. Commit with
   `runs/re4/commit.sh`, and put the numbers in the brief and in PERF_WORK_NOT_DONE.md.
 - `vif_merge` and `spu_adma_full_fast` are general (both checked on Silent Hill 2). If they hold
   up, make them the global default, not RE4-only.
@@ -78,7 +85,10 @@ gets a PC exactness check (screenshots identical), then a Vita A/B, then a commi
 - `feedWrite`: after `feed_neon` is measured, look at PSMT4 and the other formats by `--feed-shapes`.
 - `download` (read-backs, 14 ms): the GXM transfer engine with a fence, instead of glReadPixels
   (the VitaSX2 idea). It would also fix the stale read-backs.
-- `worldRet` / `glDrawWorld`: fewer retained draws (merge more batches per draw).
+- `worldRet` / `glDrawWorld`: fewer retained draws (merge more batches per draw). **RE4-only**
+  (its native world path): ask before working on it.
+- General GS work comes first, because every game goes through it: the transfer writes, the
+  read-backs and uploads, the register and vertex path, texture hashing, and the cost per GL draw.
 
 ## 5. Emulation thread (the limit: ~229 ms a game frame, R55c)
 

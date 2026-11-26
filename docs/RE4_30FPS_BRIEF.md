@@ -4,6 +4,14 @@ A brief for anyone asked how to get from about 3 to 30 game frames per second. E
 below was measured on a real Vita unless it says PC. Written 24 Nov 2026 from the repository's
 own notes (`docs/PERF_WORK_NOT_DONE.md`, `docs/PATH_TO_30FPS.md`).
 
+**Direction from 26 Nov 2026: general purpose first.** VitaPS2 is meant to be a general-purpose
+PS2 emulator. Much of RE4's gain below came from RE4-only paths (the world and skinning programs
+done natively, the depth-of-field skip), which do nothing for other games. From now on each
+improvement must help most games. Game-specific work is limited, and proposed with its reason
+before it is built. The RE4-only ideas in "Not done yet" (characters drawn from native
+skinning, native C++ for RE4's game functions, skipping VIF data for retained geometry,
+dropping RE4's post-processing) are therefore on hold.
+
 ## The setup
 
 - **Hardware:** PlayStation Vita. ARM Cortex-A9, 4 cores at 444 MHz (3 for applications; the
