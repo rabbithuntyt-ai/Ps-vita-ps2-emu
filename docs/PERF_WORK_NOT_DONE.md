@@ -793,6 +793,20 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
   - Vita R35: the GS texture stage fell from 22.4-23.3 to 19.1-19.4 ms per game frame.
   - Steady game fps 4.03/4.02/3.92 on against 4.11/4.19 off: noise in the other direction, so
     no fps claim.
+- **Target section split, and resizes on the GPU (`resize_on_gpu`, on; R40-R41, 26 Nov 2026).**
+  - New GS sections: tgtRelayout, tgtAlloc, tgtRemove, tgtResize. The target section's ~25 ms per
+    game frame was almost all resizing (tgtResize 21 ms): shrinks and front trims copied rows
+    with glCopyTexSubImage2D, which waits for the GPU on the Vita. RE4 shrinks its 256x512 blur
+    buffer to 384 rows every frame.
+  - Now the rows are drawn 1:1 from the old texture into the new target (nearest, no blending, no
+    depth). PC: 0 pixels differ in every shot.
+  - Vita A/B: tgtResize 21-22 ms to nothing, and GS idle 15-25 to 34-39 ms per game frame.
+  - Steady game fps 4.27/4.15/4.10 on against 3.97/4.17/4.40 off: no change. In this scene the
+    GS thread no longer sets the frame rate; the emulation and VU1 threads do.
+- **`fast_skin_loop` (on, exact on the PC).** Projected skinning batches use a loop of their own
+  in DrawWorldBatch: no clip flags or guard band per vertex, and indices written through a
+  pointer. The same vertices and indices: PC shots and index totals identical. Vita A/B
+  pending.
 - **GPU read-backs with vglReadPixels: tried, not kept (R36-R39, 26 Nov 2026).**
   - Vita self-test on a cleared 512x448 target (a 1x1 glReadPixels first, to end the scene):
     vglReadPixels into a heap buffer plus memcpy took 5.2 ms against 10.4 for glReadPixels,

@@ -624,6 +624,7 @@ void CGSH_Hardware::ReleaseTargetPool()
 
 void CGSH_Hardware::RemoveTargetsOverlapping(const TARGET* except, uint32 start, uint32 size)
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_TARGET_REMOVE);
 	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 13);
 	SettleStripCover(); //W1: a strip clear in progress ends here
 	for(auto it = m_targets.begin(); it != m_targets.end();)
@@ -853,7 +854,7 @@ CGSH_Hardware::TARGET* CGSH_Hardware::FindTarget(uint32 fbp, uint32 fbw, uint32 
 void CGSH_Hardware::TrimTargetFront(TARGET& target, uint32 rows)
 {
 	FlattenBlockFlags(target); //block_coherency
-	GsProfile::CScope gsSection(GsProfile::SECTION_TARGET);
+	GsProfile::CScope gsSection(GsProfile::SECTION_TARGET_RESIZE);
 	// W1: the first 'rows' rows (whole page rows) leave the target: it starts after them,
 	// its other rows move up on the GPU (callers: no depth, no stale rows)
 	FlushBatch();
@@ -866,9 +867,16 @@ void CGSH_Hardware::TrimTargetFront(TARGET& target, uint32 rows)
 	target.height = oldHeight - rows;
 	target.framebuffer = target.colorTexture = target.depthBuffer = 0;
 	AllocateTargetGl(target);
-	glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
-	glBindTexture(GL_TEXTURE_2D, target.colorTexture);
-	glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, rows, target.width, target.height);
+	if(g_resizeOnGpu)
+	{
+		CopyRowsOnGpu(oldColor, target.width, oldHeight, rows, target.framebuffer, target.height, target.height);
+	}
+	else
+	{
+		glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
+		glBindTexture(GL_TEXTURE_2D, target.colorTexture);
+		glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, rows, target.width, target.height);
+	}
 	// The old GL objects: to the pool like a released target of the old size
 	TARGET old;
 	old.width = target.width;
@@ -930,6 +938,27 @@ void CGSH_Hardware::DrawCopyQuads(GLuint texture, GLuint framebuffer, uint32 wid
 	m_stateApplied = false;
 }
 
+// resize_on_gpu: rows [srcY, srcY + h) of a color texture (width x srcHeight) drawn 1:1 into rows [0, h)
+// of a framebuffer width x dstHeight (nearest, no blending, no depth: the same pixels as
+// glCopyTexSubImage2D, which waits for the GPU on the Vita)
+void CGSH_Hardware::CopyRowsOnGpu(GLuint texture, uint32 width, uint32 srcHeight, uint32 srcY, GLuint framebuffer, uint32 dstHeight, uint32 h)
+{
+	if((h == 0) || (width == 0)) return;
+	auto vertex = [&](uint32 px, uint32 py) {
+		BATCH_VERTEX v = {};
+		v.x = static_cast<float>(px) / static_cast<float>(width) * 2.0f - 1.0f;
+		v.y = static_cast<float>(py) / static_cast<float>(dstHeight) * 2.0f - 1.0f;
+		v.w = 1;
+		v.r = v.g = v.b = v.a = 255;
+		v.s = static_cast<float>(px) / static_cast<float>(width);
+		v.t = static_cast<float>(py + srcY) / static_cast<float>(srcHeight);
+		return v;
+	};
+	auto tl = vertex(0, 0), tr = vertex(width, 0), bl = vertex(0, h), br = vertex(width, h);
+	std::vector<BATCH_VERTEX> quad = {tl, tr, bl, tr, br, bl};
+	DrawCopyQuads(texture, framebuffer, width, dstHeight, quad);
+}
+
 void CGSH_Hardware::CopyRegionOnGpu(GLuint texture, uint32 width, uint32 height, GLuint framebuffer, uint32 x, uint32 y, uint32 w, uint32 h)
 {
 	if((w == 0) || (h == 0)) return;
@@ -966,7 +995,7 @@ bool CGSH_Hardware::CanRelayout(const TARGET& old, const TARGET& target, uint32 
 
 void CGSH_Hardware::RelayoutTarget(TARGET& old, TARGET& target)
 {
-	GsProfile::CScope gsSection(GsProfile::SECTION_TARGET);
+	GsProfile::CScope gsSection(GsProfile::SECTION_TARGET_RELAYOUT);
 	CPartTimer timer(GPU_PART_RELAYOUT);
 	GS_SURFACE oldSurface, newSurface;
 	oldSurface.Init(old.psm, old.fbp, old.fbw);
@@ -1347,7 +1376,7 @@ uint64 CGSH_Hardware::GlFreeBytes()
 
 void CGSH_Hardware::AllocateTargetGl(TARGET& target)
 {
-	GsProfile::CScope gsSection(GsProfile::SECTION_TARGET);
+	GsProfile::CScope gsSection(GsProfile::SECTION_TARGET_ALLOC);
 	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	CPartTimer timer(GPU_PART_TARGET_CREATE);
 	for(auto it = m_targetPool.begin(); it != m_targetPool.end(); ++it)
@@ -1420,6 +1449,7 @@ void CGSH_Hardware::AllocateTargetGl(TARGET& target)
 
 void CGSH_Hardware::ShrinkTarget(TARGET& target, uint32 rows)
 {
+	GsProfile::CScope gsSection(GsProfile::SECTION_TARGET_RESIZE);
 	FlattenBlockFlags(target); //block_coherency
 	// The first 'rows' rows of the color buffer move to a smaller one on the
 	// GPU (callers make sure no depth was drawn and the rest is not dirty).
@@ -1428,9 +1458,16 @@ void CGSH_Hardware::ShrinkTarget(TARGET& target, uint32 rows)
 	uint32 oldHeight = target.height;
 	target.height = rows;
 	AllocateTargetGl(target);
-	glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
-	glBindTexture(GL_TEXTURE_2D, target.colorTexture);
-	glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, target.width, rows);
+	if(g_resizeOnGpu)
+	{
+		CopyRowsOnGpu(oldColor, target.width, oldHeight, 0, target.framebuffer, rows, rows);
+	}
+	else
+	{
+		glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
+		glBindTexture(GL_TEXTURE_2D, target.colorTexture);
+		glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, target.width, rows);
+	}
 	if(g_targetPoolLru)
 	{
 		// target_pool_lru: the old GL objects to the pool like a released target of the old size
@@ -3350,95 +3387,137 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 		guardOffsetY = 0.5f - offset.nOffsetY / 16.0f;
 	}
 	const uint32 guardFlag = 0x100;
-	for(uint32 i = 0; i < batch.count; i++, raw += 12)
+	if(batch.clipSpace && g_fastSkinLoop && (g_gpuWorldDebug == 0))
 	{
-		if(batch.clipSpace)
+		// fast_skin_loop: projected skinning batches (no clip flags, no guard band): positions as
+		// given, texture and colour numbers to floats, the slot, and each triangle's indices in the
+		// winding order the generic loop uses (both orders when the winding is 0)
+		WORLD_GPU_VERTEX* out = m_worldVertices.data() + base;
+		const float slotValue = static_cast<float>(slot);
+		size_t indexBase = m_worldIndices.size();
+		m_worldIndices.resize(indexBase + static_cast<size_t>(batch.count) * 6);
+		uint16* idx = m_worldIndices.data() + indexBase;
+		for(uint32 i = 0; i < batch.count; i++, raw += 12)
 		{
-			flags[0] = flags[1] = flags[2] = 0; //the skip bit is raw[7]
-		}
-		else
-		{
-			float px = static_cast<float>(raw[0]), py = static_cast<float>(raw[1]), pz = static_cast<float>(raw[2]);
-			Re4Vu1::VEC4 k = {clip[0].x * px + clip[1].x * py + clip[2].x * pz + clip[3].x, clip[0].y * px + clip[1].y * py + clip[2].y * pz + clip[3].y,
-			                  clip[0].z * px + clip[1].z * py + clip[2].z * pz + clip[3].z, clip[0].w * px + clip[1].w * py + clip[2].w * pz + clip[3].w};
-			flags[0] = flags[1];
-			flags[1] = flags[2];
-			flags[2] = Re4Vu1::ClipFlags(k);
-			if(guard > 0)
+			auto& v = out[i];
+			std::memcpy(v.p, raw, 16);
+			for(int k = 0; k < 4; k++)
 			{
-				//As the vertex shader: v = M p, divide, wrap at 4096, to the target's [-1, 1]
-				float vx = gm[0] * px + gm[4] * py + gm[8] * pz + gm[12];
-				float vy = gm[1] * px + gm[5] * py + gm[9] * pz + gm[13];
-				float vw = gm[3] * px + gm[7] * py + gm[11] * pz + gm[15];
-				if(vw != 0)
+				v.t[k] = static_cast<float>(raw[4 + k]);
+				v.c[k] = static_cast<float>(raw[8 + k]);
+			}
+			v.slot = slotValue;
+			if((i >= 2) && (raw[7] == 0))
+			{
+				uint16 a = static_cast<uint16>(base + i - 2), b = static_cast<uint16>(base + i - 1), c = static_cast<uint16>(base + i);
+				float winding = static_cast<float>(raw[3]) * batch.vf31.w;
+				bool flip = winding < 0;
+				*idx++ = a;
+				*idx++ = flip ? c : b;
+				*idx++ = flip ? b : c;
+				if(winding == 0)
 				{
-					float sx = vx / vw, sy = vy / vw;
-					sx -= 4096.0f * std::floor(sx * (1.0f / 4096.0f));
-					sy -= 4096.0f * std::floor(sy * (1.0f / 4096.0f));
-					float nx = (sx + guardOffsetX) * guardScaleX - 1.0f, ny = (sy + guardOffsetY) * guardScaleY - 1.0f;
-					if((std::fabs(nx) > 1.0f + 2.0f * guard) || (std::fabs(ny) > 1.0f + 2.0f * guard)) flags[2] |= guardFlag;
+					*idx++ = a;
+					*idx++ = c;
+					*idx++ = b;
 				}
+				m_batchPrimitives++;
 			}
 		}
-		auto& out = m_worldVertices[base + i];
-		if(batch.clipSpace) std::memcpy(out.p, raw, 16);
-		for(int k = 0; k < 4; k++)
+		m_worldIndices.resize(static_cast<size_t>(idx - m_worldIndices.data()));
+	}
+	else
+	{
+		for(uint32 i = 0; i < batch.count; i++, raw += 12)
 		{
-			if(!batch.clipSpace) out.p[k] = static_cast<float>(raw[k]);
-			out.t[k] = static_cast<float>(raw[4 + k]);
-			out.c[k] = static_cast<float>(raw[8 + k]);
-		}
-		out.slot = static_cast<float>(slot);
-		bool clipped = (i >= 2) && ((flags[0] | flags[1] | flags[2]) != 0);
-		//Skinning batches: a triangle inside the clip volume is drawn even when far off screen
-		//(the program draws it), one touching the clip volume is skipped (the program does not clip)
-		if(batch.skin && clipped && !((flags[0] | flags[1] | flags[2]) & ~guardFlag)) clipped = false;
-		if(clipped && !((flags[0] | flags[1] | flags[2]) & ~guardFlag)) g_gpuWorldGuarded++;
-		if(clipped && (raw[7] == 0) && !batch.skin && !(g_gpuWorldDebug & 1))
-		{
-			GsProfile::CScope clipSection(GsProfile::SECTION_WORLD_CLIP);
-			g_worldClipCalls++;
-			if(g_clipReject && !batch.clipSpace && Re4Vu1::ClipRejects(batch, i - 2))
+			if(batch.clipSpace)
 			{
-				g_worldClipRejected++;
-				if(g_clipRejectCheck)
-				{
-					Re4Vu1::WORLD_VERTEX last3[3] = {Re4Vu1::ReadWorldVertex(batch, i - 2), Re4Vu1::ReadWorldVertex(batch, i - 1), Re4Vu1::ReadWorldVertex(batch, i)};
-					Re4Vu1::WORLD_VERTEX polygon[12];
-					if(Re4Vu1::ClipTriangle(last3, polygon) >= 3) g_clipRejectMismatches++;
-				}
+				flags[0] = flags[1] = flags[2] = 0; //the skip bit is raw[7]
 			}
 			else
 			{
-				Re4Vu1::WORLD_VERTEX last3[3] = {Re4Vu1::ReadWorldVertex(batch, i - 2), Re4Vu1::ReadWorldVertex(batch, i - 1), Re4Vu1::ReadWorldVertex(batch, i)};
-				DrawClippedWorldTriangle(last3);
-				m_batchHasClippedWorld = true;
+				float px = static_cast<float>(raw[0]), py = static_cast<float>(raw[1]), pz = static_cast<float>(raw[2]);
+				Re4Vu1::VEC4 k = {clip[0].x * px + clip[1].x * py + clip[2].x * pz + clip[3].x, clip[0].y * px + clip[1].y * py + clip[2].y * pz + clip[3].y,
+				                  clip[0].z * px + clip[1].z * py + clip[2].z * pz + clip[3].z, clip[0].w * px + clip[1].w * py + clip[2].w * pz + clip[3].w};
+				flags[0] = flags[1];
+				flags[1] = flags[2];
+				flags[2] = Re4Vu1::ClipFlags(k);
+				if(guard > 0)
+				{
+					//As the vertex shader: v = M p, divide, wrap at 4096, to the target's [-1, 1]
+					float vx = gm[0] * px + gm[4] * py + gm[8] * pz + gm[12];
+					float vy = gm[1] * px + gm[5] * py + gm[9] * pz + gm[13];
+					float vw = gm[3] * px + gm[7] * py + gm[11] * pz + gm[15];
+					if(vw != 0)
+					{
+						float sx = vx / vw, sy = vy / vw;
+						sx -= 4096.0f * std::floor(sx * (1.0f / 4096.0f));
+						sy -= 4096.0f * std::floor(sy * (1.0f / 4096.0f));
+						float nx = (sx + guardOffsetX) * guardScaleX - 1.0f, ny = (sy + guardOffsetY) * guardScaleY - 1.0f;
+						if((std::fabs(nx) > 1.0f + 2.0f * guard) || (std::fabs(ny) > 1.0f + 2.0f * guard)) flags[2] |= guardFlag;
+					}
+				}
 			}
-		}
-		if((i >= 2) && (raw[7] == 0) && !clipped)
-		{
-			uint16 a = static_cast<uint16>(base + i - 2), b = static_cast<uint16>(base + i - 1), c = static_cast<uint16>(base + i);
-			float winding = static_cast<float>(raw[3]) * batch.vf31.w;
-			bool flip = winding < 0;
-			m_worldIndices.push_back(a);
-			m_worldIndices.push_back(flip ? c : b);
-			m_worldIndices.push_back(flip ? b : c);
-			if(winding == 0)
+			auto& out = m_worldVertices[base + i];
+			if(batch.clipSpace) std::memcpy(out.p, raw, 16);
+			for(int k = 0; k < 4; k++)
 			{
-				//No back face test in the program (foliage drawn from both sides): both orders,
-				//the GPU drops one
+				if(!batch.clipSpace) out.p[k] = static_cast<float>(raw[k]);
+				out.t[k] = static_cast<float>(raw[4 + k]);
+				out.c[k] = static_cast<float>(raw[8 + k]);
+			}
+			out.slot = static_cast<float>(slot);
+			bool clipped = (i >= 2) && ((flags[0] | flags[1] | flags[2]) != 0);
+			//Skinning batches: a triangle inside the clip volume is drawn even when far off screen
+			//(the program draws it), one touching the clip volume is skipped (the program does not clip)
+			if(batch.skin && clipped && !((flags[0] | flags[1] | flags[2]) & ~guardFlag)) clipped = false;
+			if(clipped && !((flags[0] | flags[1] | flags[2]) & ~guardFlag)) g_gpuWorldGuarded++;
+			if(clipped && (raw[7] == 0) && !batch.skin && !(g_gpuWorldDebug & 1))
+			{
+				GsProfile::CScope clipSection(GsProfile::SECTION_WORLD_CLIP);
+				g_worldClipCalls++;
+				if(g_clipReject && !batch.clipSpace && Re4Vu1::ClipRejects(batch, i - 2))
+				{
+					g_worldClipRejected++;
+					if(g_clipRejectCheck)
+					{
+						Re4Vu1::WORLD_VERTEX last3[3] = {Re4Vu1::ReadWorldVertex(batch, i - 2), Re4Vu1::ReadWorldVertex(batch, i - 1), Re4Vu1::ReadWorldVertex(batch, i)};
+						Re4Vu1::WORLD_VERTEX polygon[12];
+						if(Re4Vu1::ClipTriangle(last3, polygon) >= 3) g_clipRejectMismatches++;
+					}
+				}
+				else
+				{
+					Re4Vu1::WORLD_VERTEX last3[3] = {Re4Vu1::ReadWorldVertex(batch, i - 2), Re4Vu1::ReadWorldVertex(batch, i - 1), Re4Vu1::ReadWorldVertex(batch, i)};
+					DrawClippedWorldTriangle(last3);
+					m_batchHasClippedWorld = true;
+				}
+			}
+			if((i >= 2) && (raw[7] == 0) && !clipped)
+			{
+				uint16 a = static_cast<uint16>(base + i - 2), b = static_cast<uint16>(base + i - 1), c = static_cast<uint16>(base + i);
+				float winding = static_cast<float>(raw[3]) * batch.vf31.w;
+				bool flip = winding < 0;
 				m_worldIndices.push_back(a);
-				m_worldIndices.push_back(c);
-				m_worldIndices.push_back(b);
-			}
-			m_batchPrimitives++;
-			if(g_gpuWorldDebug & 32)
-			{
-				static uint64 positive = 0, negative = 0, reported = 0;
-				const float* mm = m_worldMatrix + slot * 16;
-				float w = mm[3] * static_cast<float>(raw[0]) + mm[7] * static_cast<float>(raw[1]) + mm[11] * static_cast<float>(raw[2]) + mm[15];
-				(w > 0 ? positive : negative)++;
-				if(((positive + negative) % 200000) == 0 && reported++ < 5) std::fprintf(stderr, "w sign of drawn vertices: %llu positive, %llu negative\n", (unsigned long long)positive, (unsigned long long)negative);
+				m_worldIndices.push_back(flip ? c : b);
+				m_worldIndices.push_back(flip ? b : c);
+				if(winding == 0)
+				{
+					//No back face test in the program (foliage drawn from both sides): both orders,
+					//the GPU drops one
+					m_worldIndices.push_back(a);
+					m_worldIndices.push_back(c);
+					m_worldIndices.push_back(b);
+				}
+				m_batchPrimitives++;
+				if(g_gpuWorldDebug & 32)
+				{
+					static uint64 positive = 0, negative = 0, reported = 0;
+					const float* mm = m_worldMatrix + slot * 16;
+					float w = mm[3] * static_cast<float>(raw[0]) + mm[7] * static_cast<float>(raw[1]) + mm[11] * static_cast<float>(raw[2]) + mm[15];
+					(w > 0 ? positive : negative)++;
+					if(((positive + negative) % 200000) == 0 && reported++ < 5) std::fprintf(stderr, "w sign of drawn vertices: %llu positive, %llu negative\n", (unsigned long long)positive, (unsigned long long)negative);
+				}
 			}
 		}
 	}

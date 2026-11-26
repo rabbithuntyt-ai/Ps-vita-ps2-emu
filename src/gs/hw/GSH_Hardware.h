@@ -332,6 +332,8 @@ public:
 	static inline bool g_blockCoherency = false; //block_coherency (docs/BLOCK_COHERENCY.md)
 	static inline std::map<std::string, std::pair<uint64, uint64>> g_downloadCauses; //host --state-breaks: read-backs by cause and target
 	static inline uint64 g_blockTransfers = 0, g_blockReadBacks = 0, g_blockResolves = 0, g_blockFlattens = 0;
+	static inline bool g_resizeOnGpu = true;
+	static inline bool g_fastSkinLoop = true; //fast_skin_loop (on): projected skinning batches by a loop of their own (same output) //resize_on_gpu (on): shrinks and front trims copy rows by drawing, not glCopyTexSubImage2D
 	static inline bool g_gpuUpload = true; //gpu_upload (on): target uploads drawn from a scratch texture (see UploadTarget)
 	static inline uint64 g_gpuUploads = 0;
 	static inline uint32 g_targetPoolMaxAge = 300;
@@ -583,6 +585,7 @@ private:
 	// framebuffer, nothing but the color written; GL state is applied again afterwards.
 	void DrawCopyQuads(GLuint texture, GLuint framebuffer, uint32 width, uint32 height, const std::vector<BATCH_VERTEX>& quads);
 	// A rectangle of a texture to the same place of another of the same size.
+	void CopyRowsOnGpu(GLuint texture, uint32 width, uint32 srcHeight, uint32 srcY, GLuint framebuffer, uint32 dstHeight, uint32 h);
 	void CopyRegionOnGpu(GLuint texture, uint32 width, uint32 height, GLuint framebuffer, uint32 x, uint32 y, uint32 w, uint32 h);
 	void AllocateTargetGl(TARGET&);
 	// W1: GL objects of released targets, reused by AllocateTargetGl for the same size

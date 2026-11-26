@@ -438,6 +438,8 @@ namespace
 		else if(key == "target_pixels_prefetch") TargetPixels::g_prefetchBlocks = static_cast<uint32_t>(value); //blocks ahead to prefetch (2)
 		else if(key == "texture_index") CTextureCache::g_indexedLookup = value != 0; //texture cache lookups by key hash (exact; on)
 		else if(key == "block_coherency") CGSH_Hardware::g_blockCoherency = value != 0; //per-block stale/clean target tracking (docs/BLOCK_COHERENCY.md; off)
+		else if(key == "resize_on_gpu") CGSH_Hardware::g_resizeOnGpu = value != 0; //target shrinks and trims copy rows by drawing (exact; on)
+		else if(key == "fast_skin_loop") CGSH_Hardware::g_fastSkinLoop = value != 0; //skinning batch vertices by a loop of their own (exact; on)
 		else if(key == "gpu_skin") Re4Skin::g_gpuSkin = value != 0; //RE4: one-matrix skinning batches drawn by the GPU world path (off)
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
