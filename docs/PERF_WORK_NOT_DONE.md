@@ -1028,6 +1028,27 @@ headers and comments. The ideas worth testing are in the brief's "Not done yet" 
   identical to each other too.
 - **Vita:** not measured (offline). Expected: most of `SPUread` (7 ms) off the emulation thread.
 
+### `vif_merge` and `spu_adma_full_fast` on Silent Hill 2 (PC, 26 Nov 2026)
+
+- **Run:** SH2 from boot on the PC runner (`--mtvu --vu1-async --mtspu --mpeg-hle --hw`). New Game
+  (crosses at vblanks 900-1600), opening movie skipped (start at 1900), then James walks around the
+  first restroom (analog presses 2050-3100). 3,100 vblanks, 1,436 game frames, a shot every 100.
+- **Not deterministic without either switch:** two runs with both off differ in 4 shots of the
+  title and movie section (vblanks 700-1200, at most 8 levels). From about vblank 2100 the shots
+  land one vblank apart (2100 in one run, 2101 in the other). Primitive counts differ by 0.03%.
+  So "identical" here means identical where two runs with both off are identical too.
+- **`vif_merge`:** records 8,267,080 to 4,573,510 (3,692,409 tags merged, -45%), the same 1,144 MB.
+  That is about 5,760 to 3,180 records a game frame. Every gameplay shot (1900 on) is identical.
+  The differences are in the same title and movie shots as off against off, and of the same size.
+- **`spu_adma_full_fast`:** SH2 also streams through SPU input DMA. Core 1 polls make 183,594 paused
+  DMAs, core 0 makes 6,170, and 96% of them move nothing. Paused DMAs 189,882 to 9,222 (-95%), or
+  132 to 6 a game frame. The partial and full DMAs that moved data barely change (8,595/572 to
+  8,131/542, within the run-to-run spread). Gameplay shots identical; differences only in the
+  title and movie section, as off against off.
+- **So both are general:** any game that sends VIF1 chains with VIF codes in the tags gains from
+  the first, and any game whose sound driver keeps restarting a full input DMA gains from the
+  second. Neither is measured on the Vita yet.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an
