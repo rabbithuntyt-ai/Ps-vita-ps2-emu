@@ -306,6 +306,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-end-on-worker")) Re4Vu1::g_endOnWorker = false; //world batch ends projected on the GS thread
 		else if(!std::strcmp(argv[i], "--solid-readback-check")) CGSH_Hardware::g_solidReadbackCheck = true; //solid read-backs also read the GPU and count differences
 		else if(!std::strcmp(argv[i], "--no-mailbox-batch")) CMailBox::g_batched = false; //one lock and one notify per mailbox call
+		else if(!std::strcmp(argv[i], "--feed-neon")) GsTransferWrite::g_columns = true; //PSMCT32 transfer blocks written by columns
 		else if(!std::strcmp(argv[i], "--feed-shapes")) CGSH_Hardware::g_feedShapes = true; //host to local transfers by format, size and alignment
 		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
 		else if(!std::strcmp(argv[i], "--reuse-scan")) CVpu::g_reuseScan = CGSHandler::g_shadowRegs = true; //relayed GIF data repeated across frames

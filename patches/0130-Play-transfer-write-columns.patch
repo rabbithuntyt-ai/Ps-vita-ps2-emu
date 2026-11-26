@@ -1,0 +1,86 @@
+diff --git a/Source/gs/GsTransferWrite.h b/Source/gs/GsTransferWrite.h
+--- a/Source/gs/GsTransferWrite.h
++++ b/Source/gs/GsTransferWrite.h
+@@ -42,6 +42,11 @@
+ 	// rows a transfer row apart, more streams than the A9 prefetches by itself (the same pattern
+ 	// made render target read-backs 32% faster with it)
+ 	inline bool g_prefetch = true;
++	// feed_neon (off until measured on the Vita): PSMCT32 blocks written by columns. A block is four
++	// 64-byte columns; a column holds two transfer rows' 8 pixels, 2 pixels from each row in turn
++	// (checked against Play's page offsets: ColumnLayoutMatches). One column: two 32-byte loads, four
++	// 16-byte stores (NEON), instead of eight 8-byte copies through an offset table.
++	inline bool g_columns = false;
+ 	inline uint64 g_blockUnits = 0, g_singleUnits = 0, g_calls = 0, g_unalignedStarts = 0;
+ 
+ 	// For one block: the source unit of every unit of the block (in memory order), as an index
+@@ -121,6 +126,50 @@
+ 		return table;
+ 	}
+ 
++	// The PSMCT32 block layout the column path assumes: chunk c (8 bytes) of a block holds pixels
++	// 2j, 2j+1 of block row 2k + (c % 2), with k = c / 8 and j = (c % 8) / 2
++	template <typename Storage>
++	bool ColumnLayoutMatches()
++	{
++		static const bool matches = []() {
++			if(sizeof(typename Storage::Unit) != 4) return false;
++			const auto& chunks = GetBlockChunks<Storage>();
++			if(!chunks.valid) return false;
++			for(uint32 c = 0; c < CGsPixelFormats::BLOCKSIZE / 8; c++)
++			{
++				uint32 k = c / 8, j = (c % 8) / 2;
++				if((chunks.x[c] != 2 * j) || (chunks.y[c] != 2 * k + (c % 2))) return false;
++			}
++			return true;
++		}();
++		return matches;
++	}
++
++	// One PSMCT32 block from 8 transfer rows 'rrw' pixels apart, by columns (ColumnLayoutMatches)
++	inline void WriteColumnsBlock32(uint8* block, const uint32* base, uint32 rrw)
++	{
++		for(uint32 k = 0; k < 4; k++)
++		{
++			const uint32* r0 = base + (2 * k) * rrw;
++			const uint32* r1 = r0 + rrw;
++			uint8* out = block + k * 64;
++#if defined(__ARM_NEON)
++			uint64x2_t a0 = vreinterpretq_u64_u32(vld1q_u32(r0)), a1 = vreinterpretq_u64_u32(vld1q_u32(r0 + 4));
++			uint64x2_t b0 = vreinterpretq_u64_u32(vld1q_u32(r1)), b1 = vreinterpretq_u64_u32(vld1q_u32(r1 + 4));
++			vst1q_u64(reinterpret_cast<uint64_t*>(out + 0), vcombine_u64(vget_low_u64(a0), vget_low_u64(b0)));
++			vst1q_u64(reinterpret_cast<uint64_t*>(out + 16), vcombine_u64(vget_high_u64(a0), vget_high_u64(b0)));
++			vst1q_u64(reinterpret_cast<uint64_t*>(out + 32), vcombine_u64(vget_low_u64(a1), vget_low_u64(b1)));
++			vst1q_u64(reinterpret_cast<uint64_t*>(out + 48), vcombine_u64(vget_high_u64(a1), vget_high_u64(b1)));
++#else
++			for(uint32 j = 0; j < 4; j++)
++			{
++				std::memcpy(out + j * 16, r0 + 2 * j, 8);
++				std::memcpy(out + j * 16 + 8, r1 + 2 * j, 8);
++			}
++#endif
++		}
++	}
++
+ 	// One row of whole blocks (BLOCKHEIGHT transfer rows) of a format with whole-byte units.
+ 	// False (nothing written) if a block is outside GS memory.
+ 	template <typename Storage>
+@@ -142,6 +191,7 @@
+ 			for(uint32 c = 0; c < CGsPixelFormats::BLOCKSIZE / 8; c++) offsets[c] = chunks.y[c] * rrw + chunks.x[c];
+ 			if(!g_compare)
+ 			{
++				bool columns = g_columns && (sizeof(Unit) == 4) && ColumnLayoutMatches<Storage>();
+ 				for(uint32 k = 0; k < blocks; k++)
+ 				{
+ 					uint8* block = ram + BlockAddress<Storage>(pointer, bufferWidth, (x + k * Storage::BLOCKWIDTH) % 2048, y, 1);
+@@ -150,7 +200,10 @@
+ 					{
+ 						for(uint32 r = 0; r < Storage::BLOCKHEIGHT; r++) __builtin_prefetch(base + 2 * Storage::BLOCKWIDTH + r * rrw, 0);
+ 					}
+-					for(uint32 c = 0; c < CGsPixelFormats::BLOCKSIZE / 8; c++) std::memcpy(block + c * 8, base + offsets[c], 8);
++					if(columns)
++						WriteColumnsBlock32(block, reinterpret_cast<const uint32*>(base), rrw);
++					else
++						for(uint32 c = 0; c < CGsPixelFormats::BLOCKSIZE / 8; c++) std::memcpy(block + c * 8, base + offsets[c], 8);
+ 				}
+ 				dirty = true;
+ 				return true;

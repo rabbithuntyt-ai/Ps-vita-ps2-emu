@@ -443,6 +443,7 @@ namespace
 		else if(key == "resize_on_gpu") CGSH_Hardware::g_resizeOnGpu = value != 0; //target shrinks and trims copy rows by drawing (exact; on)
 		else if(key == "fast_skin_loop") CGSH_Hardware::g_fastSkinLoop = value != 0; //skinning batch vertices by a loop of their own (exact; on)
 		else if(key == "feed_prefetch") GsTransferWrite::g_prefetch = value != 0; //transfer writes prefetch the next blocks' source rows (on)
+		else if(key == "feed_neon") GsTransferWrite::g_columns = value != 0; //PSMCT32 transfer blocks written by columns with NEON (exact; off until measured)
 		else if(key == "texture_page_hash") CTextureCache::g_exactPageHash = value != 0; //hash only the pages a texture reads (exact; on)
 		else if(key == "alpha_clut_reuse") CGSH_Hardware::g_alphaClutReuse = value != 0; //alpha CLUT results reused while no target alpha changed (exact; on)
 		else if(key == "solid_readback") CGSH_Hardware::g_solidReadback = value != 0; //read-backs of solid-filled targets write the colour (exact; on)

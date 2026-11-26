@@ -103,6 +103,15 @@ int main()
 	std::printf("  %s PSMT4 block self-test: %u of 2000 differ\n", selfTest ? "FAIL" : "ok  ", selfTest);
 	failures += selfTest;
 	failures += Check("PSMCT32", 8, 8, 32, RunUnits<CGsPixelFormats::STORAGEPSMCT32>, rng);
+	//feed_neon: store only by columns (NEON on ARM, 8-byte copies elsewhere) against the other paths
+	if(!GsTransferWrite::ColumnLayoutMatches<CGsPixelFormats::STORAGEPSMCT32>())
+	{
+		std::printf("  FAIL PSMCT32 column layout not as the column path assumes\n");
+		failures++;
+	}
+	GsTransferWrite::g_columns = true;
+	failures += Check("PSMCT32 columns", 8, 8, 32, RunUnits<CGsPixelFormats::STORAGEPSMCT32>, rng);
+	GsTransferWrite::g_columns = false;
 	failures += Check("PSMCT16", 16, 8, 16, RunUnits<CGsPixelFormats::STORAGEPSMCT16>, rng);
 	failures += Check("PSMT8", 16, 16, 8, RunUnits<CGsPixelFormats::STORAGEPSMT8>, rng);
 	failures += Check("PSMT4", 32, 16, 4, RunPsmt4, rng);
