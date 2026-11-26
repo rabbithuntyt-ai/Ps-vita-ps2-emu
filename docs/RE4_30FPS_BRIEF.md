@@ -338,6 +338,7 @@ frame dumps) or results compared bit for bit.
 | Drop RE4's post-processing (blur buffers, colour passes) as a quality option | ~70 ms of GS thread work (read-backs, uploads, targets) | Changes the picture; useless while the emulation thread is the limit |
 | Timer interrupt done natively (libtimer's TIMER1 handler, 2,250 a second) | ~5 ms per game frame | Small; needs care with the game's alarms |
 | Native replacements for IOP modules (SIO2MAN, PADMAN, libsd, Capcom's mixer) | Part of 17 ms | Small in gameplay |
+| SPU ADMA polls answered without pausing the mixer (`spu_adma_full_fast`, patch 0134, built 26 Nov, off until a Vita A/B) | Most of `SPUread`, ~7 ms a game frame of emulation thread waiting | 93% of RE4's core 1 input DMAs find the buffer full and move nothing, yet each paused the mixer; PC: paused DMAs -92%, screenshots identical |
 | A new VU recompiler (V2 complete) | Large for VU-heavy games | RE4's heavy VU programs are already native |
 | Run the game's draw phase every second tick (R2) | Halves draw work | A fallback (not a true 30); gate G5 never run |
 
@@ -347,7 +348,7 @@ VitaSX2"). None tested here yet.
 
 | Idea | Thread / section it targets | Why it looks promising |
 |---|---|---|
-| EE wait-loop fast-forward in closed form: loops that poll GS CSR VSINT, a DMAC channel's CHCR.STR, a RAM flag, or count down are jumped straight to the next scheduler event (cycles computed, not spun) | Emulation thread, EE game code (93 ms) and EE I/O | Exact if done at event seams; we have idle-loop and thread-lock HLE, but not per-poll-shape skipping. Check first how much RE4 time sits in such loops (eehot.txt) |
+| EE wait-loop fast-forward in closed form: loops that poll GS CSR VSINT, a DMAC channel's CHCR.STR, a RAM flag, or count down are jumped straight to the next scheduler event (cycles computed, not spun) | Emulation thread, EE game code (93 ms) and EE I/O | **Checked 26 Nov: not worth it for RE4.** Every small loop in RE4's code (≤17 instructions) with a load and no store or call, weighted by the Vita's EE samples (R56e): 0.8% of EE time in all, and those are table searches, not polls. RE4 waits by blocking its threads (the EE then idles) and does ~3,000 EE I/O accesses a game frame |
 | EE JIT: guest registers kept in host registers across linked blocks, with a "compatible entry" per link signature, dirty write-back at block end (VitaSX2 pins 5 GPR low words; a Q-register cache of 8 GPRs) | EE game code | Our hot code spends 10-12% of instructions on guest register loads/stores; adds the mechanism to the existing EE JIT rework item |
 | EE JIT: compare consumed only by its branch keeps the result in flags; 64-bit high words rematerialized from a sign/zero-extension fact instead of stored | EE game code | Cuts instructions per EE instruction (ours: 23) without fastmem |
 | EE JIT: loop-level memory preflight - an affine address range proven RAM (and free of compiled code) once at loop entry, then loads/stores in the body skip the per-access VTLB and code-overwrite checks | EE game code | The Vita has no page faults, so per-access checks are the price of every load; VitaSX2 reports its first such loop >=2x |

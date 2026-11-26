@@ -1,0 +1,134 @@
+diff --git a/Source/iop/Iop_SubSystem.h b/Source/iop/Iop_SubSystem.h
+--- a/Source/iop/Iop_SubSystem.h
++++ b/Source/iop/Iop_SubSystem.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <functional>
++#include <map>
+ #include "../MIPS.h"
+ #include "../MA_MIPSIV.h"
+ #include "../COP_SCU.h"
+@@ -75,6 +76,11 @@
+ 		//Voice envelope and volume levels (ENVX, VOLXL, VOLXR: values the mixer only
+ 		//produces) read without pausing the mixer when no write is queued (on by default)
+ 		static inline bool g_fastSpuLevelReads = true;
++		//Diagnostics (PC runner): reads and DMAs that take the paused-mixer path, by address (DMA: 0xD000/0xD100 + mode * 0x10 + direction; +0x400 + none/part/all moved; +0x800 answered full without a pause)
++		static inline std::map<uint32, uint64>* g_spuSlowCounts = nullptr;
++		//spu_adma_full_fast: a core input (ADMA) DMA into a full input buffer answers 0 blocks
++		//without pausing the mixer, when no register write is queued (off until measured)
++		static inline bool g_fastSpuAdmaFull = false;
+ 
+ 		CMIPS m_cpu;
+ 		CMA_MIPSIV m_cpuArch;
+@@ -111,6 +117,7 @@
+ 		void SetupPageTable();
+ 
+ 		uint32 ReadIoRegister(uint32);
++		uint32 ReceiveSpuDma(CSpuBase&, uint8*, uint32, uint32, uint32);
+ 		uint32 WriteIoRegister(uint32, uint32);
+ 
+ 		void CheckPendingInterrupts();
+diff --git a/Source/iop/Iop_SubSystem.cpp b/Source/iop/Iop_SubSystem.cpp
+--- a/Source/iop/Iop_SubSystem.cpp
++++ b/Source/iop/Iop_SubSystem.cpp
+@@ -83,27 +83,11 @@
+ 
+ 	m_dmac.SetReceiveFunction(CDmac::CHANNEL_SPU0,
+ 	                          [this](uint8* buffer, uint32 blockSize, uint32 blockAmount, uint32 direction) {
+-		                          //Same rule as register reads: the game picks where to write from
+-		                          //the playback position it reads, which lags as much as the mixer
+-		                          if(m_spuReadAccess)
+-		                          {
+-			                          uint32 result = 0;
+-			                          m_spuReadAccess([&]() { result = m_spuCore0.ReceiveDma(buffer, blockSize, blockAmount, direction); });
+-			                          return result;
+-		                          }
+-		                          SyncSpu();
+-		                          return m_spuCore0.ReceiveDma(buffer, blockSize, blockAmount, direction);
++		                          return ReceiveSpuDma(m_spuCore0, buffer, blockSize, blockAmount, direction);
+ 	                          });
+ 	m_dmac.SetReceiveFunction(CDmac::CHANNEL_SPU1,
+ 	                          [this](uint8* buffer, uint32 blockSize, uint32 blockAmount, uint32 direction) {
+-		                          if(m_spuReadAccess)
+-		                          {
+-			                          uint32 result = 0;
+-			                          m_spuReadAccess([&]() { result = m_spuCore1.ReceiveDma(buffer, blockSize, blockAmount, direction); });
+-			                          return result;
+-		                          }
+-		                          SyncSpu();
+-		                          return m_spuCore1.ReceiveDma(buffer, blockSize, blockAmount, direction);
++		                          return ReceiveSpuDma(m_spuCore1, buffer, blockSize, blockAmount, direction);
+ 	                          });
+ 	m_dmac.SetReceiveFunction(CDmac::CHANNEL_DEV9, std::bind(&CSpeed::ReceiveDma, &m_speed, PLACEHOLDER_1, PLACEHOLDER_2, PLACEHOLDER_3, PLACEHOLDER_4));
+ 	m_dmac.SetReceiveFunction(CDmac::CHANNEL_SIO2in, std::bind(&CSio2::ReceiveDmaIn, &m_sio2, PLACEHOLDER_1, PLACEHOLDER_2, PLACEHOLDER_3, PLACEHOLDER_4));
+@@ -254,6 +238,36 @@
+ 	m_cpu.m_fastRamKind = 2; //Jitter::GUEST_MEMOP_INFO::FAST_RAM_IOP: 2 MB mirrored in 8 MB at 0 and 0x80000000
+ }
+ 
++uint32 CSubSystem::ReceiveSpuDma(CSpuBase& core, uint8* buffer, uint32 blockSize, uint32 blockAmount, uint32 direction)
++{
++	if(m_spuReadAccess)
++	{
++		//A sound driver streaming PCM through a core's input (ADMA) keeps starting the transfer
++		//while the input buffer is full (RE4: 93% of its core 1 DMAs move nothing). With no write
++		//queued, the mode is the one set, and "full" ends only when the mixer has read the buffer:
++		//answering 0 blocks without pausing the mixer is the paused answer a little earlier, which
++		//the read path's lag already allows
++		uint32 key = (&core == &m_spuCore0) ? 0xD000 : 0xD100;
++		if(g_fastSpuAdmaFull && m_spuWritesPending && !m_spuWritesPending() && core.IsBlockInputFull())
++		{
++			if(g_spuSlowCounts) (*g_spuSlowCounts)[key + 0x800]++;
++			return 0;
++		}
++		//Same rule as register reads: the game picks where to write from the playback position
++		//it reads, which lags as much as the mixer
++		uint32 result = 0;
++		m_spuReadAccess([&]() { result = core.ReceiveDma(buffer, blockSize, blockAmount, direction); });
++		if(g_spuSlowCounts)
++		{
++			(*g_spuSlowCounts)[key + core.GetTransferMode() * 0x10 + direction]++;
++			(*g_spuSlowCounts)[key + 0x400 + ((result == 0) ? 0 : ((result < blockAmount) ? 1 : 2))]++;
++		}
++		return result;
++	}
++	SyncSpu();
++	return core.ReceiveDma(buffer, blockSize, blockAmount, direction);
++}
++
+ uint32 CSubSystem::ReadIoRegister(uint32 address)
+ {
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_IOP_IO);
+@@ -265,6 +279,7 @@
+ 	{
+ 		if(m_spuReadAccess)
+ 		{
++			if(g_spuSlowCounts) (*g_spuSlowCounts)[address]++;
+ 			uint32 result = 0;
+ 			m_spuReadAccess([&]() { result = m_spu.ReadRegister(address); });
+ 			return result;
+@@ -310,6 +325,7 @@
+ 		}
+ 		if(m_spuReadAccess)
+ 		{
++			if(g_spuSlowCounts) (*g_spuSlowCounts)[address]++;
+ 			uint32 result = 0;
+ 			m_spuReadAccess([&]() { result = m_spu2.ReadRegister(address); });
+ 			return result;
+diff --git a/Source/iop/Iop_SpuBase.h b/Source/iop/Iop_SpuBase.h
+--- a/Source/iop/Iop_SpuBase.h
++++ b/Source/iop/Iop_SpuBase.h
+@@ -235,6 +235,13 @@
+ 		void SetIrqAddress(uint32);
+ 
+ 		uint16 GetTransferMode() const;
++		//True when a core input (ADMA) transfer is set and the input buffer is full (a DMA would move
++		//nothing). Safe to call while the mixer runs: the mixer only empties a full buffer
++		bool IsBlockInputFull() const
++		{
++			if((m_transferMode != TRANSFER_MODE_BLOCK_CORE0IN) && (m_transferMode != TRANSFER_MODE_BLOCK_CORE1IN)) return false;
++			return __atomic_load_n(&m_blockWritePtr, __ATOMIC_ACQUIRE) == SOUND_INPUT_DATA_SIZE;
++		}
+ 		void SetTransferMode(uint16);
+ 
+ 		uint32 GetTransferAddress() const;

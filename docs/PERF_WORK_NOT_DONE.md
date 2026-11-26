@@ -989,6 +989,45 @@ headers and comments. The ideas worth testing are in the brief's "Not done yet" 
 - **Vita:** not measured (offline). Expected on the emulation thread: part of VIFqueue (12 ms a
   game frame without the copy) and VIFwake.
 
+### EE wait loops in RE4: measured, too few to fast-forward (26 Nov 2026)
+
+- **Question:** VitaSX2 fast-forwards EE loops that poll GS CSR VSINT, a DMA channel's CHCR.STR, a
+  RAM flag, or count down. How much RE4 EE time sits in such loops?
+- **Method:** RE4's code (0x100000-0x400000) from a Vita RAM dump (R56e `eeram.bin`) disassembled
+  with `mips-linux-gnu-objdump -m mips:5900`. Every backward branch spanning 17 instructions or
+  fewer is a candidate loop. A poll shape is a loop with a load, no store, and no call or return.
+  Each one is weighted by the Vita's EE samples in its 32-byte buckets (R56e `eehot.txt`, 5,645
+  samples).
+- **Result:** 0.8% of EE samples in all poll-shaped loops, at most (overlapping buckets count
+  twice). The heaviest are table searches (0.2% each: a float threshold scan, two 24-byte record
+  searches, a timer alarm list walk), not waits. The hot small loops are copies, VU0 matrix loops,
+  a byte copy and a zero fill.
+- **Why:** RE4 waits by blocking its threads in the kernel (the EE then idles, which is not game
+  code time), and it makes only about 3,000 EE I/O accesses a game frame. BIOS code (0x1FC0xxxx,
+  exception and interrupt entry) is 3.3% of the samples, and the libtimer TIMER1 handler is about
+  6%. Neither is a wait.
+- **So:** closed-form wait-loop fast-forward would save under 1 ms of the EE's ~94 ms a game frame.
+  Not built.
+
+### SPU waits: RE4's ADMA polls pause the mixer (26 Nov 2026, patch 0134, `spu_adma_full_fast`, off)
+
+- **On the Vita (R55c):** `SPUread` is about 7 ms a game frame on the emulation thread, all of it
+  waiting (`spu_wait_ms` about 30 ms a second over about 106 waits). That is the emulation thread
+  waiting for the SPU mixer thread to finish its block before an SPU access.
+- **Which accesses (PC, `--mtspu --spu-slow-reads`, 420 vblanks):** SPU core 1 DMA in core input
+  mode (ADMA, `TRANSFER_MODE_BLOCK_CORE1IN`) made 16,713 of the paused accesses. SPU2 register
+  reads made a few hundred (the ENVX/ENDX fast path already covers the rest), and core 0 DMA 115.
+  15,453 of the ADMA DMAs moved nothing (93%): the input buffer is full and the IOP DMAC starts
+  the transfer again and again until the mixer has read it.
+- **Change:** with no SPU register write queued (so the transfer mode is the one set), a core
+  input DMA into a full buffer returns 0 blocks without pausing the mixer. Only the mixer empties
+  a full buffer, so the answer is the paused one taken a little earlier, which the read path's
+  lag (up to 8 blocks) already allows.
+- **PC:** paused DMAs 16,713 to 1,373 (15,760 answered without a pause). The same blocks were moved
+  (630 partial and 630 full DMAs both ways). Screenshots identical, and two runs without it are
+  identical to each other too.
+- **Vita:** not measured (offline). Expected: most of `SPUread` (7 ms) off the emulation thread.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an
