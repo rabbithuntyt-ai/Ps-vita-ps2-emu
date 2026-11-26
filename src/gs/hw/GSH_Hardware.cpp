@@ -446,6 +446,14 @@ void CGSH_Hardware::ReleaseImpl()
 	m_gpuInitialized = false;
 	FlushBatch();
 	m_blockTransfers.clear(); //block_coherency
+	m_worldVertices.Drop();
+#ifdef __vita__
+	if(g_worldScratchBuffer)
+	{
+		glDeleteBuffers(1, &g_worldScratchBuffer); //its memory is vitaGL's scratch (stream usage)
+		g_worldScratchBuffer = 0;
+	}
+#endif
 	// The GPU idle before the deletes: twice (R21w, R30b) the Vita crashed inside glDeleteTextures
 	// here at session end, with vitaGL's garbage collector thread freeing deleted objects alongside
 	// (a mitigation; not shown to be the cause)
@@ -489,6 +497,7 @@ void CGSH_Hardware::ReleaseImpl()
 void CGSH_Hardware::ResetImpl()
 {
 	FlushBatch();
+	m_alphaEpoch++;
 	m_blockTransfers.clear(); //block_coherency
 	ResetPrimitiveState();
 	for(auto& target : m_targets)
@@ -499,6 +508,8 @@ void CGSH_Hardware::ResetImpl()
 	m_currentTarget = nullptr;
 	m_stateApplied = false;
 	m_textureCache.MarkAllWritten();
+	m_solidMemory.clear(); //solid_upload
+	m_clutHash = XXH3_64bits(m_pCLUT, CLUTSIZE); //the CLUT may have been cleared or restored
 }
 
 void CGSH_Hardware::MarkNewFrame()
@@ -576,6 +587,7 @@ bool CGSH_Hardware::RowsOverlap(const TARGET& target, uint32 rowBegin, uint32 ro
 
 void CGSH_Hardware::DeleteTarget(TARGET& target)
 {
+	m_alphaEpoch++; //alpha_clut_reuse
 	//block_coherency: a transfer in progress no longer refers to it
 	m_blockTransfers.erase(std::remove_if(m_blockTransfers.begin(), m_blockTransfers.end(), [&target](const BLOCK_TRANSFER& entry) { return entry.target == &target; }),
 	                       m_blockTransfers.end());
@@ -876,6 +888,8 @@ void CGSH_Hardware::TrimTargetFront(TARGET& target, uint32 rows)
 		glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
 		glBindTexture(GL_TEXTURE_2D, target.colorTexture);
 		glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, rows, target.width, target.height);
+		m_alphaEpoch++; //alpha_clut_reuse
+		target.solid = false; //solid_readback
 	}
 	// The old GL objects: to the pool like a released target of the old size
 	TARGET old;
@@ -909,6 +923,9 @@ void CGSH_Hardware::TrimTargetFront(TARGET& target, uint32 rows)
 
 void CGSH_Hardware::DrawCopyQuads(GLuint texture, GLuint framebuffer, uint32 width, uint32 height, const std::vector<BATCH_VERTEX>& quads)
 {
+	m_alphaEpoch++; //alpha_clut_reuse: a target written
+	for(auto& t : m_targets)
+		if(t->framebuffer == framebuffer) t->solid = false; //solid_readback
 	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
 	glViewport(0, 0, width, height);
@@ -1211,6 +1228,7 @@ void CGSH_Hardware::ReadBackBlocks(TARGET& target, const std::vector<uint32>& bl
 	const auto& layout = TargetPixels::GetBlockLayout(target.psm);
 	uint32 bw = layout.width, bh = layout.height, blocksW = target.width / bw;
 	glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
+	SyncForReadback();
 	for(uint32 index : blocks)
 	{
 		uint32 x = (index % blocksW) * bw, y = (index / blocksW) * bh;
@@ -1222,7 +1240,7 @@ void CGSH_Hardware::ReadBackBlocks(TARGET& target, const std::vector<uint32>& bl
 			//Textures decoded from these bytes are out of date
 			GS_SURFACE surface;
 			surface.Init(target.psm, target.fbp, target.fbw);
-			m_textureCache.MarkBytesWritten(surface.Offset(x, y) & ~255u, 256);
+			MarkMemoryWritten(surface.Offset(x, y) & ~255u, 256);
 		}
 		GetTimes().downloadPixels += bw * bh;
 		g_roundTripPixels[0][std::min<uint32>(m_roundTripCause, 15)] += bw * bh;
@@ -1376,6 +1394,8 @@ uint64 CGSH_Hardware::GlFreeBytes()
 
 void CGSH_Hardware::AllocateTargetGl(TARGET& target)
 {
+	m_alphaEpoch++; //alpha_clut_reuse
+	target.solid = false; //solid_readback
 	GsProfile::CScope gsSection(GsProfile::SECTION_TARGET_ALLOC);
 	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	CPartTimer timer(GPU_PART_TARGET_CREATE);
@@ -1467,6 +1487,8 @@ void CGSH_Hardware::ShrinkTarget(TARGET& target, uint32 rows)
 		glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
 		glBindTexture(GL_TEXTURE_2D, target.colorTexture);
 		glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, target.width, rows);
+		m_alphaEpoch++; //alpha_clut_reuse
+		target.solid = false; //solid_readback
 	}
 	if(g_targetPoolLru)
 	{
@@ -1570,6 +1592,8 @@ void CGSH_Hardware::EnsureValidRows(TARGET& target, uint32 rows)
 
 void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 width, uint32 height)
 {
+	m_alphaEpoch++; //alpha_clut_reuse
+	DropSolid(target, x0, y0, x0 + width, y0 + height); //solid_readback
 	GsProfile::CScope gsSection(GsProfile::SECTION_UPLOAD);
 	EndRetainedRun(); //W2: other GL work ends a run of retained world draws
 	CStageTimer stageTimer(GPU_STAGE_TRANSFER);
@@ -1591,6 +1615,91 @@ void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 wi
 		uint32 readStart = 0, readEnd = 0;
 		RowsToBytes(target, y0, y0 + height, readStart, readEnd);
 		LivenessRead(readStart, readEnd - readStart, 5 + std::min<uint32>(m_roundTripCause, 15) % 10);
+	}
+	if(g_solidUpload && g_gpuUpload && (target.psm == PSMCT32) && !m_solidMemory.empty())
+	{
+		uint32 readStart = 0, readEnd = 0;
+		RowsToBytes(target, y0, y0 + height, readStart, readEnd);
+		uint32 word = 0;
+		bool whole = SolidMemory(readStart, readEnd, word);
+		if(!whole)
+		{
+			// Page rows apart: solid ones drawn, the others uploaded (bands of consecutive page rows)
+			GS_SURFACE surface;
+			surface.Init(target.psm, target.fbp, target.fbw);
+			uint32 pageH = surface.phMask + 1;
+			uint32 firstRow = y0 / pageH, lastRow = (y0 + height - 1) / pageH;
+			if(lastRow > firstRow)
+			{
+				std::vector<bool> solidRows;
+				bool any = false, all = true;
+				for(uint32 row = firstRow; row <= lastRow; row++)
+				{
+					uint32 s0 = 0, s1 = 0, w = 0;
+					RowsToBytes(target, row * pageH, (row + 1) * pageH, s0, s1);
+					bool isSolid = SolidMemory(s0, s1, w);
+					solidRows.push_back(isSolid);
+					any = any || isSolid;
+					all = all && isSolid;
+				}
+				if(any && !all)
+				{
+					for(uint32 i = 0; i < solidRows.size();)
+					{
+						uint32 j = i + 1;
+						while((j < solidRows.size()) && (solidRows[j] == solidRows[i])) j++;
+						uint32 band0 = std::max(y0, (firstRow + i) * pageH), band1 = std::min(y0 + height, (firstRow + j) * pageH);
+						if(band0 < band1) UploadTarget(target, x0, band0, width, band1 - band0);
+						i = j;
+					}
+					return;
+				}
+			}
+		}
+		if(whole)
+		{
+			// solid_upload: every pixel is the one word's pixel: an 8x8 texture of it drawn over the rows
+			uint32 pixel = 0;
+			TargetPixels::Read(m_pRAM, target.psm, target.fbp, target.fbw, x0, y0, 1, 1, &pixel);
+			if(g_solidReadbackCheck)
+			{
+				std::vector<uint32> real(width * height);
+				TargetPixels::Read(m_pRAM, target.psm, target.fbp, target.fbw, x0, y0, width, height, real.data());
+				for(uint32 value : real)
+					if(value != pixel) g_solidUploadMismatches++;
+			}
+			uint32 block[64];
+			std::fill(block, block + 64, pixel);
+			GLuint scratch = 0;
+			glGenTextures(1, &scratch);
+			glBindTexture(GL_TEXTURE_2D, scratch);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 8, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, block);
+			auto vertex = [&](uint32 px, uint32 py) {
+				BATCH_VERTEX v = {};
+				v.x = static_cast<float>(px) / static_cast<float>(target.width) * 2.0f - 1.0f;
+				v.y = static_cast<float>(py) / static_cast<float>(target.height) * 2.0f - 1.0f;
+				v.w = 1;
+				v.r = v.g = v.b = v.a = 255;
+				v.s = (px == x0) ? 0.0f : 1.0f;
+				v.t = (py == y0) ? 0.0f : 1.0f;
+				return v;
+			};
+			auto tl = vertex(x0, y0), tr = vertex(x0 + width, y0), bl = vertex(x0, y0 + height), br = vertex(x0 + width, y0 + height);
+			std::vector<BATCH_VERTEX> quad = {tl, tr, bl, tr, br, bl};
+			DrawCopyQuads(scratch, target.framebuffer, target.width, target.height, quad);
+			glDeleteTextures(1, &scratch);
+			g_solidUploads++;
+			g_solidUploadPixels += width * height;
+			m_depthSceneValid = false;
+			GetTimes().uploadPixels += width * height;
+			m_stats.targetUploads++;
+			m_stats.uploadedPixels += width * height;
+			g_roundTripPixels[1][std::min<uint32>(m_roundTripCause, 15)] += width * height;
+			m_stateApplied = false;
+			return;
+		}
 	}
 	m_transferPixels.resize(width * height);
 	uint32* pixels = m_transferPixels.data();
@@ -1645,6 +1754,131 @@ void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 wi
 	m_stateApplied = false;
 }
 
+void* CGSH_Hardware::AllocWorldScratch(size_t bytes)
+{
+	// world_scratch: a stream buffer object's storage (vitaGL takes stream buffers from its scratch
+	// ring, so the old storage is not freed when the next chunk replaces it), mapped for writing;
+	// draws use the buffer object (attributes as offsets). The first version pointed the buffer at
+	// vglAllocFromScratch memory with vglBufferData: its size stayed unset and draws crashed.
+#ifdef __vita__
+	if(!g_worldScratchBuffer) glGenBuffers(1, &g_worldScratchBuffer);
+	glBindBuffer(GL_ARRAY_BUFFER, g_worldScratchBuffer);
+	glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(bytes), nullptr, GL_STREAM_DRAW);
+	void* memory = glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	return memory;
+#else
+	(void)bytes;
+	return nullptr;
+#endif
+}
+
+void CGSH_Hardware::SyncForReadback()
+{
+	// readback_finish (on, Vita): vitaGL's glReadPixels waits for the GPU only when the framebuffer
+	// read is the one it rendered to last (vitaGL's in_use_framebuffer). A render target drawn
+	// earlier, whose scene was ended (submitted) but not finished, is read as the GPU left it so far:
+	// Resident Evil 4's 0x310000 target read right after its clear gave zeros in a 512x1 read
+	// (and correct pixels in a full read just after). Wait for the GPU first.
+#ifdef __vita__
+	if(g_readbackFinish) glFinish();
+#endif
+}
+
+void CGSH_Hardware::MarkMemoryWritten(uint32 start, uint32 size)
+{
+	m_textureCache.MarkBytesWritten(start, size);
+	if(m_solidMemory.empty() || (size == 0)) return;
+	uint32 end = start + size;
+	std::vector<SOLID_MEMORY> kept;
+	for(const auto& range : m_solidMemory)
+	{
+		if((range.end <= start) || (range.start >= end))
+		{
+			kept.push_back(range);
+			continue;
+		}
+		if(range.start < start) kept.push_back({range.start, start, range.word});
+		if(range.end > end) kept.push_back({end, range.end, range.word});
+	}
+	m_solidMemory.swap(kept);
+}
+
+bool CGSH_Hardware::SolidMemory(uint32 start, uint32 end, uint32& word) const
+{
+	for(const auto& range : m_solidMemory)
+	{
+		if((range.start <= start) && (range.end >= end))
+		{
+			word = range.word;
+			return true;
+		}
+	}
+	return false;
+}
+
+void CGSH_Hardware::DropSolid(TARGET& target, int32 x0, int32 y0, int32 x1, int32 y1)
+{
+	//solid_readback: pixels of [x0, x1) x [y0, y1) written otherwise
+	if(target.solid && (x0 < static_cast<int32>(target.solidX1)) && (x1 > static_cast<int32>(target.solidX0)) && (y0 < static_cast<int32>(target.solidY1)) &&
+	   (y1 > static_cast<int32>(target.solidY0)))
+		target.solid = false;
+}
+
+void CGSH_Hardware::NoteSolidDraw(TARGET& target, int32 x0, int32 y0, int32 x1, int32 y1)
+{
+	// solid_readback: [solidX0, solidX1) x [solidY0, solidY1) holds one colour since it was filled;
+	// a draw [x0, x1) x [y0, y1) that is not that fill ends it where it reaches into it
+	const auto& d = m_solidDraw;
+	if(d.target != &target)
+	{
+		DropSolid(target, x0, y0, x1, y1);
+		return;
+	}
+	// The pixels the sprite fills (the GPU draws all of them, also rows the mark leaves out as not
+	// valid yet: those are uploaded before use, which ends the solid state)
+	int32 sx0 = std::max(d.x0, 0), sy0 = std::max(d.y0, 0), sx1 = std::min(d.x1, static_cast<int32>(target.width)), sy1 = std::min(d.y1, static_cast<int32>(target.height));
+	if((sx0 >= sx1) || (sy0 >= sy1))
+	{
+		DropSolid(target, x0, y0, x1, y1);
+		return;
+	}
+	auto set = [&]() {
+		target.solid = true;
+		target.solidX0 = sx0;
+		target.solidY0 = sy0;
+		target.solidX1 = sx1;
+		target.solidY1 = sy1;
+		target.solidKey = d.key;
+	};
+	int32 ox0 = target.solidX0, oy0 = target.solidY0, ox1 = target.solidX1, oy1 = target.solidY1;
+	bool containsOld = (sx0 <= ox0) && (sy0 <= oy0) && (sx1 >= ox1) && (sy1 >= oy1);
+	if(!target.solid || containsOld)
+	{
+		set();
+		return;
+	}
+	if(target.solidKey == d.key)
+	{
+		// The same colour next to the solid rectangle, their union a rectangle
+		if((sy0 == oy0) && (sy1 == oy1) && (sx0 <= ox1) && (sx1 >= ox0))
+		{
+			target.solidX0 = std::min(ox0, sx0);
+			target.solidX1 = std::max(ox1, sx1);
+			return;
+		}
+		if((sx0 == ox0) && (sx1 == ox1) && (sy0 <= oy1) && (sy1 >= oy0))
+		{
+			target.solidY0 = std::min(oy0, sy0);
+			target.solidY1 = std::max(oy1, sy1);
+			return;
+		}
+		if((sx0 >= ox0) && (sy0 >= oy0) && (sx1 <= ox1) && (sy1 <= oy1)) return; //inside it
+	}
+	// Another colour over part of it, or a shape the rectangle cannot hold: the new fill alone
+	set();
+}
+
 void CGSH_Hardware::MarkTargetDirty(TARGET& target, int32 x0, int32 y0, int32 x1, int32 y1)
 {
 	const auto& s = m_state;
@@ -1653,9 +1887,14 @@ void CGSH_Hardware::MarkTargetDirty(TARGET& target, int32 x0, int32 y0, int32 x1
 	x1 = std::min<int32>({x1, s.scax1 + 1, static_cast<int32>(target.width)});
 	y1 = std::min<int32>({y1, s.scay1 + 1, static_cast<int32>(target.validRows)});
 	if((x0 >= x1) || (y0 >= y1)) return;
+	NoteSolidDraw(target, x0, y0, x1, y1); //solid_readback
 	if(target.flaggedBlocks != 0) ClearBlockFlags(target, BLOCK_CLEAN, x0, y0, x1, y1); //block_coherency: drawn
 	target.drawnRows = std::max<uint32>(target.drawnRows, y1);
-	if(m_colorMask[3]) target.alphaDirty = true;
+	if(m_colorMask[3])
+	{
+		target.alphaDirty = true;
+		target.alphaVersion++; //alpha_clut_reuse
+	}
 	if(!target.gpuDirty)
 	{
 		target.gpuDirty = true;
@@ -1710,9 +1949,75 @@ void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEn
 	}
 	m_transferPixels.resize(width * height);
 	uint32* pixels = m_transferPixels.data();
-	glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
 	uint64 glStart = NowUs();
-	glReadPixels(x0, y0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	// solid_readback: the rectangle lies inside the target's solid rectangle, one colour. The value the
+	// GPU stores for it is learned from a whole read-back the first time (accepted only when every
+	// pixel of it is that value); after that the GPU is not read. Small reads are not used: vitaGL's
+	// glReadPixels does not wait for a target drawn before the last one rendered to (a 512x1 read
+	// gave zeros on the Vita), while whole read-backs were found right.
+	bool solid = false, uniform = false, learn = false;
+	uint32 value = 0;
+	if(g_solidReadback && target.solid && (target.psm == PSMCT32) && (target.flaggedBlocks == 0) && (m_stripCover.target != &target) &&
+	   (x0 >= target.solidX0) && (y0 >= target.solidY0) && (x0 + width <= target.solidX1) && (y0 + height <= target.solidY1))
+	{
+		auto found = m_solidPixels.find(target.solidKey);
+		if(found != m_solidPixels.end())
+		{
+			solid = uniform = true;
+			value = found->second;
+		}
+		else
+			learn = true;
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
+	SyncForReadback();
+	if(solid)
+	{
+		std::fill(pixels, pixels + width * height, value);
+		g_solidReadbacks++;
+		g_solidReadbackPixels += width * height;
+		if(g_solidReadbackCheck)
+		{
+			std::vector<uint32> real(width * height);
+#ifdef __vita__
+			glFinish(); //the GPU's finished pixels
+#endif
+			glReadPixels(x0, y0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, real.data());
+			for(uint32 i = 0; i < width * height; i++)
+			{
+				if(real[i] == pixels[i]) continue;
+				if(g_solidReadbackMismatches == 0)
+				{
+					g_solidFirstMismatch[0] = x0 + i % width;
+					g_solidFirstMismatch[1] = y0 + i / width;
+					g_solidFirstMismatch[2] = real[i];
+					g_solidFirstMismatch[3] = pixels[i];
+				}
+				g_solidReadbackMismatches++;
+			}
+		}
+	}
+	else
+	{
+		// Learning reads what the GPU stores once it has finished (on the Vita a read-back of a
+		// target drawn before the last one rendered to can come before the GPU is done: all zeros)
+#ifdef __vita__
+		if(learn) glFinish();
+#endif
+		glReadPixels(x0, y0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+		if(learn)
+		{
+			bool same = true;
+			for(uint32 i = 1; (i < width * height) && same; i++) same = (pixels[i] == pixels[0]);
+			if(same)
+			{
+				m_solidPixels[target.solidKey] = pixels[0];
+				g_solidLearned++;
+			}
+			else
+				g_solidLearnFailures++;
+		}
+	}
 	m_depthSceneValid = false;
 	GetTimes().downloadGlUs += NowUs() - glStart;
 	GetTimes().partUs[GPU_PART_DOWNLOAD_PIXELS] += NowUs() - glStart;
@@ -1744,7 +2049,25 @@ void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEn
 	uint32 start = 0, end = 0;
 	RowsToBytes(target, y0, y0 + height, start, end);
 	if(g_readbackLiveness) LivenessDownloaded(start, end);
-	m_textureCache.MarkBytesWritten(start, end - start);
+	MarkMemoryWritten(start, end - start);
+	if(solid && uniform && g_solidUpload && (x0 == 0) && (width == target.width) && ((target.fbp % 8192) == 0))
+	{
+		// solid_upload: whole page rows of the rows written hold one word now
+		GS_SURFACE surface;
+		surface.Init(target.psm, target.fbp, target.fbw);
+		uint32 pageH = surface.phMask + 1, rowBytes = std::max<uint32>(surface.pagesPerRow, 1) * 8192;
+		uint32 pr0 = (y0 + pageH - 1) / pageH, pr1 = (y0 + height) / pageH;
+		if((pr0 < pr1) && (surface.pagesPerRow * surface.pwMask + surface.pagesPerRow == target.width))
+		{
+			uint32 rangeStart = target.fbp + pr0 * rowBytes, rangeEnd = target.fbp + pr1 * rowBytes;
+			if(rangeEnd <= RAMSIZE)
+			{
+				uint32 word = 0;
+				std::memcpy(&word, m_pRAM + rangeStart, 4);
+				m_solidMemory.push_back({rangeStart, rangeEnd, word});
+			}
+		}
+	}
 	DiscardDirtyRows(target, y0, y1);
 	if(!target.gpuDirty) target.alphaDirty = false;
 	m_stats.targetDownloads++;
@@ -2013,7 +2336,7 @@ void CGSH_Hardware::ProcessHostToLocalTransfer()
 		g_unchangedTransfersTotal++;
 		return;
 	}
-	m_textureCache.MarkBytesWritten(start, size);
+	MarkMemoryWritten(start, size);
 	if(m_diagFile && (m_diagUploads.size() < 60000) && !((trxReg.nRRW == 16) && (trxReg.nRRH == 336)))
 	{
 		char text[64];
@@ -2111,7 +2434,7 @@ void CGSH_Hardware::ProcessLocalToLocalTransfer()
 			for(uint32 x = 0; x < width; x++)
 				GsMemory::WriteRaw(m_pRAM, bltBuf.nDstPsm, bltBuf.GetDstPtr(), bltBuf.nDstWidth, trxPos.nDSAX + x, trxPos.nDSAY + y, pixels[x + y * width]);
 	}
-	m_textureCache.MarkBytesWritten(dstStart, dstSize);
+	MarkMemoryWritten(dstStart, dstSize);
 	UploadTargetsOverlapping(dstStart, dstSize);
 }
 
@@ -2129,6 +2452,9 @@ void CGSH_Hardware::SyncCLUT(const TEX0& tex0)
 		DownloadTargetsOverlapping(tex0.GetCLUTPtr(), 0x400);
 	}
 	CGSH_Primitives::SyncCLUT(tex0);
+	// clut_hash_on_load: the CLUT changes only when TEX0 loads it (CLD), on reset and state loads
+	// (both hash it again); a TEX0 that loads nothing leaves it as it was
+	if(g_clutHashOnLoad && (tex0.nCLD == 0)) return;
 	uint64 hash = XXH3_64bits(m_pCLUT, CLUTSIZE);
 	if(hash != m_clutHash)
 	{
@@ -2663,6 +2989,39 @@ bool CGSH_Hardware::BindAlphaClutTexture()
 			}
 		}
 	}
+	uint32 mode = (s.tpsm == CGSHandler::PSMT8H) ? 0 : (s.tpsm == CGSHandler::PSMT4HL) ? 1 : 2;
+	uint32 width = std::min<uint32>(s.tw, 1024), height = std::min<uint32>(s.th, 1024);
+	auto& ring = m_alphaClutTargets[(static_cast<uint64>(width) << 32) | height];
+	g_alphaClutPassesTotal++;
+	if(getenv("ACDBG") && (g_alphaClutPassesTotal > 600) && (g_alphaClutPassesTotal < 640)) std::fprintf(stderr, "AC %llu ep %llu src %u off %u,%u %ux%u mode %u tbp %X csa %u clut %llX frame %u\n",(unsigned long long)g_alphaClutPassesTotal, (unsigned long long)m_alphaEpoch, source->colorTexture, offsetX, offsetY, width, height, mode, s.tbp, s.csa, (unsigned long long)XXH3_64bits(clut, sizeof(clut)), m_frameNumber);
+	auto bindResult = [&](const ALPHA_CLUT_TARGET& entry) {
+		// Bound for the draws (ApplyState binds the draw's own framebuffer next).
+		glBindTexture(GL_TEXTURE_2D, entry.texture);
+		GLint filter = s.bilinear ? GL_LINEAR : GL_NEAREST;
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (s.wms == CLAMP_MODE_REPEAT) ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (s.wmt == CLAMP_MODE_REPEAT) ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+		m_textureAlphaDoubled = false;
+		m_texScaleS = static_cast<float>(s.tw) / static_cast<float>(width);
+		m_texScaleT = static_cast<float>(s.th) / static_cast<float>(height);
+		m_texOffsetS = m_texOffsetT = 0;
+	};
+	if(g_alphaClutReuse)
+	{
+		for(const auto& entry : ring)
+		{
+			if((entry.epoch != m_alphaEpoch) || (entry.sourceAlphaVersion != source->alphaVersion) || (entry.sourceTexture != source->colorTexture) || (entry.offsetX != offsetX) ||
+			   (entry.offsetY != offsetY) || (entry.mode != mode) || std::memcmp(entry.clut, clut, sizeof(clut))) continue;
+			g_alphaClutReuses++;
+			// As after a pass: the state is applied again for the next primitive (the pass made
+			// every primitive of these draws a batch of its own; keeping that keeps the result)
+			m_stateApplied = false;
+			glActiveTexture(GL_TEXTURE0);
+			bindResult(entry);
+			return true;
+		}
+	}
 	glActiveTexture(GL_TEXTURE1);
 	glBindTexture(GL_TEXTURE_2D, m_alphaClutTexture);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 256, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, clut);
@@ -2671,8 +3030,6 @@ bool CGSH_Hardware::BindAlphaClutTexture()
 
 	// The result: a ring of render textures of this size (draws queued earlier may still
 	// sample the previous ones).
-	uint32 width = std::min<uint32>(s.tw, 1024), height = std::min<uint32>(s.th, 1024);
-	auto& ring = m_alphaClutTargets[(static_cast<uint64>(width) << 32) | height];
 	if(ring.size() < 4)
 	{
 		ring.emplace_back();
@@ -2686,6 +3043,13 @@ bool CGSH_Hardware::BindAlphaClutTexture()
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, entry.texture, 0);
 	}
 	auto& entry = ring[m_alphaClutNext++ % ring.size()];
+	entry.epoch = m_alphaEpoch;
+	entry.sourceAlphaVersion = source->alphaVersion;
+	entry.sourceTexture = source->colorTexture;
+	entry.offsetX = offsetX;
+	entry.offsetY = offsetY;
+	entry.mode = mode;
+	std::memcpy(entry.clut, clut, sizeof(clut));
 
 	// One quad over the result, sampling the target where the texture lies.
 	float s0 = static_cast<float>(offsetX) / source->width, t0 = static_cast<float>(offsetY) / source->height;
@@ -2709,7 +3073,7 @@ bool CGSH_Hardware::BindAlphaClutTexture()
 	glUseProgram(m_alphaClutProgram);
 	glUniform1i(m_alphaClutSourceLocation, 0);
 	glUniform1i(m_alphaClutClutLocation, 1);
-	glUniform1f(m_alphaClutModeLocation, (s.tpsm == CGSHandler::PSMT8H) ? 0.0f : (s.tpsm == CGSHandler::PSMT4HL) ? 1.0f : 2.0f);
+	glUniform1f(m_alphaClutModeLocation, static_cast<float>(mode));
 	glDisableClientState(GL_VERTEX_ARRAY);
 	glDisableClientState(GL_COLOR_ARRAY);
 	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
@@ -2737,17 +3101,7 @@ bool CGSH_Hardware::BindAlphaClutTexture()
 		m_diagUploads += text;
 	}
 
-	// Bound for the draws (ApplyState binds the draw's own framebuffer next).
-	glBindTexture(GL_TEXTURE_2D, entry.texture);
-	GLint filter = s.bilinear ? GL_LINEAR : GL_NEAREST;
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (s.wms == CLAMP_MODE_REPEAT) ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (s.wmt == CLAMP_MODE_REPEAT) ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-	m_textureAlphaDoubled = false;
-	m_texScaleS = static_cast<float>(s.tw) / static_cast<float>(width);
-	m_texScaleT = static_cast<float>(s.th) / static_cast<float>(height);
-	m_texOffsetS = m_texOffsetT = 0;
+	bindResult(entry);
 	return true;
 }
 
@@ -3281,14 +3635,7 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 		g_worldVerticesByKind[0] += batch.count;
 		g_gpuWorldBatches++;
 		MarkTargetDirty(*m_currentTarget, 0, 0, m_currentTarget->width, m_currentTarget->height);
-		Re4Vu1::GS_VERTEX last = Re4Vu1::Project(Re4Vu1::ReadWorldVertex(batch, batch.count - 1));
-		if(batch.count >= 2)
-		{
-			Re4Vu1::GS_VERTEX secondLast = Re4Vu1::Project(Re4Vu1::ReadWorldVertex(batch, batch.count - 2));
-			EndBatchStrip(&secondLast, last);
-		}
-		else
-			EndBatchStrip(nullptr, last);
+		EndWorldBatch(batch);
 		return;
 	}
 	GsProfile::CScope skinSection(batch.clipSpace ? GsProfile::SECTION_WORLD_SKIN : GsProfile::SECTION_WORLD);
@@ -3328,6 +3675,19 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 	// The FOG register at the batch's kicks (the packet does not set it; games set it per object)
 	lto[2] = fogFactor;
 	lto[3] = batch.clipSpace ? 1.0f : 0.0f;
+	{
+		//world_scratch: a segment that cannot take this batch is drawn first (a new chunk then)
+#ifdef __vita__
+		void* (*scratchAlloc)(size_t) = AllocWorldScratch;
+#else
+		void* (*scratchAlloc)(size_t) = nullptr;
+#endif
+		if(!m_worldVertices.EnsureRoom(batch.count, g_worldScratch, scratchAlloc))
+		{
+			FlushWorld();
+			m_worldVertices.EnsureRoom(batch.count, g_worldScratch, scratchAlloc);
+		}
+	}
 	bool shareSlot = false;
 	if(m_worldSlots != 0)
 	{
@@ -3393,13 +3753,23 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 		// fast_skin_loop: projected skinning batches (no clip flags, no guard band): positions as
 		// given, texture and colour numbers to floats, the slot, and each triangle's indices in the
 		// winding order the generic loop uses (both orders when the winding is 0)
+		GsProfile::CScope loopSection(GsProfile::SECTION_SKIN_LOOP);
 		WORLD_GPU_VERTEX* out = m_worldVertices.data() + base;
 		const float slotValue = static_cast<float>(slot);
 		size_t indexBase = m_worldIndices.size();
 		m_worldIndices.resize(indexBase + static_cast<size_t>(batch.count) * 6);
-		uint16* idx = m_worldIndices.data() + indexBase;
+		uint16* idx = reinterpret_cast<uint16*>(m_worldIndices.data()) + indexBase;
 		for(uint32 i = 0; i < batch.count; i++, raw += 12)
 		{
+			if(g_skinPrefetch && (i + 8 < batch.count))
+			{
+				//skin_prefetch: the source 8 vertices ahead (written by the VU1 worker on another core) and
+				//the slot vertex they go to
+				__builtin_prefetch(raw + 12 * 8);
+				__builtin_prefetch(raw + 12 * 8 + 8);
+				__builtin_prefetch(out + i + 8, 1);
+				__builtin_prefetch(reinterpret_cast<const char*>(out + i + 8) + 32, 1);
+			}
 			auto& v = out[i];
 			std::memcpy(v.p, raw, 16);
 			for(int k = 0; k < 4; k++)
@@ -3425,12 +3795,19 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 				m_batchPrimitives++;
 			}
 		}
-		m_worldIndices.resize(static_cast<size_t>(idx - m_worldIndices.data()));
+		m_worldIndices.resize(static_cast<size_t>(idx - reinterpret_cast<uint16*>(m_worldIndices.data())));
 	}
 	else
 	{
 		for(uint32 i = 0; i < batch.count; i++, raw += 12)
 		{
+			if(g_skinPrefetch && (i + 8 < batch.count))
+			{
+				//skin_prefetch here too: the source 8 vertices ahead and their slot vertex
+				__builtin_prefetch(raw + 12 * 8);
+				__builtin_prefetch(raw + 12 * 8 + 8);
+				__builtin_prefetch(&m_worldVertices[base + i + 8], 1);
+			}
 			if(batch.clipSpace)
 			{
 				flags[0] = flags[1] = flags[2] = 0; //the skip bit is raw[7]
@@ -3539,14 +3916,30 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 	}
 	GsProfile::CScope endSection(GsProfile::SECTION_WORLD_END);
 	MarkTargetDirty(*m_currentTarget, 0, 0, m_currentTarget->width, m_currentTarget->height);
+	EndWorldBatch(batch);
+}
+
+void CGSH_Hardware::EndWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
+{
+	// The program's last two vertices into the GS registers (the next packet may continue the strip)
+	if(batch.endReady)
+	{
+		GsProfile::CScope kickSection(GsProfile::SECTION_END_KICK);
+		EndBatchStrip((batch.count >= 2) ? &batch.endSecondLast : nullptr, batch.endLast);
+		return;
+	}
 	Re4Vu1::GS_VERTEX last = Re4Vu1::Project(Re4Vu1::ReadWorldVertex(batch, batch.count - 1));
 	if(batch.count >= 2)
 	{
 		Re4Vu1::GS_VERTEX secondLast = Re4Vu1::Project(Re4Vu1::ReadWorldVertex(batch, batch.count - 2));
+		GsProfile::CScope kickSection(GsProfile::SECTION_END_KICK);
 		EndBatchStrip(&secondLast, last);
 	}
 	else
+	{
+		GsProfile::CScope kickSection(GsProfile::SECTION_END_KICK);
 		EndBatchStrip(nullptr, last);
+	}
 }
 
 void CGSH_Hardware::FlushWorld()
@@ -3605,6 +3998,21 @@ void CGSH_Hardware::FlushWorld()
 		glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 16, c);
 		glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, 4, slot);
 	}
+#ifdef __vita__
+	else if(m_worldVertices.scratch)
+	{
+		// world_scratch: a buffer object pointed at the chunk (no copy at the draw); attributes as
+		// offsets into it, the segment's first vertex first
+		glBindBuffer(GL_ARRAY_BUFFER, g_worldScratchBuffer);
+		uintptr_t first = static_cast<uintptr_t>(m_worldVertices.base()) * stride;
+		glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(first + offsetof(WORLD_GPU_VERTEX, p)));
+		glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(first + offsetof(WORLD_GPU_VERTEX, t)));
+		glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(first + offsetof(WORLD_GPU_VERTEX, c)));
+		glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(first + offsetof(WORLD_GPU_VERTEX, slot)));
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
+		g_worldScratchDraws++;
+	}
+#endif
 	else
 	{
 		glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, stride, &m_worldVertices[0].p);
@@ -3630,7 +4038,7 @@ void CGSH_Hardware::FlushWorld()
 		static int printed = 0;
 		if(printed++ < 3)
 		{
-			const auto& v0 = m_worldVertices[m_worldIndices[0]];
+			const auto& v0 = m_worldVertices[m_worldIndices[0].value];
 			int slot = static_cast<int>(v0.slot + 0.5f);
 			const float* m = m_worldMatrix + slot * 16;
 			float v[4];
@@ -4698,6 +5106,15 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 				g_stripMergesOpaque++;
 			}
 			const auto& s = m_state;
+			if(g_stripMergeMarks && m_currentTarget)
+			{
+				// Its pixels are drawn (under the union): marked as the sprite's own draw would mark them
+				int32 minX = std::min(vertices[0].x, vertices[1].x), maxX = std::max(vertices[0].x, vertices[1].x);
+				int32 minY = std::min(vertices[0].y, vertices[1].y), maxY = std::max(vertices[0].y, vertices[1].y);
+				SetSolidDraw(kind, vertices);
+				MarkTargetDirty(*m_currentTarget, minX >> 4, minY >> 4, (maxX >> 4) + 2, (maxY >> 4) + 2);
+				m_solidDraw.target = nullptr;
+			}
 			m_stripUnion[0] = std::min(m_stripUnion[0], s.scax0);
 			m_stripUnion[2] = std::max(m_stripUnion[2], s.scax1);
 			glScissor(m_stripUnion[0], m_stripUnion[1], m_stripUnion[2] - m_stripUnion[0] + 1, m_stripUnion[3] - m_stripUnion[1] + 1);
@@ -4888,9 +5305,40 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 				            vertices[0].s / vertices[0].q, vertices[0].t / vertices[0].q, vertices[1].s / vertices[1].q, vertices[1].t / vertices[1].q, sc.alphaBlend ? 1 : 0, sc.zte ? 1 : 0);
 			}
 		}
+		SetSolidDraw(kind, vertices);
 		MarkTargetDirty(*m_currentTarget, minX >> 4, minY >> 4, (maxX >> 4) + 2, (maxY >> 4) + 2);
+		m_solidDraw.target = nullptr;
 	}
 	if(m_batch.size() >= 3 * 4096) FlushBatch();
+}
+
+void CGSH_Hardware::SetSolidDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoftwareRasterizer::VERTEX* vertices)
+{
+	m_solidDraw.target = nullptr;
+	if(!m_currentTarget) return;
+	{
+		const auto& ss = m_state;
+		bool solidSprite = g_solidReadback && (kind == CSoftwareRasterizer::PRIMITIVE_SPRITE) && !ss.textured && !ss.fog && !ss.alphaBlend && (ss.fbmsk == 0) && !ss.date &&
+		                   (!ss.ate || (ss.atst == ALPHA_TEST_ALWAYS)) && (!ss.zte || (ss.ztst == DEPTH_TEST_ALWAYS)) && (m_currentTarget->psm == PSMCT32) &&
+		                   (vertices[0].r == vertices[1].r) && (vertices[0].g == vertices[1].g) && (vertices[0].b == vertices[1].b) && (vertices[0].a == vertices[1].a) &&
+		                   m_colorMask[0] && m_colorMask[1] && m_colorMask[2] && m_colorMask[3];
+		if(solidSprite)
+		{
+			// The pixels it covers by the GS's rule (as SkipOverwrittenRows): [ceil(x0), ceil(x1)) in the
+			// scissor. Learning a colour checks every pixel of a whole read-back against it.
+			int32 minX = std::min(vertices[0].x, vertices[1].x), maxX = std::max(vertices[0].x, vertices[1].x);
+			int32 minY = std::min(vertices[0].y, vertices[1].y), maxY = std::max(vertices[0].y, vertices[1].y);
+			m_solidDraw.target = m_currentTarget;
+			m_solidDraw.x0 = std::max((minX + 15) >> 4, ss.scax0);
+			m_solidDraw.x1 = std::min((maxX + 15) >> 4, ss.scax1 + 1);
+			m_solidDraw.y0 = std::max((minY + 15) >> 4, ss.scay0);
+			m_solidDraw.y1 = std::min((maxY + 15) >> 4, ss.scay1 + 1);
+			m_solidDraw.key = static_cast<uint64>(vertices[0].r) | (static_cast<uint64>(vertices[0].g) << 8) | (static_cast<uint64>(vertices[0].b) << 16) |
+			                  (static_cast<uint64>(vertices[0].a) << 24) | (static_cast<uint64>(ss.fba ? 1 : 0) << 32) | (static_cast<uint64>(ss.colClamp ? 1 : 0) << 33) |
+			                  (static_cast<uint64>(1) << 40);
+			if((m_solidDraw.x0 >= m_solidDraw.x1) || (m_solidDraw.y0 >= m_solidDraw.y1)) m_solidDraw.target = nullptr;
+		}
+	}
 }
 
 void CGSH_Hardware::OnDrawStripTriangle(const CSoftwareRasterizer::VERTEX* vertices, bool continues)
@@ -5347,6 +5795,8 @@ void CGSH_Hardware::DiscardGpuCopies()
 		it = m_glTextures.erase(it);
 	}
 	m_textureCache.MarkAllWritten();
+	m_solidMemory.clear(); //solid_upload
+	m_clutHash = XXH3_64bits(m_pCLUT, CLUTSIZE); //the CLUT may have been cleared or restored
 	m_display = DISPLAY_TEXTURE();
 	m_stateApplied = false;
 }

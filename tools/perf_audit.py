@@ -5,10 +5,10 @@
 # 1 ms samples in that row's interval; sections are exclusive (one current section per thread).
 import csv, sys
 STEADY_T = 25.0
-GS_NAMES = 'idle other registers vertex primitive addvertex state texture target flush upload download transfer world display worldRet worldSkin feedWrite glDraw glDrawWorld glDrawRet worldSetup worldVerts worldEnd worldClip tgtRelayout tgtAlloc tgtRemove tgtResize texHash texCreate alphaClut'.split()
+GS_NAMES = 'idle other registers vertex primitive addvertex state texture target flush upload download transfer world display worldRet worldSkin feedWrite glDraw glDrawWorld glDrawRet worldSetup worldVerts worldEnd worldClip tgtRelayout tgtAlloc tgtRemove tgtResize texHash texCreate alphaClut skinLoop batchFree endKick'.split()
 EE_NAMES = "other EE VU0 VU1 IOP SPU VIF GIF IPU SIF JIT GSwait idle SPUsync SPUread VIFdirect VIFunpack EEio EEkernel EEticks IOPio IOPkernel IOPticks IOPcounters IOPbios IOPdma IOPwait IOPdrain IOPlag IOPpark VU1relay VIFqueue VU1native VU1kick relayDirect relayWorld VU1hle VIFcmd VU1jit VIFlock VIFwake VIFcopy VIFunlock VU1sync VU1quiet EEioTimer EEioIntc EEioDma EEioGs EEioWait".split()
 for f in sys.argv[1:]:
-    rows = list(csv.DictReader(open(f)))
+    rows = [r for r in csv.DictReader(open(f)) if None not in r.values()]  # a row cut short at the end of a run is left out
     t = [float(r['t']) for r in rows]
     g = [float(r['game_fps']) for r in rows]
     total = sum(g)
@@ -39,7 +39,7 @@ for f in sys.argv[1:]:
     parts = sorted(((v / steady_frames, EE_NAMES[k]) for k, v in enumerate(vu) if k < len(EE_NAMES) and v / steady_frames >= 2), reverse=True)
     print('  VU1 worker, ms per game frame: total %.0f | %s' % (sum(m for m, _ in parts), ', '.join('%s %.0f' % (n, m) for m, n in parts)))
     # GS thread: raw sample counts per row (gs_sections), turned into shares of the row's samples
-    gs = [0.0] * 32
+    gs = [0.0] * len(GS_NAMES)
     samples = 0
     for i in steady:
         v = [float(x) for x in rows[i]['gs_sections'].split(';')]
@@ -52,8 +52,8 @@ for f in sys.argv[1:]:
     # gs_wait_split runs: each section's samples taken while the GS thread was ready (runnable, not
     # on a core) or blocked (waiting in the kernel); the rest were running on a core
     if 'gs_blocked_sections' in rows[0] and any(float(x) for i in steady for x in rows[i]['gs_blocked_sections'].split(';') + rows[i]['gs_ready_sections'].split(';')):
-        ready = [0.0] * 32
-        blocked = [0.0] * 32
+        ready = [0.0] * len(GS_NAMES)
+        blocked = [0.0] * len(GS_NAMES)
         for i in steady:
             total = sum(float(x) for x in rows[i]['gs_sections'].split(';')) or 1
             for k, c in enumerate(rows[i]['gs_ready_sections'].split(';')):

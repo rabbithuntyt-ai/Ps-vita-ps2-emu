@@ -266,6 +266,24 @@ frame dumps) or results compared bit for bit.
     - vitaGL copied the whole target texture (1 MB) on every glTexSubImage2D into a target
       drawn recently.
     - Vita: 4.17/4.14/4.10 against 3.86/3.91/3.94 steady game fps (+6.0%).
+21. **GS thread cuts of 26 Nov (each with its own switch, all exact on the PC).** Measured on the
+    Vita as section time; the frame rate did not move beyond the spread (the emulation thread is
+    the limit), so no speedup is claimed.
+    - `alpha_clut_reuse`: RE4 grades its colours in 16 strips, each binding the same alpha-index
+      texture of the frame; the GPU pass that converts it now runs once per frame and the other
+      binds reuse its result (1,057 of 1,208 passes on the PC). `alphaClut` 5 to under 1 ms.
+    - `batch_pool`: world and skinning batches go back to a pool after their draw instead of
+      being freed on the GS thread (99% reused). Freeing them took 7-8 ms; now 2.
+    - `skin_prefetch`: the projected skinning loop prefetches its source (written by the VU1
+      worker on another core) and destination 8 vertices ahead. `skinLoop` 10-12 to 7 ms.
+    - `mailbox_batch` (patch 0129): the GS thread takes all queued calls under one lock, and
+      senders wake it only when it waits. `other` about 1.5 ms lower.
+    - `clut_hash_on_load`: the 1 KB CLUT is hashed only when TEX0 loads it (and on reset and
+      state loads), not after every TEX0 write.
+    - `end_on_worker`: a world batch's last two vertices are projected where the batch is built.
+    - World vertex and index arrays are no longer zeroed before being written.
+    - `solid_readback` / `solid_upload` / `strip_merge_marks`: see "Tried, measured, and not
+      kept": exact by construction, but they do not apply on the Vita.
 
 ### VU recompiler (helps every game)
 
@@ -304,6 +322,9 @@ frame dumps) or results compared bit for bit.
 | Live range splitting in the VU register allocator | Loop longer | 8 NEON registers are too few |
 | Palette texture decoding on the GPU (G4) | Not built | Texture decoding is 2 ms a second; caches already hit |
 | 500 MHz overclock | Not possible | The tooling caps at 444 MHz and once took the Vita offline |
+| Texture page hashes taken right after each transfer (`page_hash_on_write`) | Exact; texHash 6-7 to 17 ms on the Vita | Twice the pages hashed, and the data was not in cache as hoped; a per-page hash cache alone was reused 2% of the time. Removed |
+| Read-backs of solid-filled targets written from the fill colour (`solid_readback`, `solid_upload`) | Exact on the PC: 0x310000's 512x448 read-back each frame skipped (read-backs 23 to 13 ms on the Vita in the first, wrong version) | On the Vita the target is not one colour when read after the GPU finishes, so the colour is never learned and nothing is skipped. Kept on: it only acts on a whole read-back found uniform |
+| World vertices written into vitaGL stream buffer memory (`world_scratch`) | Exact on the PC (not used there) | Crashed the Vita in vitaGL's draws (pointed buffer), then hung it (stream buffer). Off |
 
 ## Not done yet, and why
 

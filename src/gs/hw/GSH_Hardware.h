@@ -272,6 +272,39 @@ public:
 	static inline bool g_feedbackDraw = true;
 	// Alpha index textures (PSMT8H/4HL/4HH) of render targets converted on the GPU (gpu_alpha_clut, on)
 	static inline bool g_gpuAlphaClut = true;
+	// alpha_clut_reuse (on): an alpha CLUT pass whose inputs are unchanged (the same target
+	// texture, place, size, mode and palette, and no target alpha written since: Resident
+	// Evil 4 grades its colours in 16 strips, alpha masked, each binding the same alpha
+	// texture) binds the result it made before instead of drawing it again
+	static inline bool g_alphaClutReuse = true;
+	// solid_readback (on): a read-back of a target whose dirty pixels all hold one colour drawn by
+	// untextured, unblended, unmasked sprites (Resident Evil 4 clears a 512x448 target at 0x310000
+	// in 32 pixel columns, then streams textures into its memory: a whole read-back every frame)
+	// writes that colour, as the GPU stores it, without reading the GPU. The stored value is
+	// learned once per colour by reading one pixel. solid_readback_check: read the GPU anyway and
+	// count differences (diagnostics)
+	static inline bool g_solidReadback = true;
+	// strip_merge_marks (on): a sprite column merged into the previous one's draw marks its pixels
+	// dirty as its own draw would (before, only the first column marked them)
+	static inline bool g_stripMergeMarks = true;
+	// solid_upload (on): target rows uploaded from GS memory that a solid read-back filled with one
+	// word (Resident Evil 4 uploads 256x224 of that memory as another target every frame) are drawn
+	// from a small texture of that pixel instead of read from memory and uploaded whole
+	static inline bool g_solidUpload = true;
+	// clut_hash_on_load (on): the 1 KB CLUT is hashed after TEX0 writes that load it, not after every
+	// TEX0 write (games rewrite TEX0 with each object's register list)
+	static inline bool g_clutHashOnLoad = true;
+	// skin_prefetch (on): the projected skinning loop prefetches its source and destination 8 vertices ahead
+	static inline bool g_skinPrefetch = true;
+	static inline bool g_worldScratch = false; //world_scratch (Vita; off: the Vita crashed or hung in vitaGL draws with it, R54-R56)
+	static inline uint32 g_bufferSwaps = 0; //frontend buffer swaps (GS thread; world_scratch chunk lifetime)
+	static inline bool g_readbackFinish = false; //readback_finish (Vita): the GPU finished before every target read-back
+	static inline uint64 g_worldScratchChunks = 0, g_worldScratchDraws = 0;
+	static inline uint64 g_solidUploads = 0, g_solidUploadPixels = 0, g_solidUploadMismatches = 0;
+	static inline bool g_solidReadbackCheck = false;
+	static inline uint64 g_solidReadbacks = 0, g_solidReadbackPixels = 0, g_solidReadbackMismatches = 0, g_solidLearned = 0, g_solidBorderPixels = 0, g_solidLearnFailures = 0;
+	static inline uint32 g_solidFirstMismatch[4] = {}; //x, y, GPU pixel, pixel written (solid_readback_check)
+	static inline uint64 g_alphaClutReuses = 0, g_alphaClutPassesTotal = 0;
 	// Target uploads and read-backs a GS block at a time (TargetPixels.h; target_pixel_blocks, on)
 	static inline bool g_targetPixelBlocks = true;
 	// Vita: depth buffers loaded at each new GPU scene (depth_force_load, on)
@@ -415,6 +448,12 @@ private:
 		bool gpuDirty = false;
 		// Some of those pixels had their alpha written (else GS memory's alpha is current).
 		bool alphaDirty = false;
+		uint64 alphaVersion = 0; //incremented by draws that write its alpha (alpha_clut_reuse)
+		// solid_readback: the dirty rectangle lies inside [solidX0, solidX1) x [solidY0, solidY1),
+		// which holds one colour drawn by untextured, unblended sprites (key: colour and state)
+		bool solid = false;
+		uint32 solidX0 = 0, solidY0 = 0, solidX1 = 0, solidY1 = 0;
+		uint64 solidKey = 0;
 		uint32 dirtyX0 = 0, dirtyY0 = 0, dirtyX1 = 0, dirtyY1 = 0;
 		uint32 lastUse = 0;
 		// block_coherency (docs/BLOCK_COHERENCY.md): per GS block (256 bytes: 8x8 pixels at 32 bits,
@@ -483,12 +522,97 @@ private:
 	{
 		WORLD_SLOTS = 16
 	};
+	// Both world arrays are resized and then written in full: their elements are not zeroed first
+	// (vector::resize value-initializes plain structs: 52 bytes a vertex, 12 an index written twice)
 	struct WORLD_GPU_VERTEX
 	{
 		float p[4], t[4], c[4];
 		float slot;
+		WORLD_GPU_VERTEX() {}
 	};
-	std::vector<WORLD_GPU_VERTEX> m_worldVertices;
+	struct WORLD_INDEX
+	{
+		uint16 value;
+		WORLD_INDEX() {}
+		WORLD_INDEX(uint16 v)
+		    : value(v)
+		{
+		}
+	};
+	static_assert(sizeof(WORLD_INDEX) == 2, "world indices are GL_UNSIGNED_SHORT");
+	// world_scratch (on, Vita): slot vertices are written straight into vitaGL scratch memory (its
+	// per-frame ring of GPU-visible memory) and drawn from a buffer object pointing there, instead of
+	// into an array that vitaGL then copied into that ring at each draw. A chunk is used until the
+	// next buffer swap (g_bufferSwaps, counted by the frontend; vitaGL reuses the ring's memory after
+	// as many swaps as it has display buffers). One chunk a pump exhausted the ring and crashed the
+	// Vita in vitaGL (reload_ffp_shaders): a frame has many pumps.
+	// Segments: each world draw draws [base, base + size) of the chunk and the next starts after it.
+	class WORLD_ARENA
+	{
+	public:
+		enum
+		{
+			CHUNK_VERTICES = 16384,
+		};
+		bool scratch = false; //vertices in a scratch chunk (else the heap array)
+		uint32 size() const { return scratch ? m_count : static_cast<uint32>(m_heap.size()); }
+		WORLD_GPU_VERTEX* data() { return scratch ? (m_chunk + m_base) : m_heap.data(); }
+		WORLD_GPU_VERTEX& operator[](size_t i) { return data()[i]; }
+		void resize(size_t n)
+		{
+			if(scratch)
+				m_count = static_cast<uint32>(n);
+			else
+				m_heap.resize(n);
+		}
+		void clear()
+		{
+			if(scratch)
+			{
+				m_base += m_count;
+				m_count = 0;
+			}
+			else
+				m_heap.clear();
+		}
+		const void* chunk() const { return m_chunk; }
+		uint32 base() const { return m_base; }
+		// Room for 'extra' more vertices in this segment: false when the segment must be drawn first
+		bool EnsureRoom(uint32 extra, bool wanted, void* (*alloc)(size_t))
+		{
+			bool current = (m_swap == g_bufferSwaps);
+			if(scratch && current && (m_base + m_count + extra <= CHUNK_VERTICES)) return true;
+			if(!scratch && !wanted) return true;
+			if(size() != 0) return false;
+			scratch = false;
+			m_chunk = nullptr;
+			if(!wanted || !alloc || (extra > CHUNK_VERTICES)) return true;
+			m_chunk = static_cast<WORLD_GPU_VERTEX*>(alloc(CHUNK_VERTICES * sizeof(WORLD_GPU_VERTEX)));
+			m_base = m_count = 0;
+			m_swap = g_bufferSwaps;
+			scratch = (m_chunk != nullptr);
+			if(scratch) g_worldScratchChunks++;
+			return true;
+		}
+		// The end of a pump (nothing left to draw): the chunk is not used again
+		void Drop()
+		{
+			if(scratch && (m_count != 0)) return;
+			scratch = false;
+			m_chunk = nullptr;
+			m_base = m_count = 0;
+			m_heap.clear();
+		}
+
+	private:
+		std::vector<WORLD_GPU_VERTEX> m_heap;
+		WORLD_GPU_VERTEX* m_chunk = nullptr;
+		uint32 m_base = 0, m_count = 0;
+		uint32 m_swap = 0;
+	};
+	WORLD_ARENA m_worldVertices;
+	static inline GLuint g_worldScratchBuffer = 0; //world_scratch: the stream buffer object holding the chunk
+	static void* AllocWorldScratch(size_t bytes);
 	std::vector<float> m_worldSoa; //gpu_world_soa: one array per attribute
 	bool m_batchHasClippedWorld = false; //m_batch holds CPU-clipped world triangles (counts only)
 	// strip_merge: a sprite drawn again, unchanged, with only the scissor moved to the next
@@ -504,7 +628,7 @@ private:
 	CSoftwareRasterizer::VERTEX m_stripSprite[2] = {};
 	int32 m_stripUnion[4] = {};       //x0, y0, x1, y1 (inclusive pixels)
 	int m_batchScissorFit = 0; //m_batch's primitives against their scissors: 0 strictly inside, 1 an edge on the scissor's, 2 crossing
-	std::vector<uint16> m_worldIndices;
+	std::vector<WORLD_INDEX> m_worldIndices;
 	float m_worldMatrix[WORLD_SLOTS * 16] = {};
 	float m_worldColorOffset[WORLD_SLOTS * 4] = {}, m_worldColorScale[WORLD_SLOTS * 4] = {}, m_worldTexOffset[WORLD_SLOTS * 4] = {};
 	uint32 m_worldSlots = 0;
@@ -578,7 +702,41 @@ private:
 	{
 		GLuint texture = 0;
 		GLuint framebuffer = 0;
+		// What it holds (alpha_clut_reuse): made at m_alphaEpoch 'epoch' (0: nothing)
+		uint64 epoch = 0;
+		uint64 sourceAlphaVersion = 0;
+		GLuint sourceTexture = 0;
+		uint32 offsetX = 0, offsetY = 0, mode = 0;
+		uint32 clut[256] = {};
 	};
+	// Incremented whenever target contents on the GPU may change other than by draws (those
+	// increment the target's alphaVersion when they write alpha): rows uploaded or copied in,
+	// targets created or deleted
+	uint64 m_alphaEpoch = 1;
+	// solid_readback: the sprite being marked dirty fills this rectangle with one colour (set around
+	// its MarkTargetDirty only)
+	struct SOLID_DRAW
+	{
+		const void* target = nullptr;
+		int32 x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+		uint64 key = 0;
+	};
+	SOLID_DRAW m_solidDraw;
+	std::unordered_map<uint64, uint32> m_solidPixels; //solid key: the RGBA8 pixel the GPU stores
+	void NoteSolidDraw(TARGET&, int32 x0, int32 y0, int32 x1, int32 y1);
+	// solid_upload: byte ranges of GS memory holding one 32-bit word everywhere (written by a solid
+	// read-back), until written again
+	struct SOLID_MEMORY
+	{
+		uint32 start, end, word;
+	};
+	std::vector<SOLID_MEMORY> m_solidMemory;
+	void MarkMemoryWritten(uint32 start, uint32 size); //texture cache and solid ranges
+	void SyncForReadback(); //readback_finish
+	bool SolidMemory(uint32 start, uint32 end, uint32& word) const;
+	void DropSolid(TARGET&, int32 x0, int32 y0, int32 x1, int32 y1);
+	void SetSolidDraw(CSoftwareRasterizer::PRIMITIVE_KIND, const CSoftwareRasterizer::VERTEX*);
+	void EndWorldBatch(const Re4Vu1::WORLD_BATCH&);
 	std::map<uint64, std::vector<ALPHA_CLUT_TARGET>> m_alphaClutTargets; //by size (w << 32 | h)
 	uint32 m_alphaClutNext = 0;
 	// Textured quads (clip space positions, normalized texcoords) from a texture into a

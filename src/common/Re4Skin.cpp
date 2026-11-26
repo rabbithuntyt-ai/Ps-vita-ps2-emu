@@ -162,7 +162,7 @@ namespace
 		const uint32_t normalScaleBits = 0x3C0101FE; //the program's I constant (1/127)
 		std::memcpy(&normalScale, &normalScaleBits, 4);
 
-		auto batch = std::make_shared<Re4Vu1::WORLD_BATCH>();
+		auto batch = Re4Vu1::AcquireBatch();
 		batch->skin = true;
 		batch->clipSpace = true;
 		batch->tagLow = static_cast<uint64_t>(static_cast<uint32_t>(header[0])) | (static_cast<uint64_t>(static_cast<uint32_t>(header[1])) << 32);
@@ -233,6 +233,7 @@ namespace
 			                  (lightColor.z * d + ambient.z) * material.z, ambient.w * material.w};
 			for(int i = 0; i < 4; i++) out[8 + i] = Re4Vu1::Ftoi(std::fmin(color[i], 255.0f), 1.0f);
 		}
+		Re4Vu1::PrepareBatchEnd(*batch);
 		return batch;
 	}
 

@@ -1,3 +1,4 @@
+#include "GsProfile.h"
 #include "Re4Vu1Hle.h"
 #include <cstring>
 #include <memory>
@@ -51,7 +52,7 @@ namespace
 		bool eop = ((tag >> 15) & 1) != 0;
 		// PACKED, 3 registers: ST, RGBAQ, XYZ2 (what the program's output holds)
 		if((nreg != 3) || (flg != 0) || !eop || ((header[2] & 0xFFF) != 0x512)) return nullptr;
-		auto batch = std::make_shared<Re4Vu1::WORLD_BATCH>();
+		auto batch = Re4Vu1::AcquireBatch();
 		batch->tagLow = tag;
 		batch->count = header[0] & 0x7FFF;
 		std::memcpy(&batch->scale, &header[3], 4);
@@ -79,6 +80,7 @@ namespace
 		if(Re4Vu1Hle::g_hashBatches) batch->hash = XXH3_64bits(batch->raw.data(), batch->raw.size() * sizeof(int32_t));
 		// Where the program stops (E bit at 0x13F8): MSCNT continues there.
 		state.nPC = 0x1408;
+		Re4Vu1::PrepareBatchEnd(*batch);
 		return batch;
 	}
 
@@ -93,7 +95,11 @@ namespace
 		}
 		gs->ProcessWriteBuffer(nullptr);
 		auto primitives = static_cast<CGSH_Primitives*>(gs);
-		gs->SubmitWriteBufferThen([primitives, batch]() { primitives->DrawWorldBatch(*batch); });
+		gs->SubmitWriteBufferThen([primitives, batch]() mutable {
+			primitives->DrawWorldBatch(*batch);
+			GsProfile::CScope freeSection(GsProfile::SECTION_BATCH_FREE);
+			Re4Vu1::ReleaseBatch(batch);
+		});
 	}
 }
 
@@ -113,7 +119,12 @@ namespace
 		batches.reserve(group.size());
 		for(auto& item : group) batches.push_back(std::static_pointer_cast<Re4Vu1::WORLD_BATCH>(item));
 		auto primitives = static_cast<CGSH_Primitives*>(gs);
-		gs->SubmitWriteBufferThen([primitives, batches = std::move(batches)]() { primitives->DrawWorldBatches(batches); });
+		gs->SubmitWriteBufferThen([primitives, batches = std::move(batches)]() mutable {
+			primitives->DrawWorldBatches(batches);
+			GsProfile::CScope freeSection(GsProfile::SECTION_BATCH_FREE);
+			for(auto& batch : batches) Re4Vu1::ReleaseBatch(batch);
+			batches.clear();
+		});
 	}
 }
 

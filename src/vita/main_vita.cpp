@@ -54,6 +54,7 @@
 #include "Re4Skin.h"
 #include "GsProfile.h"
 #include "gs/GsTransferWrite.h"
+#include "MailBox.h"
 #include "TargetPixels.h"
 #include "ee/Vif1.h"
 #include "xxhash.h"
@@ -230,6 +231,7 @@ namespace
 	void EndFrame()
 	{
 		Gfx::Flush();
+		CGSH_Hardware::g_bufferSwaps++; //world_scratch: scratch memory taken before this swap is not used after it
 		vglSwapBuffers(GL_FALSE);
 	}
 
@@ -442,6 +444,18 @@ namespace
 		else if(key == "fast_skin_loop") CGSH_Hardware::g_fastSkinLoop = value != 0; //skinning batch vertices by a loop of their own (exact; on)
 		else if(key == "feed_prefetch") GsTransferWrite::g_prefetch = value != 0; //transfer writes prefetch the next blocks' source rows (on)
 		else if(key == "texture_page_hash") CTextureCache::g_exactPageHash = value != 0; //hash only the pages a texture reads (exact; on)
+		else if(key == "alpha_clut_reuse") CGSH_Hardware::g_alphaClutReuse = value != 0; //alpha CLUT results reused while no target alpha changed (exact; on)
+		else if(key == "solid_readback") CGSH_Hardware::g_solidReadback = value != 0; //read-backs of solid-filled targets write the colour (exact; on)
+		else if(key == "strip_merge_marks") CGSH_Hardware::g_stripMergeMarks = value != 0; //merged sprite columns mark their pixels dirty (on)
+		else if(key == "solid_upload") CGSH_Hardware::g_solidUpload = value != 0; //uploads of solid GS memory drawn from one pixel (exact; on)
+		else if(key == "batch_pool") Re4Vu1::g_batchPool = value != 0; //world batches reused from a pool (exact; on)
+		else if(key == "clut_hash_on_load") CGSH_Hardware::g_clutHashOnLoad = value != 0; //the CLUT hashed only when TEX0 loads it (exact; on)
+		else if(key == "skin_prefetch") CGSH_Hardware::g_skinPrefetch = value != 0; //skinning loop prefetches 8 vertices ahead (exact; on)
+		else if(key == "end_on_worker") Re4Vu1::g_endOnWorker = value != 0; //world batch ends projected where the batch is built (exact; on)
+		else if(key == "world_scratch") CGSH_Hardware::g_worldScratch = value != 0; //world slot vertices written into vitaGL stream buffer memory (off: crashed the Vita)
+		else if(key == "readback_finish") CGSH_Hardware::g_readbackFinish = value != 0; //the GPU finished before every target read-back (diagnostics; off: 13 to 55 ms of read-backs per game frame)
+		else if(key == "solid_readback_check") CGSH_Hardware::g_solidReadbackCheck = value != 0; //solid read-backs also read the GPU and count differences (diagnostics)
+		else if(key == "mailbox_batch") CMailBox::g_batched = value != 0; //mailboxes received in batches, senders wake only a waiting receiver (exact; on)
 		else if(key == "gpu_skin") Re4Skin::g_gpuSkin = value != 0; //RE4: one-matrix skinning batches drawn by the GPU world path (off)
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
@@ -2068,6 +2082,16 @@ namespace
 					             static_cast<unsigned long long>(CGSH_Hardware::g_worldVerticesByKind[k]));
 				std::fprintf(stateFile, "world batches that joined the open slot: %llu\n", static_cast<unsigned long long>(CGSH_Hardware::g_worldSlotShares));
 				std::fprintf(stateFile, "sprites that joined the previous column's draw: %llu\n", static_cast<unsigned long long>(CGSH_Hardware::g_stripMerges));
+				std::fprintf(stateFile, "alpha CLUT passes: %llu, results reused: %llu\n", static_cast<unsigned long long>(CGSH_Hardware::g_alphaClutPassesTotal),
+				             static_cast<unsigned long long>(CGSH_Hardware::g_alphaClutReuses));
+				std::fprintf(stateFile, "solid read-backs: %llu (%llu pixels), colours learned %llu, pixels differing from the GPU %llu\n", static_cast<unsigned long long>(CGSH_Hardware::g_solidReadbacks),
+				             static_cast<unsigned long long>(CGSH_Hardware::g_solidReadbackPixels), static_cast<unsigned long long>(CGSH_Hardware::g_solidLearned),
+				             static_cast<unsigned long long>(CGSH_Hardware::g_solidReadbackMismatches));
+				std::fprintf(stateFile, "solid colours not learned (read-back not one colour): %llu; first difference at %u,%u: GPU %08X, written %08X\n", static_cast<unsigned long long>(CGSH_Hardware::g_solidLearnFailures),
+				             CGSH_Hardware::g_solidFirstMismatch[0], CGSH_Hardware::g_solidFirstMismatch[1], CGSH_Hardware::g_solidFirstMismatch[2], CGSH_Hardware::g_solidFirstMismatch[3]);
+				std::fprintf(stateFile, "world scratch chunks: %llu, draws from them: %llu\n", static_cast<unsigned long long>(CGSH_Hardware::g_worldScratchChunks), static_cast<unsigned long long>(CGSH_Hardware::g_worldScratchDraws));
+				std::fprintf(stateFile, "solid uploads: %llu (%llu pixels), pixels differing from memory %llu\n", static_cast<unsigned long long>(CGSH_Hardware::g_solidUploads),
+				             static_cast<unsigned long long>(CGSH_Hardware::g_solidUploadPixels), static_cast<unsigned long long>(CGSH_Hardware::g_solidUploadMismatches));
 				std::fprintf(stateFile, "triangles to the CPU clipper: %llu, rejected before clipping: %llu\n", static_cast<unsigned long long>(CGSH_Hardware::g_worldClipCalls),
 				             static_cast<unsigned long long>(CGSH_Hardware::g_worldClipRejected));
 				std::fprintf(stateFile, "game frames: %u\n", CGSH_Hardware::g_gameFrames);

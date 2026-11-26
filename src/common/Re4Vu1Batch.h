@@ -7,11 +7,23 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <vector>
 #include "Re4Vu1.h"
 
 namespace Re4Vu1
 {
+	// What the program sends to the GS for a vertex: ST (S, T, Q), RGBA, XYZ (12.4, Z).
+	struct GS_VERTEX
+	{
+		float s, t, q;
+		uint8_t rgba[4];
+		int32_t x, y; //12.4, before the 16 bit wrap
+		uint32_t z;
+		float screenX, screenY;
+	};
+
 	struct WORLD_BATCH
 	{
 		uint64_t tagLow = 0;      //GIF tag (NLOOP, EOP, PRE, PRIM, FLG, NREG)
@@ -32,7 +44,70 @@ namespace Re4Vu1
 		//raw[0..3] are the float bits of the projected position (the program's own arithmetic,
 		//done where the batch is built) and raw[7] the program's skip bit: no matrix, no clipping
 		bool clipSpace = false;
+		//end_on_worker: the last two vertices as the program sends them (Project(ReadWorldVertex)),
+		//computed where the batch is built; the GS thread kicks them at the batch's end
+		bool endReady = false;
+		GS_VERTEX endLast = {}, endSecondLast = {};
 	};
+
+	// batch_pool (on): batches go back to a pool after their draw instead of being freed, and are
+	// taken from it when built (the VU1 worker builds about 600 a Resident Evil 4 frame, the GS
+	// thread released them: two allocations and two frees each, across threads, on one heap
+	// lock). A batch keeps its vertex storage.
+	inline bool g_batchPool = true;
+	inline uint64_t g_batchesPooled = 0, g_batchesAllocated = 0;
+	struct BATCH_POOL
+	{
+		std::mutex lock;
+		std::vector<std::shared_ptr<WORLD_BATCH>> free;
+	};
+	inline BATCH_POOL& BatchPool()
+	{
+		static BATCH_POOL pool;
+		return pool;
+	}
+	inline std::shared_ptr<WORLD_BATCH> AcquireBatch()
+	{
+		if(g_batchPool)
+		{
+			auto& pool = BatchPool();
+			std::shared_ptr<WORLD_BATCH> batch;
+			{
+				std::lock_guard<std::mutex> guard(pool.lock);
+				if(!pool.free.empty())
+				{
+					batch = std::move(pool.free.back());
+					pool.free.pop_back();
+				}
+			}
+			if(batch)
+			{
+				std::vector<int32_t> raw = std::move(batch->raw);
+				raw.clear();
+				*batch = WORLD_BATCH();
+				batch->raw = std::move(raw);
+				g_batchesPooled++;
+				return batch;
+			}
+		}
+		g_batchesAllocated++;
+		return std::make_shared<WORLD_BATCH>();
+	}
+	// After the draw: the last holder gives it back (others, the retained world's cache, keep theirs)
+	inline void ReleaseBatch(std::shared_ptr<WORLD_BATCH>& batch)
+	{
+		if(g_batchPool && batch && (batch.use_count() == 1))
+		{
+			auto& pool = BatchPool();
+			std::lock_guard<std::mutex> guard(pool.lock);
+			if(pool.free.size() < 4096)
+			{
+				pool.free.push_back(std::move(batch));
+				return;
+			}
+		}
+		batch.reset();
+	}
 
 	// A vertex before the perspective divide (for clipping) and its decisions.
 	struct WORLD_VERTEX
@@ -103,16 +178,6 @@ namespace Re4Vu1
 		return out;
 	}
 
-	// What the program sends to the GS for a vertex: ST (S, T, Q), RGBA, XYZ (12.4, Z).
-	struct GS_VERTEX
-	{
-		float s, t, q;
-		uint8_t rgba[4];
-		int32_t x, y; //12.4, before the 16 bit wrap
-		uint32_t z;
-		float screenX, screenY;
-	};
-
 	inline GS_VERTEX Project(const WORLD_VERTEX& in)
 	{
 		GS_VERTEX out;
@@ -128,6 +193,16 @@ namespace Re4Vu1
 		out.y = Ftoi(out.screenY, 16.0f);
 		out.z = static_cast<uint32_t>(Ftoi(in.v.z * q, 16.0f));
 		return out;
+	}
+
+	// end_on_worker (on): where a batch is built (VU1 worker), its last two vertices projected for the GS
+	inline bool g_endOnWorker = true;
+	inline void PrepareBatchEnd(WORLD_BATCH& batch)
+	{
+		if(!g_endOnWorker || (batch.count == 0)) return;
+		batch.endLast = Project(ReadWorldVertex(batch, batch.count - 1));
+		if(batch.count >= 2) batch.endSecondLast = Project(ReadWorldVertex(batch, batch.count - 2));
+		batch.endReady = true;
 	}
 
 	inline WORLD_VERTEX Lerp(const WORLD_VERTEX& a, const WORLD_VERTEX& b, float f)

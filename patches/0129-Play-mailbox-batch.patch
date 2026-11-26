@@ -1,0 +1,216 @@
+diff --git a/Source/MailBox.cpp b/Source/MailBox.cpp
+--- a/Source/MailBox.cpp
++++ b/Source/MailBox.cpp
+@@ -1,84 +1,105 @@
+ #include "EmuProfile.h"
+-#include "MailBox.h"
+-
+-bool CMailBox::IsPending() const
+-{
+-	return m_calls.size() != 0;
+-}
+-
+-void CMailBox::WaitForCall()
+-{
+-	std::unique_lock callLock(m_callMutex);
+-	while(!IsPending())
+-	{
+-		m_waitCondition.wait(callLock);
+-	}
+-}
+-
+-void CMailBox::WaitForCall(unsigned int timeOut)
+-{
+-	std::unique_lock callLock(m_callMutex);
+-	if(IsPending()) return;
+-	m_waitCondition.wait_for(callLock, std::chrono::milliseconds(timeOut));
+-}
+-
+-void CMailBox::FlushCalls()
+-{
+-	SendCall([]() {}, true);
+-}
+-
+-void CMailBox::SendCall(const FunctionType& function, bool waitForCompletion)
+-{
+-	std::future<void> future;
+-
+-	{
+-		MESSAGE message;
+-		message.function = function;
+-
+-		if(waitForCompletion)
+-		{
+-			message.promise = std::make_unique<std::promise<void>>();
+-			future = message.promise->get_future();
+-		}
+-
+-		std::lock_guard callLock(m_callMutex);
+-		m_calls.push_back(std::move(message));
+-	}
+-
+-	m_waitCondition.notify_all();
+-
+-	if(waitForCompletion)
+-	{
++#include "MailBox.h"
++
++bool CMailBox::IsPending() const
++{
++	return (m_received.size() != 0) || (m_calls.size() != 0);
++}
++
++void CMailBox::WaitForCall()
++{
++	std::unique_lock callLock(m_callMutex);
++	while(!IsPending())
++	{
++		m_waiting = true;
++		m_waitCondition.wait(callLock);
++		m_waiting = false;
++	}
++}
++
++void CMailBox::WaitForCall(unsigned int timeOut)
++{
++	std::unique_lock callLock(m_callMutex);
++	if(IsPending()) return;
++	m_waiting = true;
++	m_waitCondition.wait_for(callLock, std::chrono::milliseconds(timeOut));
++	m_waiting = false;
++}
++
++void CMailBox::FlushCalls()
++{
++	SendCall([]() {}, true);
++}
++
++void CMailBox::SendCall(const FunctionType& function, bool waitForCompletion)
++{
++	std::future<void> future;
++	bool wake = true;
++
++	{
++		MESSAGE message;
++		message.function = function;
++
++		if(waitForCompletion)
++		{
++			message.promise = std::make_unique<std::promise<void>>();
++			future = message.promise->get_future();
++		}
++
++		std::lock_guard callLock(m_callMutex);
++		m_calls.push_back(std::move(message));
++		wake = m_waiting || !g_batched;
++	}
++
++	if(wake) m_waitCondition.notify_all();
++
++	if(waitForCompletion)
++	{
+ 		EmuProfile::WAIT_TIMER waitTimer(EmuProfile::g_mailboxWaitUs);
+-		future.wait();
+-	}
+-}
+-
+-void CMailBox::SendCall(FunctionType&& function)
+-{
+-	{
+-		MESSAGE message;
+-		message.function = std::move(function);
+-
+-		std::lock_guard callLock(m_callMutex);
+-		m_calls.push_back(std::move(message));
+-	}
+-
+-	m_waitCondition.notify_all();
+-}
+-
+-void CMailBox::ReceiveCall()
+-{
+-	MESSAGE message;
+-	{
+-		std::lock_guard callLock(m_callMutex);
+-		if(!IsPending()) return;
+-		message = std::move(m_calls.front());
+-		m_calls.pop_front();
+-	}
+-	message.function();
+-	if(message.promise)
+-	{
+-		message.promise->set_value();
+-	}
+-}
++		future.wait();
++	}
++}
++
++void CMailBox::SendCall(FunctionType&& function)
++{
++	bool wake = true;
++	{
++		MESSAGE message;
++		message.function = std::move(function);
++
++		std::lock_guard callLock(m_callMutex);
++		m_calls.push_back(std::move(message));
++		wake = m_waiting || !g_batched;
++	}
++
++	if(wake) m_waitCondition.notify_all();
++}
++
++void CMailBox::ReceiveCall()
++{
++	MESSAGE message;
++	if(m_received.empty())
++	{
++		std::lock_guard callLock(m_callMutex);
++		if(m_calls.empty()) return;
++		if(g_batched)
++		{
++			m_received.swap(m_calls);
++		}
++		else
++		{
++			message = std::move(m_calls.front());
++			m_calls.pop_front();
++		}
++	}
++	if(!m_received.empty())
++	{
++		message = std::move(m_received.front());
++		m_received.pop_front();
++	}
++	message.function();
++	if(message.promise)
++	{
++		message.promise->set_value();
++	}
++}
+diff --git a/Source/MailBox.h b/Source/MailBox.h
+--- a/Source/MailBox.h
++++ b/Source/MailBox.h
+@@ -22,6 +22,12 @@
+ 	void WaitForCall();
+ 	void WaitForCall(unsigned int);
+ 
++	// mailbox_batch (on): the receiving thread takes all queued calls under one lock and runs
++	// them from its own queue (one lock per batch instead of one per call, same order), and a
++	// sender wakes the receiver only when it waits (otherwise a notify per call: about 1,300
++	// per Resident Evil 4 frame on the GS mailbox)
++	static inline bool g_batched = true;
++
+ private:
+ 	struct MESSAGE
+ 	{
+@@ -40,6 +46,8 @@
+ 	typedef std::deque<MESSAGE> FunctionCallQueue;
+ 
+ 	FunctionCallQueue m_calls;
++	FunctionCallQueue m_received; //the receiving thread's batch (mailbox_batch)
++	bool m_waiting = false;       //the receiver waits on m_waitCondition (under m_callMutex)
+ 	std::mutex m_callMutex;
+ 	std::condition_variable m_waitCondition;
+ };

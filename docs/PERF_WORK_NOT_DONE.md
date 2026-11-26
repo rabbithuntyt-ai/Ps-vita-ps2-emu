@@ -884,6 +884,34 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
   3.45/3.46 with the same code paths on another series. Run-to-run conditions move the result by
   about 4%, so no speedup is claimed from this.
 
+### GS thread toward 33 ms, and stale read-backs on the Vita (26 Nov 2026)
+
+- **Goal:** the GS thread under 33 ms of work per game frame, peaks included. On the Vita (R51-R55)
+  it does about 160-185 ms per game frame in the median second and 245-270 ms in the heaviest.
+- **vitaGL's glReadPixels waits for the GPU only when the framebuffer read is the one it rendered
+  to last** (`in_use_framebuffer`, framebuffers.c); glBindFramebuffer changes nothing there. A
+  target drawn earlier is read as the GPU has left it so far. Found with `solid_readback_check`:
+  a 512x1 read of RE4's 0x310000 target gave zeros where a later whole read gave 3E1F1F1F, and a
+  whole read-back used to learn the colour also came back all zeros.
+  - So the Vita's read-backs of such targets have been able to write stale pixels into GS memory
+    (the PC's Mesa reads are synchronous). Not fixed: `readback_finish` (glFinish before every
+    read-back) makes it right but takes read-backs from 13 to 55 ms per game frame (the GPU has
+    tens of ms queued). It stays off; a cheaper ordering (finishing only the target's own scene)
+    is open.
+  - With the GPU finished, 0x310000 is not one colour on the Vita (it is on the PC), so the
+    solid read-back never applies there.
+- **World vertices straight into GPU memory (`world_scratch`).** vitaGL draws with a bound
+  vertex buffer read its memory without copying; client arrays are copied into its scratch ring
+  at each draw. Two attempts, both off:
+  - a buffer pointed at `vglAllocFromScratch` memory with `vglBufferData` (size unset): crashed in
+    glDrawElements; taking a chunk per pump also risked exhausting the ring (now one per swap);
+  - a GL_STREAM_DRAW buffer mapped with glMapBuffer: the Vita stopped answering in the first run.
+- **Where the time goes now** (R55, ms per game frame, steady): feedWrite 16-17, download 14,
+  worldRet 13-14, glDrawWorld 10, registers 8-9, worldVerts 8, flush 7-8, other 7, worldClip 7,
+  skinLoop 7, texHash 6, upload 5, glDraw 5, glDrawRet 5, texture 5, state 5. Draws per game frame
+  (R53): about 226 fixed function, 119 world slot, 183 retained; world batches about 915 retained,
+  268 slot, 432 skinning.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an

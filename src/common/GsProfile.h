@@ -43,12 +43,15 @@ namespace GsProfile
 		SECTION_TEX_HASH,       //of texture: page hashes of rewritten or new texture cache entries
 		SECTION_TEX_CREATE,     //of texture: new texture cache entries (texel storage, CLUT snapshot)
 		SECTION_ALPHA_CLUT,     //of texture: alpha index textures looked up on the GPU
+		SECTION_SKIN_LOOP,      //of worldSkin: the projected skinning vertices and indices into the slot (fast_skin_loop)
+		SECTION_BATCH_FREE,     //world and skinning batches released after their draw (their memory freed)
+		SECTION_END_KICK,       //of worldEnd: the batch's last two vertices kicked into the GS registers
 		SECTION_COUNT
 	};
 
 	inline const char* GetSectionName(unsigned int section)
 	{
-		static const char* names[SECTION_COUNT] = {"idle", "other", "registers", "vertex", "primitive", "addvertex", "state", "texture", "target", "flush", "upload", "download", "transfer", "world", "display", "worldRet", "worldSkin", "feedWrite", "glDraw", "glDrawWorld", "glDrawRet", "worldSetup", "worldVerts", "worldEnd", "worldClip", "tgtRelayout", "tgtAlloc", "tgtRemove", "tgtResize", "texHash", "texCreate", "alphaClut"};
+		static const char* names[SECTION_COUNT] = {"idle", "other", "registers", "vertex", "primitive", "addvertex", "state", "texture", "target", "flush", "upload", "download", "transfer", "world", "display", "worldRet", "worldSkin", "feedWrite", "glDraw", "glDrawWorld", "glDrawRet", "worldSetup", "worldVerts", "worldEnd", "worldClip", "tgtRelayout", "tgtAlloc", "tgtRemove", "tgtResize", "texHash", "texCreate", "alphaClut", "skinLoop", "batchFree", "endKick"};
 		return (section < SECTION_COUNT) ? names[section] : "?";
 	}
 

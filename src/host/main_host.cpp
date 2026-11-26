@@ -58,6 +58,7 @@
 #include <GL/osmesa.h>
 #include "GSH_Hardware.h"
 #include "gs/GsTransferWrite.h"
+#include "MailBox.h"
 #endif
 
 namespace
@@ -296,6 +297,15 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-resize-on-gpu")) CGSH_Hardware::g_resizeOnGpu = false; //shrinks and trims with glCopyTexSubImage2D
 		else if(!std::strcmp(argv[i], "--no-fast-skin-loop")) CGSH_Hardware::g_fastSkinLoop = false; //skinning batches through the generic world loop
 		else if(!std::strcmp(argv[i], "--no-texture-page-hash")) CTextureCache::g_exactPageHash = false; //page hashes over whole page rows
+		else if(!std::strcmp(argv[i], "--no-alpha-clut-reuse")) CGSH_Hardware::g_alphaClutReuse = false; //every alpha CLUT texture bind draws the pass
+		else if(!std::strcmp(argv[i], "--no-solid-readback")) CGSH_Hardware::g_solidReadback = false; //read-backs of solid-filled targets read the GPU
+		else if(!std::strcmp(argv[i], "--no-strip-merge-marks")) CGSH_Hardware::g_stripMergeMarks = false; //merged sprite columns do not mark their pixels dirty
+		else if(!std::strcmp(argv[i], "--no-solid-upload")) CGSH_Hardware::g_solidUpload = false; //uploads of solid GS memory read and upload every pixel
+		else if(!std::strcmp(argv[i], "--no-batch-pool")) Re4Vu1::g_batchPool = false; //world batches allocated and freed each time
+		else if(!std::strcmp(argv[i], "--no-clut-hash-on-load")) CGSH_Hardware::g_clutHashOnLoad = false; //the CLUT hashed after every TEX0 write
+		else if(!std::strcmp(argv[i], "--no-end-on-worker")) Re4Vu1::g_endOnWorker = false; //world batch ends projected on the GS thread
+		else if(!std::strcmp(argv[i], "--solid-readback-check")) CGSH_Hardware::g_solidReadbackCheck = true; //solid read-backs also read the GPU and count differences
+		else if(!std::strcmp(argv[i], "--no-mailbox-batch")) CMailBox::g_batched = false; //one lock and one notify per mailbox call
 		else if(!std::strcmp(argv[i], "--feed-shapes")) CGSH_Hardware::g_feedShapes = true; //host to local transfers by format, size and alignment
 		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
 		else if(!std::strcmp(argv[i], "--reuse-scan")) CVpu::g_reuseScan = CGSHandler::g_shadowRegs = true; //relayed GIF data repeated across frames
@@ -672,6 +682,11 @@ int main(int argc, char** argv)
 					std::printf("reuse DIRECT mode %d: %.1f MB, %.1f MB repeated\n", m, CVpu::g_reuseDirectMode[m][0] / 1048576.0, CVpu::g_reuseDirectMode[m][1] / 1048576.0);
 			if(Re4Skin::g_modelCheck) Re4Skin::PrintModelStats();
 			std::printf("host to local transfers: %llu, changing no byte of GS memory: %llu\n", (unsigned long long)CGSH_Hardware::g_transfersInTotal, (unsigned long long)CGSH_Hardware::g_unchangedTransfersTotal);
+			std::printf("alpha CLUT passes: %llu, results reused: %llu\n", (unsigned long long)CGSH_Hardware::g_alphaClutPassesTotal, (unsigned long long)CGSH_Hardware::g_alphaClutReuses);
+			std::printf("solid read-backs: %llu (%llu pixels), colours learned %llu, pixels differing from the GPU %llu\n", (unsigned long long)CGSH_Hardware::g_solidReadbacks, (unsigned long long)CGSH_Hardware::g_solidReadbackPixels, (unsigned long long)CGSH_Hardware::g_solidLearned, (unsigned long long)CGSH_Hardware::g_solidReadbackMismatches);
+			std::printf("solid colours not learned (read-back not one colour): %llu; first difference at %u,%u: GPU %08X, written %08X\n", (unsigned long long)CGSH_Hardware::g_solidLearnFailures, CGSH_Hardware::g_solidFirstMismatch[0], CGSH_Hardware::g_solidFirstMismatch[1], CGSH_Hardware::g_solidFirstMismatch[2], CGSH_Hardware::g_solidFirstMismatch[3]);
+			std::printf("solid uploads: %llu (%llu pixels), pixels differing from memory %llu\n", (unsigned long long)CGSH_Hardware::g_solidUploads, (unsigned long long)CGSH_Hardware::g_solidUploadPixels, (unsigned long long)CGSH_Hardware::g_solidUploadMismatches);
+			std::printf("world batches taken from the pool: %llu, allocated: %llu\n", (unsigned long long)Re4Vu1::g_batchesPooled, (unsigned long long)Re4Vu1::g_batchesAllocated);
 			for(int psm = 0; psm < 64; psm++)
 			{
 				if(CGSH_Hardware::g_feedCallsByPsm[psm] == 0) continue;
