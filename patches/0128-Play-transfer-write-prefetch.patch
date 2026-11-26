@@ -1,0 +1,39 @@
+diff --git a/Source/gs/GsTransferWrite.h b/Source/gs/GsTransferWrite.h
+--- a/Source/gs/GsTransferWrite.h
++++ b/Source/gs/GsTransferWrite.h
+@@ -38,6 +38,10 @@
+ 	// change, which is always exact, only that skip is lost (feed_compare=0: Resident Evil 4,
+ 	// where 0.03% of transfers change nothing and the reads of the old bytes cost memory time).
+ 	inline bool g_compare = true;
++	// The source rows of the block 2 ahead are prefetched (feed_prefetch): a block reads 8 or 16
++	// rows a transfer row apart, more streams than the A9 prefetches by itself (the same pattern
++	// made render target read-backs 32% faster with it)
++	inline bool g_prefetch = true;
+ 	inline uint64 g_blockUnits = 0, g_singleUnits = 0, g_calls = 0, g_unalignedStarts = 0;
+ 
+ 	// For one block: the source unit of every unit of the block (in memory order), as an index
+@@ -142,6 +146,10 @@
+ 				{
+ 					uint8* block = ram + BlockAddress<Storage>(pointer, bufferWidth, (x + k * Storage::BLOCKWIDTH) % 2048, y, 1);
+ 					const Unit* base = source + k * Storage::BLOCKWIDTH;
++					if(g_prefetch && (k + 2 < blocks))
++					{
++						for(uint32 r = 0; r < Storage::BLOCKHEIGHT; r++) __builtin_prefetch(base + 2 * Storage::BLOCKWIDTH + r * rrw, 0);
++					}
+ 					for(uint32 c = 0; c < CGsPixelFormats::BLOCKSIZE / 8; c++) std::memcpy(block + c * 8, base + offsets[c], 8);
+ 				}
+ 				dirty = true;
+@@ -391,7 +399,12 @@
+ 			for(uint32 k = 0; k < blocks; k++)
+ 			{
+ 				uint8* block = ram + BlockAddress<Storage>(pointer, bufferWidth, (x + k * Storage::BLOCKWIDTH) % 2048, y, 2);
+-				if(WritePsmt4Block(block, source + (firstNibble + k * Storage::BLOCKWIDTH) / 2, rrw / 2, tables)) dirty = true;
++				const uint8* rows = source + (firstNibble + k * Storage::BLOCKWIDTH) / 2;
++				if(g_prefetch && (k + 2 < blocks))
++				{
++					for(uint32 r = 0; r < Storage::BLOCKHEIGHT; r++) __builtin_prefetch(rows + Storage::BLOCKWIDTH + r * (rrw / 2), 0);
++				}
++				if(WritePsmt4Block(block, rows, rrw / 2, tables)) dirty = true;
+ 			}
+ 			return true;
+ 		}

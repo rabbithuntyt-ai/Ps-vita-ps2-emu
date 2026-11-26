@@ -805,8 +805,15 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
     GS thread no longer sets the frame rate; the emulation and VU1 threads do.
 - **`fast_skin_loop` (on, exact on the PC).** Projected skinning batches use a loop of their own
   in DrawWorldBatch: no clip flags or guard band per vertex, and indices written through a
-  pointer. The same vertices and indices: PC shots and index totals identical. Vita A/B
-  pending.
+  pointer. The same vertices and indices: PC shots and index totals identical.
+  - Vita R42: worldSkin 16/20 ms off against 19 ms on, so no measured gain. The cost there is
+    not per-vertex instructions (the batch data comes from the VU1 worker's core).
+- **`feed_prefetch` (on, patch 0128): transfer writes prefetch the next blocks' source rows.**
+  - Vita R43: feedWrite 22/22 to 17/17 ms per game frame (-23%).
+- **Retained world draws, segment timers (R42d, fine_timers), ms per game frame:**
+  - matrix and sampled vertices 4.7; hash and lookup 3.1; building and box test 2.8
+  - flush and run setup 9.9: mostly the FlushBatch of whatever other path was pending
+  - uniforms 2.3
 - **GPU read-backs with vglReadPixels: tried, not kept (R36-R39, 26 Nov 2026).**
   - Vita self-test on a cleared 512x448 target (a 1x1 glReadPixels first, to end the scene):
     vglReadPixels into a heap buffer plus memcpy took 5.2 ms against 10.4 for glReadPixels,
