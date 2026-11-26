@@ -432,6 +432,7 @@ namespace
 		else if(key == "target_pool_lru") CGSH_Hardware::g_targetPoolLru = value != 0; //full target pool drops its oldest entry; stale entries freed (on)
 		else if(key == "target_pool_max_age") CGSH_Hardware::g_targetPoolMaxAge = static_cast<uint32_t>(value); //frames a pooled target may wait (300)
 		else if(key == "target_pool_min_age") CGSH_Hardware::g_targetPoolMinAge = static_cast<uint32_t>(value); //frames before a pooled target is reused (1)
+		else if(key == "strip_merge_opaque") CGSH_Hardware::g_stripMergeOpaque = value != 0; //opaque sprites continuing a strip cover merge too (exact; on)
 		else if(key == "gpu_skin") Re4Skin::g_gpuSkin = value != 0; //RE4: one-matrix skinning batches drawn by the GPU world path (off)
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;

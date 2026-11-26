@@ -255,6 +255,8 @@ public:
 	static inline bool g_worldUniformsUsed = true; //world_uniforms_used (on): world draws upload only the slots in use
 	static inline uint64 g_worldSlotShares = 0; //batches that joined the open slot (whole run)
 	static inline bool g_stripMerge = true; //strip_merge (see m_stripMergeOk)
+	static inline bool g_stripMergeOpaque = true; //strip_merge_opaque: opaque sprites continuing a strip cover too
+	static inline uint64 g_stripMergesOpaque = 0; //of those: opaque sprites continuing a strip cover
 	static inline uint64 g_stripMerges = 0; //sprites drawn by joining the previous column's draw (whole run)
 	static inline bool g_stateBreaks = false; //host --state-breaks: fixed function draws ended by a state change, by the fields that changed
 	static inline std::map<std::string, std::pair<uint64, uint64>> g_stateBreakCounts; //fields: draws, vertices
@@ -618,6 +620,7 @@ private:
 	bool WouldSkipDrawFor(const CSoftwareRasterizer::STATE&) const;
 	void FlushBatchImpl();
 	bool StripMergeAllowed(const CSoftwareRasterizer::STATE&) const;
+	bool StripCoverContinues(const CSoftwareRasterizer::STATE&, const CSoftwareRasterizer::VERTEX&, const CSoftwareRasterizer::VERTEX&) const;
 	uint32 m_skipDraws = 0;
 	// Batch program (gs_shaders)
 	bool BuildBatchProgram();

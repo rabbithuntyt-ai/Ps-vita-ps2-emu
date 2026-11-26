@@ -1706,11 +1706,33 @@ bool CGSH_Hardware::StripMergeAllowed(const CSoftwareRasterizer::STATE& next) co
 	if(m_boundFeedback || m_drawNothing) return false;
 	// The RE4 draw-skip rule counts state applications: only when it would do nothing
 	if(g_re4SkipDof && WouldSkipDrawFor(next)) return false;
-	// The strip-cover logic (W1) would act on an opaque sprite or a cover in progress
-	if(m_stripCover.target) return false;
+	// The strip-cover logic (W1): for a sprite that is not an opaque overwrite it does nothing when
+	// no cover is in progress; for an opaque one only the step that moves a cover in progress on
+	// to the next column (no GL work) is allowed
 	bool opaqueOverwrite = !(next.alphaBlend || (next.fbmsk != 0) || next.date || (next.ate && (next.atst != ALPHA_TEST_ALWAYS)) || (next.zte && (next.ztst != DEPTH_TEST_ALWAYS)));
-	if(opaqueOverwrite) return false;
-	return true;
+	if(!opaqueOverwrite) return !m_stripCover.target;
+	return StripCoverContinues(next, m_stripSprite[0], m_stripSprite[1]);
+}
+
+bool CGSH_Hardware::StripCoverContinues(const CSoftwareRasterizer::STATE& s, const CSoftwareRasterizer::VERTEX& a, const CSoftwareRasterizer::VERTEX& b) const
+{
+	// SkipOverwrittenRows' "next strip" case for this state and sprite, without doing anything:
+	// a cover in progress on this buffer, its target found as is (tall enough: FindTarget changes
+	// nothing), the sprite covering the pending rows and starting inside the covered columns
+	const auto& cover = m_stripCover;
+	if(!g_stripMergeOpaque || !cover.target) return false;
+	const TARGET* target = cover.target;
+	if((target->fbp != s.fbp) || (target->fbw != s.fbw) || (target->psm != s.fpsm)) return false;
+	uint32 needed = static_cast<uint32>(std::max(s.scay1, 0)) + 1;
+	if(target->height < needed) return false;
+	auto ceilPixel = [](int32 value) { return (value + 15) >> 4; };
+	int32 x0 = ceilPixel(std::min(a.x, b.x)), x1 = ceilPixel(std::max(a.x, b.x));
+	int32 y0 = ceilPixel(std::min(a.y, b.y)), y1 = ceilPixel(std::max(a.y, b.y));
+	int32 width = static_cast<int32>(target->width);
+	bool covers = (y0 <= static_cast<int32>(cover.begin)) && (y1 >= static_cast<int32>(cover.end)) && (s.scay0 <= static_cast<int32>(cover.begin)) &&
+	              (s.scay1 + 1 >= static_cast<int32>(cover.end));
+	int32 cx0 = std::max<int32>(std::max(x0, 0), s.scax0), cx1 = std::min<int32>(std::min(x1, width), s.scax1 + 1);
+	return covers && (cx0 <= static_cast<int32>(cover.coveredX)) && (cx1 > static_cast<int32>(cover.coveredX));
 }
 
 void CGSH_Hardware::BindTexture()
@@ -4134,8 +4156,17 @@ void CGSH_Hardware::OnDraw(CSoftwareRasterizer::PRIMITIVE_KIND kind, const CSoft
 			       (std::memcmp(&a.s, &b.s, sizeof(float)) == 0) && (std::memcmp(&a.t, &b.t, sizeof(float)) == 0) && (std::memcmp(&a.q, &b.q, sizeof(float)) == 0) &&
 			       (std::memcmp(&a.u, &b.u, sizeof(a.u)) == 0) && (std::memcmp(&a.v, &b.v, sizeof(a.v)) == 0);
 		};
-		if(m_stateApplied && (kind == CSoftwareRasterizer::PRIMITIVE_SPRITE) && same(vertices[0], m_stripSprite[0]) && same(vertices[1], m_stripSprite[1]))
+		const auto& ns = m_state;
+		bool opaque = !(ns.alphaBlend || (ns.fbmsk != 0) || ns.date || (ns.ate && (ns.atst != ALPHA_TEST_ALWAYS)) || (ns.zte && (ns.ztst != DEPTH_TEST_ALWAYS)));
+		if(m_stateApplied && (kind == CSoftwareRasterizer::PRIMITIVE_SPRITE) && same(vertices[0], m_stripSprite[0]) && same(vertices[1], m_stripSprite[1]) &&
+		   (!opaque || StripCoverContinues(ns, vertices[0], vertices[1])))
 		{
+			if(opaque)
+			{
+				//The cover moves on to this column, as it would have before this sprite's draw
+				SkipOverwrittenRows(vertices[0], vertices[1]);
+				g_stripMergesOpaque++;
+			}
 			const auto& s = m_state;
 			m_stripUnion[0] = std::min(m_stripUnion[0], s.scax0);
 			m_stripUnion[2] = std::max(m_stripUnion[2], s.scax1);

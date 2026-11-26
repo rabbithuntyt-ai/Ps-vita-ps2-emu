@@ -758,6 +758,22 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
       during this churn, but 12 runs don't prove them gone.
   - `world_uniforms_used` (on, exact): world draws upload only the uniform slots in use (on
     the Vita, 7 vec4s instead of 112). No separate fps measurement.
+- **`strip_merge_opaque` (on, exact on the PC).** Opaque scissor-column sprites merge too when
+  the strip-cover logic (W1) would only move its covered columns on (no GL work); that step runs
+  as it would have. PC: 2,286 more merges, fixed-function draws 34,869 to 32,583, screenshots
+  identical. About 0.5 ms per game frame: not measured on its own on the Vita.
+- **Read-backs and uploads, what they are (PC diagnostics, 25 Nov 2026).**
+  - About 45 ms per game frame on the Vita (download 25, upload 20).
+  - RE4 streams its textures and palettes every frame into 0x348000-0x3F0000. That is the same
+    memory its post-processing targets use (0x310000 512x512, which reaches 0x410000;
+    0x348000 128x512).
+  - The blur pass draws the targets. Later uploads overwrite that memory: each one over a
+    target still dirty reads its rows back first (37M of 44M read-back pixels per run).
+  - The targets are then recreated and painted over with opaque strips.
+  - Reading back only to the nearer edge of the dirty rectangle was tried: the rest is read
+    back later in the frame anyway (43.4M against 44.0M pixels), so it was not kept.
+  - The fix is a deferred read-back: remember the pages a transfer overwrote, and read the
+    rest back only if it is needed before it is painted over.
 - **Crashes in vitaGL texture memory (pre-existing).**
   - R24f: OnDraw → FindTarget → AllocateTargetGl → glTexImage2D → vitaGL `gpu_alloc_texture` →
     fault in SceLibKernel (pc e000e434, the same as five earlier dumps). vitaGL failed to

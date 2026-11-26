@@ -288,6 +288,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--all-world-uniforms")) CGSH_Hardware::g_worldUniformsUsed = false; //world draws upload all 16 uniform slots
 		else if(!std::strcmp(argv[i], "--no-target-pool-lru")) CGSH_Hardware::g_targetPoolLru = false; //full pool deletes the released target; no ageing
 		else if(!std::strcmp(argv[i], "--target-pool-min-age") && (i + 1 < argc)) CGSH_Hardware::g_targetPoolMinAge = std::atoi(argv[++i]);
+		else if(!std::strcmp(argv[i], "--no-strip-merge-opaque")) CGSH_Hardware::g_stripMergeOpaque = false; //opaque strip sprites each their own draw
 		else if(!std::strcmp(argv[i], "--feed-shapes")) CGSH_Hardware::g_feedShapes = true; //host to local transfers by format, size and alignment
 		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
 		else if(!std::strcmp(argv[i], "--reuse-scan")) CVpu::g_reuseScan = CGSHandler::g_shadowRegs = true; //relayed GIF data repeated across frames
@@ -674,7 +675,7 @@ int main(int argc, char** argv)
 				for(int k = 0; k < 4; k++)
 					std::printf("GL draws, %s: %llu, vertices or indices %llu\n", kinds[k], (unsigned long long)CGSH_Hardware::g_drawsByKind[k], (unsigned long long)CGSH_Hardware::g_drawElementsByKind[k]);
 				std::printf("world batches that joined the open slot: %llu\n", (unsigned long long)CGSH_Hardware::g_worldSlotShares);
-				std::printf("sprites that joined the previous column's draw: %llu\n", (unsigned long long)CGSH_Hardware::g_stripMerges);
+				std::printf("sprites that joined the previous column's draw: %llu (opaque: %llu)\n", (unsigned long long)CGSH_Hardware::g_stripMerges, (unsigned long long)CGSH_Hardware::g_stripMergesOpaque);
 				if(CGSH_Hardware::g_stateBreaks)
 				{
 					std::vector<std::pair<uint64, std::string>> breaks;
