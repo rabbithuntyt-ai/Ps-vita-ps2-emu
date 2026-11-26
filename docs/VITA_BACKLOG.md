@@ -29,7 +29,7 @@ sound, then measure what was built blind, then the new work. Background and numb
    at about 4.2 steady game fps (the last result, R55c: 4.17). Look at a few frame dumps
    (`DUMP=20`).
 
-## 2. A/B the changes built while it was offline (all off by default, all exact on the PC)
+## 2. A/B the changes built while it was offline (all off by default, all exact on the PC; "src" = in this repository, not a Play patch)
 
 | Switch | Patch | What it should move | Also check |
 |---|---|---|---|
@@ -37,6 +37,8 @@ sound, then measure what was built blind, then the new work. Background and numb
 | `vif_ring_kb=256`, `512` against `4096` | 0131 | Emulation thread `VIFcopy` (20 ms) and the worker's `VIFunpack`: a ring that fits the L2 | `ringWaits` in perf.csv; VU1 wait not worse |
 | `image_no_copy=1` | 0132 | DIRECT image data to the GS by reference: worker `VIFdirect` (19 ms), the relay | Frame dumps right (texture uploads) |
 | `vif_merge=1` | 0133 | Emulation thread `VIFqueue` (13 ms) and `VIFwake`; worker `VIFcmd` (13 ms). Ring records -41% (RE4), -45% (SH2) | - |
+| `clut_load_keep_batch=1` | src | GS thread GL draw cost: SH2 fixed function draws -62% to -83%. Measure on SH2 too | Frame dumps right (palette textures) |
+| `pump_keep_batch=1` | src | GS thread GL draw cost: with the CLUT switch SH2 draws -91% (459 to 39 a game frame), RE4 -18% | UI and overlay still draw right; nothing drawn late after a flip |
 | `spu_adma_full_fast=1` | 0134 | Emulation thread `SPUread` (~7 ms, all waiting). Paused SPU DMAs -92% (RE4), -95% (SH2) | `spu_wait_ms` and `spu_read_waits` in perf.csv; listen for audio glitches |
 
 - Turn on as the global default whatever is exact and cuts its section time, even if game fps

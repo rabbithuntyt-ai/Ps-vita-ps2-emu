@@ -1049,6 +1049,48 @@ headers and comments. The ideas worth testing are in the brief's "Not done yet" 
   the first, and any game whose sound driver keeps restarting a full input DMA gains from the
   second. Neither is measured on the Vita yet.
 
+### GL draws: batches no longer cut by CLUT reloads and mailbox pumps (26 Nov 2026, `clut_load_keep_batch`, `pump_keep_batch`, both off)
+
+- **Why draws:** each GL draw costs about 25-60 µs in vitaGL on the Vita, whatever the game. The
+  number of draws is the same on the PC, so it can be measured without the Vita.
+- **New diagnostic (host `--flush-sites`):** fixed function draws counted by the `FlushBatch`
+  call that ended them (a default `__builtin_LINE()` argument, no change at the call sites). The
+  host's GS statistics now print for every run; they were inside the async VIF1 block.
+- **Silent Hill 2 (PC, threaded VU1 as its profile; boot to walking outside the restroom, 5,300
+  vblanks, 2,528 game frames):** 1,160,111 fixed function draws, about 459 a game frame.
+  - 797,860 ended at a TEX0 that loads the CLUT (`SyncCLUT`, CLD != 0). SH2 reloads a CLUT before
+    nearly every draw, and it is nearly always the same one.
+  - 332,070 ended at the end of a mailbox pump (`Pump`). The GS thread flushes whenever its queue
+    runs empty, so where draws are cut depends on thread timing.
+  - Only 8,477 ended at a state change.
+- **RE4 (same walk as always):** 32,521 fixed function draws. 15,788 ended at a CLUT load, 9,719
+  at a state change.
+- **`clut_load_keep_batch`:** a CLUT load ends the batch only when a render target holds any of
+  the CLUT's 1 KB of GS memory. There, a read-back might need what the batch draws. When no target
+  holds it, the load reads memory that no pending draw can change, and the hash check right after
+  it still ends the batch when the CLUT it loaded differs.
+- **`pump_keep_batch`:** the frontend draws on the GS thread's GL context only between pump
+  loops, not between the pumps inside one. The Vita's main loop pumps until a flip or 16 ms; the
+  host's main loop draws nothing. A caller in such a loop passes `keepBatch`: the batch stays open
+  across pumps, is flushed at a flip, and `FinishPumps` flushes it before the frontend draws. Other
+  pump callers (state loads, waits in `EmuSession`) are unchanged.
+- **Draws (PC):**
+
+| Run | SH2 threaded VU1 | SH2 inline | RE4 |
+|---|---|---|---|
+| both off | 1,160,111 | 886,446 | 32,521 |
+| `clut_load_keep_batch` | 445,967 (-62%) | 154,057 (-83%) | - |
+| `pump_keep_batch` | 849,358 (-27%) | 847,401 | - |
+| both | 99,842 (-91%, 39 a game frame) | 97,521 (-89%) | 26,738 (-18%) |
+
+- **Exact:** SH2 with threaded VU1 does not repeat itself in gameplay (two runs with both off
+  differ in 19 shots), so SH2 was checked fully inline, where two runs with both off are identical.
+  Each switch alone and both together give the same 50-51 shots as off. The one exception is the
+  same movie shot that also differs between two off runs (at most 2 levels). RE4: all shots
+  identical with both on.
+- **Vita:** not measured (offline); the eboot builds. Expected: SH2's GS thread spends about 420
+  fewer draws a game frame in vitaGL (about 10-25 ms at 25-60 µs each); RE4 about 38 fewer.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an

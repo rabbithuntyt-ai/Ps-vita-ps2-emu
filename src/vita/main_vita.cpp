@@ -445,6 +445,8 @@ namespace
 		else if(key == "feed_prefetch") GsTransferWrite::g_prefetch = value != 0; //transfer writes prefetch the next blocks' source rows (on)
 		else if(key == "feed_neon") GsTransferWrite::g_columns = value != 0; //PSMCT32 transfer blocks written by columns with NEON (exact; off until measured)
 		else if(key == "spu_adma_full_fast") Iop::CSubSystem::g_fastSpuAdmaFull = value != 0; //ADMA into a full input buffer answered without pausing the mixer (off until measured)
+		else if(key == "pump_keep_batch") CGSH_Hardware::g_pumpKeepBatch = value != 0; //the GS batch stays open across pumps, flushed at flips (exact on the PC; off until measured)
+		else if(key == "clut_load_keep_batch") CGSH_Hardware::g_clutLoadKeepBatch = value != 0; //CLUT loads end the batch only when a target holds CLUT memory or the CLUT changes (exact on the PC; off until measured)
 		else if(key == "vif_merge") CVpu::g_asyncMerge = value != 0; //DMA tag records joined with their data records in the VIF1 ring (exact on the PC; off until measured)
 		else if(key == "vif_ring_kb") CVpu::g_asyncRingSize = static_cast<uint32>(value) * 1024; //VIF1 ring size in KB (power of 2, >= 128; 4096)
 		else if(key == "image_no_copy") CGSHandler::g_imageNoCopy = value != 0; //DIRECT image data to the GS thread without a copy (exact; off until measured)
@@ -1409,8 +1411,9 @@ namespace
 				bool flipped = false;
 				while(!flipped && (sceKernelGetProcessTimeWide() - start < 16000))
 				{
-					flipped = gs->Pump(4);
+					flipped = gs->Pump(4, CGSH_Hardware::g_pumpKeepBatch); //nothing else draws in this loop
 				}
+				if(CGSH_Hardware::g_pumpKeepBatch) gs->FinishPumps(); //the UI draws next
 				mpegShadow.Poll();
 				if(flipped)
 				{

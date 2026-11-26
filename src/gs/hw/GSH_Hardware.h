@@ -55,7 +55,12 @@ public:
 	// Runs queued GS work on the calling thread, which must own the GL
 	// context. Waits up to timeoutMs for work when idle and returns after a
 	// frame was presented or the queue ran empty. True if a frame was flipped.
-	bool Pump(uint32 timeoutMs);
+	bool Pump(uint32 timeoutMs, bool keepBatch = false);
+	// pump_keep_batch: a caller that pumps in a loop with nothing else drawing on the context in
+	// between passes keepBatch = true; the batch then stays open across pumps (it is flushed when a
+	// frame is flipped), and the caller calls FinishPumps before it draws or does anything else
+	void FinishPumps();
+	static inline bool g_pumpKeepBatch = false;
 
 	// Frees GL objects; call on the GL thread before the handler is destroyed
 	// (the handler itself is deleted on the emulation thread).
@@ -258,6 +263,13 @@ public:
 	static inline bool g_stripMergeOpaque = true; //strip_merge_opaque: opaque sprites continuing a strip cover too
 	static inline uint64 g_stripMergesOpaque = 0; //of those: opaque sprites continuing a strip cover
 	static inline uint64 g_stripMerges = 0; //sprites drawn by joining the previous column's draw (whole run)
+	//host --flush-sites: fixed function and batch program draws by the FlushBatch call (source line) that ended them
+	static inline std::map<int, uint64>* g_flushSites = nullptr;
+	//clut_load_keep_batch: a TEX0 that loads the CLUT ends the batch only when a render target overlaps
+	//the CLUT's memory (a read-back might need what the batch draws) or the CLUT it loads differs
+	//(the hash check after the load); Silent Hill 2 reloads the same CLUT before most draws
+	static inline bool g_clutLoadKeepBatch = false;
+	static inline uint64 g_clutLoadsKept = 0; //CLUT loads that kept the batch open (whole run)
 	static inline bool g_stateBreaks = false; //host --state-breaks: fixed function draws ended by a state change, by the fields that changed
 	static inline std::map<std::string, std::pair<uint64, uint64>> g_stateBreakCounts; //fields: draws, vertices
 	static inline uint64 g_drawsWithClippedWorld = 0, g_drawsWithClippedWorldVertices = 0; //fixed function draws carrying CPU-clipped world triangles
@@ -859,7 +871,7 @@ private:
 	void SetupAlphaCombiner(bool fix);
 	void SetupFog();
 	void BindTexture();
-	void FlushBatch();
+	void FlushBatch(int line = __builtin_LINE());
 	void AddVertex(const CSoftwareRasterizer::VERTEX&);
 
 	OPTIONS m_options;
@@ -877,6 +889,7 @@ private:
 
 	CSoftwareRasterizer::STATE m_state;
 	bool m_stateApplied = false;
+	bool m_frontendMayDraw = true; //pump_keep_batch: the frontend may have drawn since the last pump
 	bool m_drawNothing = false;
 	TARGET* m_currentTarget = nullptr;
 	const TARGET* m_diagLastTarget = nullptr;

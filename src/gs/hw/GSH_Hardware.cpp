@@ -362,7 +362,7 @@ CGSHandler::FactoryFunction CGSH_Hardware::GetFactoryFunction(const OPTIONS& opt
 // Lifetime
 //-----------------------------------------------------------------------------
 
-bool CGSH_Hardware::Pump(uint32 timeoutMs)
+bool CGSH_Hardware::Pump(uint32 timeoutMs, bool keepBatch)
 {
 	{
 		GsProfile::CScope gsIdle(GsProfile::SECTION_IDLE);
@@ -371,18 +371,30 @@ bool CGSH_Hardware::Pump(uint32 timeoutMs)
 	GsProfile::CScope gsSection(GsProfile::SECTION_OTHER);
 	uint64 pumpStart = NowUs();
 	// The frontend draws on the same context between pumps.
-	m_stateApplied = false;
+	if(m_frontendMayDraw) m_stateApplied = false;
+	m_frontendMayDraw = false;
 	while(m_mailBox.IsPending() && !m_flipped)
 	{
 		m_mailBox.ReceiveCall();
 		g_mailCalls++;
 	}
-	FlushBatch();
-	EndRetainedRun(); //the frontend draws on this context between pumps
+	if(!keepBatch || m_flipped)
+	{
+		FlushBatch();
+		EndRetainedRun(); //the frontend draws on this context between pumps
+		m_frontendMayDraw = true;
+	}
 	GetTimes().pumpUs += NowUs() - pumpStart;
 	bool flipped = m_flipped;
 	m_flipped = false;
 	return flipped;
+}
+
+void CGSH_Hardware::FinishPumps()
+{
+	FlushBatch();
+	EndRetainedRun();
+	m_frontendMayDraw = true;
 }
 
 void CGSH_Hardware::ReleaseGpu()
@@ -2447,7 +2459,17 @@ void CGSH_Hardware::SyncCLUT(const TEX0& tex0)
 	ROUND_TRIP_CAUSE roundTripCause(m_roundTripCause, 8);
 	if(tex0.nCLD != 0)
 	{
-		FlushBatch();
+		bool keep = false;
+		if(g_clutLoadKeepBatch)
+		{
+			//No target holds any of the CLUT's memory: nothing to read back, whatever the batch draws
+			keep = true;
+			uint32 rowBegin = 0, rowEnd = 0;
+			for(auto& target : m_targets)
+				if(BytesToRows(*target, tex0.GetCLUTPtr(), 0x400, rowBegin, rowEnd)) { keep = false; break; }
+			if(keep && !m_batch.empty()) g_clutLoadsKept++;
+		}
+		if(!keep) FlushBatch();
 		if(g_readbackLiveness) LivenessRead(tex0.GetCLUTPtr(), 0x400, 1);
 		DownloadTargetsOverlapping(tex0.GetCLUTPtr(), 0x400);
 	}
@@ -5475,11 +5497,13 @@ void CGSH_Hardware::FlushPoints()
 	m_points.clear();
 }
 
-void CGSH_Hardware::FlushBatch()
+void CGSH_Hardware::FlushBatch(int line)
 {
 	bool unionActive = m_stripUnionActive, expecting = m_stripExpectSprite;
 	m_stripUnionActive = m_stripExpectSprite = false;
+	uint64 drawsBefore = g_flushSites ? (g_drawsByKind[0] + g_drawsByKind[1]) : 0;
 	FlushBatchImpl();
+	if(g_flushSites && (g_drawsByKind[0] + g_drawsByKind[1] != drawsBefore)) (*g_flushSites)[line] += g_drawsByKind[0] + g_drawsByKind[1] - drawsBefore;
 	m_stripMergeOk = false;
 	if(unionActive || expecting)
 	{

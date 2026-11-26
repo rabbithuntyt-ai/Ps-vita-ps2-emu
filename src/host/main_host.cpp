@@ -311,6 +311,9 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--vif-ring-kb") && (i + 1 < argc)) CVpu::g_asyncRingSize = static_cast<uint32>(std::atoi(argv[++i])) * 1024; //VIF1 ring size (power of 2, >= 128)
 		else if(!std::strcmp(argv[i], "--spu-slow-reads")) Iop::CSubSystem::g_spuSlowCounts = new std::map<uint32, uint64>(); //SPU reads and DMAs that pause the mixer, by address
 		else if(!std::strcmp(argv[i], "--spu-adma-full-fast")) Iop::CSubSystem::g_fastSpuAdmaFull = true; //ADMA into a full input buffer answered without pausing the mixer
+		else if(!std::strcmp(argv[i], "--flush-sites")) CGSH_Hardware::g_flushSites = new std::map<int, uint64>(); //fixed function draws by the FlushBatch call that ended them
+		else if(!std::strcmp(argv[i], "--pump-keep-batch")) CGSH_Hardware::g_pumpKeepBatch = true; //the batch stays open across GS pumps (flushed at flips)
+		else if(!std::strcmp(argv[i], "--clut-load-keep-batch")) CGSH_Hardware::g_clutLoadKeepBatch = true; //CLUT loads end the batch only when needed
 		else if(!std::strcmp(argv[i], "--vif-merge")) CVpu::g_asyncMerge = true; //DMA tag records joined with their data records in the VIF1 ring
 		else if(!std::strcmp(argv[i], "--fine-timers")) CGSH_Hardware::g_fineTimers = true; //per batch timers: retained world segments printed at the end
 		else if(!std::strcmp(argv[i], "--feed-shapes")) CGSH_Hardware::g_feedShapes = true; //host to local transfers by format, size and alignment
@@ -369,7 +372,8 @@ int main(int argc, char** argv)
 
 	// The GPU renderer runs on this thread.
 	CEmuSession* sessionPtr = nullptr;
-	std::function<void(uint32_t)> pump = [](uint32_t timeoutMs) { std::this_thread::sleep_for(std::chrono::milliseconds(timeoutMs)); };
+	std::function<void(uint32_t, bool)> pump = [](uint32_t timeoutMs, bool) { std::this_thread::sleep_for(std::chrono::milliseconds(timeoutMs)); };
+	std::function<void()> finishPumps = []() {};
 #ifdef VITAPS2_HAS_GL
 	OSMesaContext glContext = nullptr;
 	std::vector<uint32_t> glWindow(16 * 16);
@@ -391,11 +395,14 @@ int main(int argc, char** argv)
 		auto hwGs = [&sessionPtr]() -> CGSH_Hardware* {
 			return sessionPtr ? static_cast<CGSH_Hardware*>(sessionPtr->GetVm()->GetGSHandler()) : nullptr;
 		};
-		pump = [hwGs](uint32_t timeoutMs) {
-			if(auto gs = hwGs()) gs->Pump(timeoutMs);
+		pump = [hwGs](uint32_t timeoutMs, bool keepBatch) {
+			if(auto gs = hwGs()) gs->Pump(timeoutMs, keepBatch);
 			else std::this_thread::sleep_for(std::chrono::milliseconds(timeoutMs));
 		};
-		config.gsPump = [pump]() { pump(2); };
+		finishPumps = [hwGs]() {
+			if(auto gs = hwGs()) gs->FinishPumps();
+		};
+		config.gsPump = [pump]() { pump(2, false); };
 		config.gsShutdown = [hwGs]() {
 			if(auto gs = hwGs()) gs->ReleaseGpu();
 		};
@@ -468,12 +475,17 @@ int main(int argc, char** argv)
 		{
 			if(session.GetFrames().Fetch(serial, pixels, width, height)) presented++;
 			if(std::chrono::steady_clock::now() - start > std::chrono::seconds(timeoutSeconds)) break;
-			pump(5);
+#ifdef VITAPS2_HAS_GL
+			pump(5, CGSH_Hardware::g_pumpKeepBatch); //nothing else draws on the context in this loop
+#else
+			pump(5, false);
+#endif
 			if(!loadStatePath.empty() && (session.GetVmFrameCount() >= 120))
 			{
+				finishPumps();
 				// The VM loads on its own thread; the GS keeps being pumped meanwhile.
 				auto loading = session.GetVm()->LoadState(fs::path(loadStatePath));
-				while(loading.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) pump(2);
+				while(loading.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) pump(2, false);
 				bool loaded = loading.get();
 				std::printf("state %s: %s\n", loadStatePath.c_str(), loaded ? "loaded" : "FAILED");
 				std::fflush(stdout);
@@ -678,8 +690,6 @@ int main(int argc, char** argv)
 			std::printf("image data to the GS: %.1f MB by reference, %.1f MB copied\n", CGSHandler::g_imageNoCopyBytes / 1048576.0, CGSHandler::g_imageCopyBytes / 1048576.0);
 			std::printf("relay: %llu kicks (%.1f MB), %llu DIRECT (%.1f MB), %llu replaced; %llu register writes\n",(unsigned long long)a.kicks.load(), a.kickBytes.load() / 1048576.0,
 			            (unsigned long long)a.directs.load(), a.directBytes.load() / 1048576.0, (unsigned long long)a.customs.load(), (unsigned long long)CGSHandler::g_writeBufferTotal);
-			if(Iop::CSubSystem::g_spuSlowCounts)
-				for(auto& [addr, n] : *Iop::CSubSystem::g_spuSlowCounts) std::printf("spu slow read %08X: %llu\n", addr, (unsigned long long)n);
 			std::printf("unpacked by runs: %llu values\n", (unsigned long long)CVif::g_bulkValues);
 			if(CVpu::g_reuseScan)
 				for(int k = 0; k < 2; k++)
@@ -692,6 +702,11 @@ int main(int argc, char** argv)
 				for(int m = 0; m < 4; m++)
 					std::printf("reuse DIRECT mode %d: %.1f MB, %.1f MB repeated\n", m, CVpu::g_reuseDirectMode[m][0] / 1048576.0, CVpu::g_reuseDirectMode[m][1] / 1048576.0);
 			if(Re4Skin::g_modelCheck) Re4Skin::PrintModelStats();
+		}
+		if(Iop::CSubSystem::g_spuSlowCounts)
+			for(auto& [addr, n] : *Iop::CSubSystem::g_spuSlowCounts) std::printf("spu slow read %08X: %llu\n", addr, (unsigned long long)n);
+		//GS statistics: printed for every run (they were inside the async VIF1 block)
+		{
 			std::printf("host to local transfers: %llu, changing no byte of GS memory: %llu\n", (unsigned long long)CGSH_Hardware::g_transfersInTotal, (unsigned long long)CGSH_Hardware::g_unchangedTransfersTotal);
 			std::printf("alpha CLUT passes: %llu, results reused: %llu\n", (unsigned long long)CGSH_Hardware::g_alphaClutPassesTotal, (unsigned long long)CGSH_Hardware::g_alphaClutReuses);
 			std::printf("solid read-backs: %llu (%llu pixels), colours learned %llu, pixels differing from the GPU %llu\n", (unsigned long long)CGSH_Hardware::g_solidReadbacks, (unsigned long long)CGSH_Hardware::g_solidReadbackPixels, (unsigned long long)CGSH_Hardware::g_solidLearned, (unsigned long long)CGSH_Hardware::g_solidReadbackMismatches);
@@ -728,6 +743,14 @@ int main(int argc, char** argv)
 					}
 				}
 				std::printf("sprites that joined the previous column's draw: %llu (opaque: %llu)\n", (unsigned long long)CGSH_Hardware::g_stripMerges, (unsigned long long)CGSH_Hardware::g_stripMergesOpaque);
+				if(CGSH_Hardware::g_clutLoadKeepBatch) std::printf("CLUT loads that kept the batch open: %llu\n", (unsigned long long)CGSH_Hardware::g_clutLoadsKept);
+				if(CGSH_Hardware::g_flushSites)
+				{
+					std::vector<std::pair<uint64, int>> sites;
+					for(const auto& [line, n] : *CGSH_Hardware::g_flushSites) sites.emplace_back(n, line);
+					std::sort(sites.rbegin(), sites.rend());
+					for(const auto& [n, line] : sites) std::printf("draws ended at GSH_Hardware.cpp:%d: %llu\n", line, (unsigned long long)n);
+				}
 				if(CGSH_Hardware::g_stateBreaks)
 				{
 					std::vector<std::pair<uint64, std::string>> breaks;
