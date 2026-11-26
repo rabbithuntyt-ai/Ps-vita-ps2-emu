@@ -1,0 +1,106 @@
+diff --git a/Source/gs/GSHandler.h b/Source/gs/GSHandler.h
+--- a/Source/gs/GSHandler.h
++++ b/Source/gs/GSHandler.h
+@@ -856,6 +856,13 @@
+ 	//it has none for [data, data + length); else it holds length + 0x10 readable bytes
+ 	//and stays alive as long as the returned pointer.
+ 	static inline std::function<std::shared_ptr<const uint8>(const void* data, uint32 length)> g_imageDataSource;
++	//image_no_copy (off until measured on the Vita): while the EE thread relays a VIF1 DIRECT packet
++	//(CVpu::FlushPendingXgKicks), this holds the packet's storage (with 0x10 bytes of padding after it);
++	//image data inside it goes to the GS thread as a reference to it instead of a copy (Resident Evil
++	//4: ~1.5 MB of textures a game frame, about 200 allocations)
++	static inline const std::shared_ptr<std::vector<uint8>>* g_imageDataOwner = nullptr;
++	static inline bool g_imageNoCopy = false;
++	static inline uint64 g_imageNoCopyBytes = 0, g_imageCopyBytes = 0;
+ 	//GS thread section times (microseconds, inclusive: draws inside count too) and counts, when
+ 	//g_sectionClock is set (VitaPS2 perf.csv: gs_feed_ms, gs_regs_ms, gs_reg_writes...)
+ 	static inline uint64 (*g_sectionClock)() = nullptr;
+diff --git a/Source/gs/GSHandler.cpp b/Source/gs/GSHandler.cpp
+--- a/Source/gs/GSHandler.cpp
++++ b/Source/gs/GSHandler.cpp
+@@ -667,6 +667,28 @@
+ 		}
+ 	}
+ 
++	if(g_imageNoCopy && g_imageDataOwner && *g_imageDataOwner)
++	{
++		//image_no_copy: inside the packet being relayed (its storage keeps 0x10 bytes after the
++		//data, as the copy below does)
++		const auto& owner = *g_imageDataOwner;
++		const uint8* begin = owner->data();
++		const uint8* bytes = reinterpret_cast<const uint8*>(data);
++		if((bytes >= begin) && (bytes + length + 0x10 <= begin + owner->size()))
++		{
++			std::shared_ptr<const uint8> view(owner, bytes);
++			g_imageNoCopyBytes += length;
++			SendGSCall(
++			    [this, view, length]() {
++				    uint64 feedStart = g_sectionClock ? g_sectionClock() : 0;
++				    FeedImageDataImpl(view.get(), length);
++				    if(g_sectionClock) { g_feedUs += g_sectionClock() - feedStart; g_feedCalls++; g_feedBytes += length; }
++			    });
++			return;
++		}
++	}
++	g_imageCopyBytes += length;
++
+ 	//Allocate 0x10 more bytes to allow transfer handlers
+ 	//to read beyond the actual length of the buffer (ie.: PSMCT24)
+ 
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -334,6 +334,7 @@
+ 	struct PENDING_KICK
+ 	{
+ 		std::vector<uint8> packet;
++		std::shared_ptr<std::vector<uint8>> shared; //image_no_copy: a DIRECT packet's storage, 0x10 bytes of padding after it
+ 		std::shared_ptr<void> custom; //from g_programReplacement
+ 		uint8 path = 1;               //2: VIF1 DIRECT data (asynchronous VIF1)
+ 		int8 mask = -1;               //0 or 1: MSKPATH3 (asynchronous VIF1)
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -1,3 +1,4 @@
++#include "gs/GSHandler.h"
+ #include <chrono>
+ #include <unordered_map>
+ #include "../EmuProfile.h"
+@@ -391,7 +392,18 @@
+ void CVpu::QueueDirect(const uint8* data, uint32 size)
+ {
+ 	PENDING_KICK kick;
+-	kick.packet.assign(data, data + size);
++	if(CGSHandler::g_imageNoCopy)
++	{
++		//image_no_copy: shared storage the GS thread can keep a reference to (image data in it is not
++		//copied again); 0x10 zero bytes after it, as FeedImageData's own copies have
++		auto storage = std::make_shared<std::vector<uint8>>();
++		storage->reserve(size + 0x10);
++		storage->assign(data, data + size);
++		storage->resize(size + 0x10, 0);
++		kick.shared = std::move(storage);
++	}
++	else
++		kick.packet.assign(data, data + size);
+ 	kick.path = 2;
+ 	g_asyncStats.directs.fetch_add(1, std::memory_order_relaxed);
+ 	g_asyncStats.directBytes.fetch_add(size, std::memory_order_relaxed);
+@@ -529,11 +541,14 @@
+ 			//VIF1 DIRECT data (asynchronous VIF1)
+ 			EmuProfile::CScope directScope(EmuProfile::SECTION_RELAY_DIRECT);
+ 			CGsPacketMetadata directMetadata(2);
+-			uint32 size = static_cast<uint32>(kick->packet.size());
+-			if(g_reuseScan && (m_kickOffset == 0)) NoteReuse(1, kick->packet.data(), size, m_gif.GetGsHandler()->HashShadowState());
++			const uint8* bytes = kick->shared ? kick->shared->data() : kick->packet.data();
++			uint32 size = kick->shared ? static_cast<uint32>(kick->shared->size() - 0x10) : static_cast<uint32>(kick->packet.size());
++			if(g_reuseScan && (m_kickOffset == 0)) NoteReuse(1, bytes, size, m_gif.GetGsHandler()->HashShadowState());
+ 			if(m_kickOffset < size)
+ 			{
+-				m_kickOffset += m_gif.ProcessMultiplePackets(kick->packet.data(), size, m_kickOffset, size, directMetadata);
++				CGSHandler::g_imageDataOwner = kick->shared ? &kick->shared : nullptr;
++				m_kickOffset += m_gif.ProcessMultiplePackets(bytes, size, m_kickOffset, size, directMetadata);
++				CGSHandler::g_imageDataOwner = nullptr;
+ 				if(m_kickOffset < size) return; //the GS holds a signal: the rest goes later
+ 			}
+ 			m_kickOffset = 0;
