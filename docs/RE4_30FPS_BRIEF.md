@@ -234,6 +234,18 @@ frame dumps) or results compared bit for bit.
       - +6.5%; the two sets don't overlap.
     - `feedWrite` went from 34 to 22-23 ms, and the frame from 281 to 264 ms. The default stays 1
       for games that resend the same images (menus).
+17. **World triangles the CPU clipper would return nothing for skip it (`clip_reject`, on;
+    exact).**
+    - About 3,300 triangles per game frame touch the clip volume and went through the CPU
+      clipper, at 4.2 µs each. 86% of them came out empty.
+    - The early reject follows the clipper's own planes and distances.
+    - PC: 0 mismatches in 415,222 early rejects; identical screenshots.
+    - Vita: `worldClip` 15-16 to 7-8 ms per game frame. Frame rate is unchanged within the
+      spread (3.74 mean both ways), so no speedup is claimed.
+    - Profiling behind it: [PERF_WORK_NOT_DONE.md](PERF_WORK_NOT_DONE.md), "Flush and world
+      draw submission, split".
+    - What the GS thread spends per draw: vitaGL takes about 25 µs per draw call even for VBO
+      draws, so about 790 draws per game frame cost about 26 ms there.
 
 ### VU recompiler (helps every game)
 

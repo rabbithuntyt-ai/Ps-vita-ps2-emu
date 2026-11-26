@@ -675,6 +675,51 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
     - flush 32, world 31 (+ retained 13, skinning 15)
     - targets 28, read-backs 28, uploads 23, image data 22, textures 20
     - other 15, idle 15
+- **Flush and world draw submission, split (R20-R23, Vita, 25 Nov 2026).**
+  - `gs_wait_split=1` (measuring only, off by default): at each 1 ms sample, the profiler thread
+    reads the GS thread's scheduler state, so each GS section splits into running, ready and
+    blocked time. The raw status counts were 86% running, 0.7% ready and 14% waiting, nearly
+    all of the waiting in idle.
+  - Every big GS section is CPU-active. Blocked time is under 1 ms, except textures (3.5 ms).
+  - The old 32 ms "flush" was 11 ms of our own setup plus about 26 ms inside vitaGL's draw
+    calls, all CPU-active.
+  - By draw kind, per game frame:
+
+    | Draw kind | Draws | Time in vitaGL | Per draw |
+    |---|---|---|---|
+    | fixed function | about 300 | 10 ms | 33 µs |
+    | world slot | about 300 | 11-12 ms | 37 µs |
+    | retained world (VBOs, no copy) | about 190 | 4-5 ms | 24 µs |
+
+  - So vitaGL costs about 25 µs per draw even with no vertex copy. The time comes from the
+    number of draws (about 790 per game frame), not from copies.
+  - The old 31 ms "world" section split into:
+    - CPU clipping of triangles touching the clip volume, 14-16 ms: about 3,300 triangles per
+      game frame, of which about 86% (PC) come out empty
+    - the vertex loop, 7 ms
+    - batch end, 7-9 ms: about 2,250 batches, last vertices projected
+    - setup, 2 ms
+  - Skinning batches (18-20 ms) and retained world batches (12-15 ms) are their own sections.
+- **`clip_reject` (on): world triangles the clipper would return nothing for skip it.**
+  - Exact by construction: the clipper keeps the triangle unchanged through planes where all
+    three vertices are inside, and empties it at the first plane where all three are outside.
+    The reject uses the same `k` (one shared helper) and the same distances, in the clipper's
+    plane order.
+  - PC, RE4 walk: 415,222 of 484,224 clipper calls rejected early. The check mode
+    (`--clip-reject-check`) found 0 that the clipper would draw, and the screenshots are
+    identical. A host test checked 92,000 random triangles: 0 wrong.
+  - Vita R24, same build, interleaved: `worldClip` 15-16 → 7-8 ms per game frame.
+  - Steady game fps: 3.74/3.87/3.62 on against 3.65/3.79/3.77 off, a mean of 3.74 for both.
+    The saving is about 2.5% of the frame, inside the run spread, so no speedup is claimed.
+  - R24f (on) crashed at 103 s (next item).
+- **Crashes in vitaGL texture memory (pre-existing).**
+  - R24f: OnDraw → FindTarget → AllocateTargetGl → glTexImage2D → vitaGL `gpu_alloc_texture` →
+    fault in SceLibKernel (pc e000e434, the same as five earlier dumps). vitaGL failed to
+    allocate GPU memory for a new render target.
+  - R21w, at app exit: ~CEmuSession → CGSH_Hardware::ReleaseImpl → glDeleteTextures → fault
+    in SceLibKernel.
+  - Neither path was changed in this work. GPU memory pressure is a separate problem to look
+    into.
 - **R17 baseline (Vita, same build, drain off):** 3.57 and 3.60 steady game fps. R16a/c measured
   3.45/3.46 with the same code paths on another series. Run-to-run conditions move the result by
   about 4%, so no speedup is claimed from this.

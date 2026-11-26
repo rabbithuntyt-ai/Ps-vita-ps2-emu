@@ -279,6 +279,8 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-fast-packed")) CGIF::g_fastPacked = false; //gif_fast_packed=0
 		else if(!std::strcmp(argv[i], "--no-bulk-unpack")) CVif::g_bulkUnpack = false; //bulk_unpack=0
 		else if(!std::strcmp(argv[i], "--no-feed-compare")) GsTransferWrite::g_compare = false; //transfer writes store without comparing
+		else if(!std::strcmp(argv[i], "--no-clip-reject")) CGSH_Hardware::g_clipReject = false; //every clipped world triangle through the CPU clipper
+		else if(!std::strcmp(argv[i], "--clip-reject-check")) CGSH_Hardware::g_clipRejectCheck = true; //rejected triangles clipped anyway: any drawn is a mismatch
 		else if(!std::strcmp(argv[i], "--feed-shapes")) CGSH_Hardware::g_feedShapes = true; //host to local transfers by format, size and alignment
 		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
 		else if(!std::strcmp(argv[i], "--reuse-scan")) CVpu::g_reuseScan = CGSHandler::g_shadowRegs = true; //relayed GIF data repeated across frames
@@ -659,6 +661,16 @@ int main(int argc, char** argv)
 			{
 				if(CGSH_Hardware::g_feedCallsByPsm[psm] == 0) continue;
 				std::printf("image data into psm %02X: %llu calls, %llu KB\n", psm, (unsigned long long)CGSH_Hardware::g_feedCallsByPsm[psm], (unsigned long long)(CGSH_Hardware::g_feedBytesByPsm[psm] / 1024));
+			}
+			{
+				const char* kinds[4] = {"batch program", "fixed function", "world slot", "retained world"};
+				for(int k = 0; k < 4; k++)
+					std::printf("GL draws, %s: %llu, vertices or indices %llu\n", kinds[k], (unsigned long long)CGSH_Hardware::g_drawsByKind[k], (unsigned long long)CGSH_Hardware::g_drawElementsByKind[k]);
+				std::printf("world triangles to the CPU clipper: %llu, rejected before clipping: %llu, of those the clipper would draw: %llu\n", (unsigned long long)CGSH_Hardware::g_worldClipCalls,
+				            (unsigned long long)CGSH_Hardware::g_worldClipRejected, (unsigned long long)CGSH_Hardware::g_clipRejectMismatches);
+				const char* worldKinds[4] = {"retained", "slot", "skinning slot", "other"};
+				for(int k = 0; k < 4; k++)
+					std::printf("world batches, %s: %llu, vertices %llu\n", worldKinds[k], (unsigned long long)CGSH_Hardware::g_worldBatchesByKind[k], (unsigned long long)CGSH_Hardware::g_worldVerticesByKind[k]);
 			}
 			if(CGSH_Hardware::g_feedShapes)
 			{

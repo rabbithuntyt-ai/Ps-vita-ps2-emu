@@ -264,6 +264,11 @@ else()
 	target_link_libraries(gs_block_transfer_tests PRIVATE PlayCore)
 	add_test(NAME gs_block_transfer_tests COMMAND gs_block_transfer_tests)
 
+	# RE4 world triangles: the clipper's early reject against the clipper (clip_reject)
+	add_executable(re4_clip_reject_tests tests/re4_clip_reject_tests.cpp)
+	target_include_directories(re4_clip_reject_tests PRIVATE src/common)
+	add_test(NAME re4_clip_reject_tests COMMAND re4_clip_reject_tests)
+
 	add_executable(jit_cache_tests tests/jit_cache_tests.cpp)
 	target_link_libraries(jit_cache_tests PRIVATE PlayCore)
 	add_test(NAME jit_cache_tests COMMAND jit_cache_tests)

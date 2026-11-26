@@ -241,6 +241,16 @@ public:
 	static inline bool g_fineTimers = false; //per primitive and per batch timers (reg_split, world_seg, world_slot_ms): fine_timers=1; each costs two clock reads
 	static inline bool g_feedShapes = false; //host --feed-shapes: host to local transfers counted by format, size and alignment
 	static inline std::map<std::string, std::pair<uint64, uint64>> g_feedShapeCounts; //shape: transfers, bytes
+	//GL draw calls by kind (0 generic batch with the batch program, 1 fixed function, 2 world slot draw, 3 retained world
+	//draw) and the vertices/indices they pass (whole run; Vita gs_draws.txt, host end of run)
+	static inline uint64 g_drawsByKind[4] = {}, g_drawElementsByKind[4] = {};
+	//World batches by path (0 retained, 1 slot, 2 skinning slot, 3 other: CPU path or nothing drawn) and their vertices
+	static inline uint64 g_worldBatchesByKind[4] = {}, g_worldVerticesByKind[4] = {};
+	static inline uint64 g_worldClipCalls = 0; //slot path triangles sent to the CPU clipper (whole run)
+	//clip_reject (on): triangles the clipper would return nothing for (Re4Vu1::ClipRejects) skip it;
+	//g_clipRejectCheck (host --clip-reject-check) runs the clipper on them anyway and counts any it draws
+	static inline bool g_clipReject = true, g_clipRejectCheck = false;
+	static inline uint64 g_worldClipRejected = 0, g_clipRejectMismatches = 0;
 	static inline uint64 g_feedBytesByPsm[64] = {}, g_feedCallsByPsm[64] = {}; //image data written, by destination format (whole run)
 	static inline uint64 g_transfersInTotal = 0, g_unchangedTransfersTotal = 0; //host to local transfers, and those that changed no byte (whole run)
 	static inline uint64 g_applyStateCalls = 0; //state applications (perf.csv apply_calls)

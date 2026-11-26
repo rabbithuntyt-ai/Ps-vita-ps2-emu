@@ -66,19 +66,30 @@ namespace Re4Vu1
 		return flags;
 	}
 
+	// The vertex's scaled position and its clip-space position, as ReadWorldVertex computes them
+	// (one place, so ClipRejects below sees the same k as the clipper)
+	inline VEC4 ScaledPosition(const WORLD_BATCH& batch, const int32_t* r)
+	{
+		return {static_cast<float>(r[0]) * batch.scale, static_cast<float>(r[1]) * batch.scale, static_cast<float>(r[2]) * batch.scale, 1.0f};
+	}
+	inline VEC4 ClipSpace(const WORLD_BATCH& batch, const VEC4& p)
+	{
+		return Transform(batch.clip, p);
+	}
+
 	inline WORLD_VERTEX ReadWorldVertex(const WORLD_BATCH& batch, uint32_t index)
 	{
 		const int32_t* r = batch.raw.data() + index * 12;
 		WORLD_VERTEX out;
 		float pw = static_cast<float>(r[3]);
-		out.p = {static_cast<float>(r[0]) * batch.scale, static_cast<float>(r[1]) * batch.scale, static_cast<float>(r[2]) * batch.scale, 1.0f};
+		out.p = ScaledPosition(batch, r);
 		out.t = {static_cast<float>(r[4]) * (1.0f / 256.0f) + batch.vf31.x, static_cast<float>(r[5]) * (1.0f / 256.0f) + batch.vf31.y,
 		         static_cast<float>(r[6]), pw * batch.vf31.w};
 		out.c = {(static_cast<float>(r[8]) + batch.colorOffset.x) * batch.colorScale.x * batch.colorOffset.w,
 		         (static_cast<float>(r[9]) + batch.colorOffset.y) * batch.colorScale.y * batch.colorOffset.w,
 		         (static_cast<float>(r[10]) + batch.colorOffset.z) * batch.colorScale.z * batch.colorOffset.w, static_cast<float>(r[11])};
 		out.v = Transform(batch.projection, out.p);
-		out.k = Transform(batch.clip, out.p);
+		out.k = ClipSpace(batch, out.p);
 		out.winding = out.t.w;
 		out.restart = (r[7] != 0);
 		out.clipFlags = ClipFlags(out.k);
@@ -133,6 +144,32 @@ namespace Re4Vu1
 		return out;
 	}
 
+	// Whether ClipTriangle returns nothing for the triangle of vertices first..first+2 of a batch
+	// (not a clip-space batch), decided before building them: the clipper keeps the three
+	// vertices unchanged through every plane where all three are inside (no interpolated vertex),
+	// and returns nothing at a plane where all three are outside. So when, in the clipper's plane
+	// order and with its distances, the first plane that is not "all inside" is "all outside",
+	// its result is empty; any other case (a plane cuts the triangle) is left to the clipper.
+	inline float ClipDistance(const VEC4& k, uint32_t plane)
+	{
+		const float* c = &k.x;
+		float value = c[plane >> 1];
+		return (plane & 1) ? (k.w + value) : (k.w - value);
+	}
+	inline bool ClipRejects(const WORLD_BATCH& batch, uint32_t first)
+	{
+		VEC4 k[3];
+		for(uint32_t i = 0; i < 3; i++) k[i] = ClipSpace(batch, ScaledPosition(batch, batch.raw.data() + (first + i) * 12));
+		for(uint32_t plane = 0; plane < 6; plane++)
+		{
+			uint32_t inside = 0;
+			for(uint32_t i = 0; i < 3; i++) inside += (ClipDistance(k[i], plane) >= 0) ? 1 : 0;
+			if(inside == 0) return true;
+			if(inside != 3) return false;
+		}
+		return false;
+	}
+
 	// A triangle clipped against the clip volume (|x|, |y|, |z| <= w of the clip matrix),
 	// as the program's clipping routine does: a convex polygon (up to 9 vertices).
 	inline uint32_t ClipTriangle(const WORLD_VERTEX* in, WORLD_VERTEX* out)
@@ -143,11 +180,7 @@ namespace Re4Vu1
 		int current = 0;
 		for(uint32_t plane = 0; plane < 6; plane++)
 		{
-			auto distance = [plane](const WORLD_VERTEX& v) {
-				const float* k = &v.k.x;
-				float value = k[plane >> 1];
-				return (plane & 1) ? (v.k.w + value) : (v.k.w - value);
-			};
+			auto distance = [plane](const WORLD_VERTEX& v) { return ClipDistance(v.k, plane); };
 			uint32_t outCount = 0;
 			const auto* src = buffers[current];
 			auto* dst = buffers[current ^ 1];

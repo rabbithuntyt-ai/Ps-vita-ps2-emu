@@ -168,6 +168,24 @@ namespace
 	// upper bound on GPU work still queued behind the CPU at that point, not GPU busy time, and
 	// the wait itself slows the run, so only measuring runs use it. Totals go to drain.txt.
 	uint32_t g_drainEvery = 0;
+	// gs_wait_split=1: the profiler thread reads the GS thread's scheduler state with each sample
+	// (GsProfile::g_threadState); the GS thread is the one that runs the session loop
+	bool g_gsWaitSplit = false;
+	SceUID g_gsThreadId = -1;
+	uint64_t g_gsStateCounts[8] = {}; //samples by the lowest set bit of the raw status (check of the mapping)
+	int ReadGsThreadState()
+	{
+		SceKernelThreadInfo info = {};
+		info.size = sizeof(info);
+		if(sceKernelGetThreadInfo(g_gsThreadId, &info) < 0) return 0;
+		unsigned int status = static_cast<unsigned int>(info.status);
+		unsigned int bit = 0;
+		while((bit < 7) && !((status >> bit) & 1)) bit++;
+		g_gsStateCounts[bit]++;
+		if(status & 1) return 0; //RUNNING
+		if(status & 2) return 1; //READY
+		return 2;                //STANDBY, WAITING, SUSPEND...: not runnable
+	}
 	uint64_t g_drainUs = 0, g_drainMaxUs = 0, g_drains = 0, g_drainPresents = 0;
 	constexpr const char* DRAIN_PATH = VITAPS2_DATA_DIR "/drain.txt";
 
@@ -406,6 +424,8 @@ namespace
 		else if(key == "fast_scope") EmuProfile::g_fastScope = value != 0; //profiler scopes find their thread by the thread register (on)
 		else if(key == "gxm_drain_every") g_drainEvery = static_cast<uint32_t>(value); //timed sceGxmFinish after every Nth present (measuring only, 0)
 		else if(key == "feed_compare") GsTransferWrite::g_compare = value != 0; //transfer writes compare old bytes (skips unchanged transfers; on)
+		else if(key == "gs_wait_split") g_gsWaitSplit = value != 0; //GS sections split into running/ready/blocked samples (measuring, off)
+		else if(key == "clip_reject") CGSH_Hardware::g_clipReject = value != 0; //world triangles wholly outside one clip plane skip the CPU clipper (exact; on)
 		else if(key == "gpu_skin") Re4Skin::g_gpuSkin = value != 0; //RE4: one-matrix skinning batches drawn by the GPU world path (off)
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
@@ -818,7 +838,14 @@ namespace
 			if(FILE* selfTest = std::fopen(VITAPS2_DATA_DIR "/selftest.txt", "w"))
 			{
 				//Code paths only this build runs (NEON): checked here against the plain ones
-				std::fprintf(selfTest, "psmt4 blocks: %u of 2000 differ\n", GsTransferWrite::SelfTestPsmt4Blocks(2000));
+				{
+					//The test checks the "changed" result too: with the comparing writes, whatever
+					//feed_compare the game profile set
+					bool savedCompare = GsTransferWrite::g_compare;
+					GsTransferWrite::g_compare = true;
+					std::fprintf(selfTest, "psmt4 blocks: %u of 2000 differ\n", GsTransferWrite::SelfTestPsmt4Blocks(2000));
+					GsTransferWrite::g_compare = savedCompare;
+				}
 				std::fprintf(selfTest, "target pixels: %u of 100 differ\n", TargetPixels::SelfTest(100));
 				{
 					//Host to local transfer writes into a 4 MB GS memory: compare-and-store against store
@@ -876,7 +903,7 @@ namespace
 				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop");
 				//The IOP thread's sections (iop_thread)
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",iopt_%s", EmuProfile::GetSectionName(i));
-				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3,gs_feed_ms,gs_feed_calls,gs_feed_kb,gs_regs_ms,gs_reg_calls,gs_reg_writes,gs_mail_calls,world_ms,targets_pooled,gs_send_ms,gs_send_calls,vif1_readback_ms,vif1_readbacks,vif1_readback_kb,gs_wait_ms,gs_wait_calls,world_hits,world_misses,world_cache_mb,world_runs,world_seg,world_slot_ms,reg_split,apply_calls,draw_calls,apply_split,prim_calls,gs_sections,vu1_sections,gs_wb_peak,gs_wb_overflows");
+				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3,gs_feed_ms,gs_feed_calls,gs_feed_kb,gs_regs_ms,gs_reg_calls,gs_reg_writes,gs_mail_calls,world_ms,targets_pooled,gs_send_ms,gs_send_calls,vif1_readback_ms,vif1_readbacks,vif1_readback_kb,gs_wait_ms,gs_wait_calls,world_hits,world_misses,world_cache_mb,world_runs,world_seg,world_slot_ms,reg_split,apply_calls,draw_calls,apply_split,prim_calls,gs_sections,gs_ready_sections,gs_blocked_sections,vu1_sections,gs_wb_peak,gs_wb_overflows");
 				std::fprintf(perfFile, "\n");
 			}
 		}
@@ -1710,6 +1737,9 @@ namespace
 								lastPrims = CGSH_Hardware::g_primitiveCalls;
 								static uint64 lastGs[GsProfile::SECTION_COUNT] = {};
 								for(unsigned int i = 0; i < GsProfile::SECTION_COUNT; i++) { uint64 n = GsProfile::g_samples[i].load(); std::fprintf(perfFile, "%c%llu", (i == 0) ? ',' : ';', (unsigned long long)(n - lastGs[i])); lastGs[i] = n; }
+								static uint64 lastGsReady[GsProfile::SECTION_COUNT] = {}, lastGsBlocked[GsProfile::SECTION_COUNT] = {};
+								for(unsigned int i = 0; i < GsProfile::SECTION_COUNT; i++) { uint64 n = GsProfile::g_readySamples[i].load(); std::fprintf(perfFile, "%c%llu", (i == 0) ? ',' : ';', (unsigned long long)(n - lastGsReady[i])); lastGsReady[i] = n; }
+								for(unsigned int i = 0; i < GsProfile::SECTION_COUNT; i++) { uint64 n = GsProfile::g_blockedSamples[i].load(); std::fprintf(perfFile, "%c%llu", (i == 0) ? ',' : ';', (unsigned long long)(n - lastGsBlocked[i])); lastGsBlocked[i] = n; }
 								// The VU1 worker's sections (EmuProfile order), shares
 								auto vu1Profile = session->TakeProfile(2);
 								for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, "%c%.3f", (i == 0) ? ',' : ';', vu1Profile.share[i]);
@@ -1852,6 +1882,11 @@ namespace
 			newContent = false;
 			lastPresent = now;
 
+			if(g_gsWaitSplit && !GsProfile::g_threadState)
+			{
+				g_gsThreadId = sceKernelGetThreadId();
+				GsProfile::g_threadState = ReadGsThreadState;
+			}
 			const uint64_t presentStart = sceKernelGetProcessTimeWide();
 			BeginFrame();
 			DrawScreen(screen, settings.stretch);
@@ -1961,6 +1996,28 @@ namespace
 				g_drainUs += drainUs;
 				g_drainMaxUs = std::max(g_drainMaxUs, drainUs);
 				g_drains++;
+			}
+		}
+		GsProfile::g_threadState = nullptr;
+		if(g_gsWaitSplit)
+		{
+			if(FILE* stateFile = std::fopen(VITAPS2_DATA_DIR "/gs_states.txt", "w"))
+			{
+				std::fprintf(stateFile, "GS thread samples by status bit:");
+				for(int i = 0; i < 8; i++) std::fprintf(stateFile, " %d:%llu", i, static_cast<unsigned long long>(g_gsStateCounts[i]));
+				std::fprintf(stateFile, "\n");
+				const char* kinds[4] = {"batch program", "fixed function", "world slot", "retained world"};
+				for(int k = 0; k < 4; k++)
+					std::fprintf(stateFile, "GL draws, %s: %llu, vertices or indices %llu\n", kinds[k], static_cast<unsigned long long>(CGSH_Hardware::g_drawsByKind[k]),
+					             static_cast<unsigned long long>(CGSH_Hardware::g_drawElementsByKind[k]));
+				const char* worldKinds[4] = {"retained", "slot", "skinning slot", "other"};
+				for(int k = 0; k < 4; k++)
+					std::fprintf(stateFile, "world batches, %s: %llu, vertices %llu\n", worldKinds[k], static_cast<unsigned long long>(CGSH_Hardware::g_worldBatchesByKind[k]),
+					             static_cast<unsigned long long>(CGSH_Hardware::g_worldVerticesByKind[k]));
+				std::fprintf(stateFile, "triangles to the CPU clipper: %llu, rejected before clipping: %llu\n", static_cast<unsigned long long>(CGSH_Hardware::g_worldClipCalls),
+				             static_cast<unsigned long long>(CGSH_Hardware::g_worldClipRejected));
+				std::fprintf(stateFile, "game frames: %u\n", CGSH_Hardware::g_gameFrames);
+				std::fclose(stateFile);
 			}
 		}
 		if(g_drains != 0)

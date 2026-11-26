@@ -5,7 +5,7 @@
 # 1 ms samples in that row's interval; sections are exclusive (one current section per thread).
 import csv, sys
 STEADY_T = 25.0
-GS_NAMES = 'idle other registers vertex primitive addvertex state texture target flush upload download transfer world display worldRet worldSkin feedWrite'.split()
+GS_NAMES = 'idle other registers vertex primitive addvertex state texture target flush upload download transfer world display worldRet worldSkin feedWrite glDraw glDrawWorld glDrawRet worldSetup worldVerts worldEnd worldClip'.split()
 EE_NAMES = "other EE VU0 VU1 IOP SPU VIF GIF IPU SIF JIT GSwait idle SPUsync SPUread VIFdirect VIFunpack EEio EEkernel EEticks IOPio IOPkernel IOPticks IOPcounters IOPbios IOPdma IOPwait IOPdrain IOPlag IOPpark VU1relay VIFqueue VU1native VU1kick relayDirect relayWorld VU1hle VIFcmd VU1jit VIFlock VIFwake VIFcopy VIFunlock VU1sync VU1quiet EEioTimer EEioIntc EEioDma EEioGs EEioWait".split()
 for f in sys.argv[1:]:
     rows = list(csv.DictReader(open(f)))
@@ -49,3 +49,23 @@ for f in sys.argv[1:]:
             gs[k] += c / total * dt[i] * 1000
     gparts = sorted(((v / steady_frames, GS_NAMES[k]) for k, v in enumerate(gs) if k < len(GS_NAMES) and v / steady_frames >= 1), reverse=True)
     print('  GS thread, ms per game frame: total %.0f | %s; samples per second %.0f' % (sum(m for m, _ in gparts), ', '.join('%s %.0f' % (n, m) for m, n in gparts), samples / steady_time))
+    # gs_wait_split runs: each section's samples taken while the GS thread was ready (runnable, not
+    # on a core) or blocked (waiting in the kernel); the rest were running on a core
+    if 'gs_blocked_sections' in rows[0] and any(float(x) for i in steady for x in rows[i]['gs_blocked_sections'].split(';') + rows[i]['gs_ready_sections'].split(';')):
+        ready = [0.0] * 32
+        blocked = [0.0] * 32
+        for i in steady:
+            total = sum(float(x) for x in rows[i]['gs_sections'].split(';')) or 1
+            for k, c in enumerate(rows[i]['gs_ready_sections'].split(';')):
+                ready[k] += float(c) / total * dt[i] * 1000
+            for k, c in enumerate(rows[i]['gs_blocked_sections'].split(';')):
+                blocked[k] += float(c) / total * dt[i] * 1000
+        lines = []
+        for k, name in enumerate(GS_NAMES):
+            t = gs[k] / steady_frames
+            if t < 1:
+                continue
+            r, b = ready[k] / steady_frames, blocked[k] / steady_frames
+            lines.append((t, '%s %.0f = run %.1f + ready %.1f + blocked %.1f' % (name, t, t - r - b, r, b)))
+        lines.sort(reverse=True)
+        print('  GS thread by scheduler state, ms per game frame: ' + '; '.join(l for _, l in lines))

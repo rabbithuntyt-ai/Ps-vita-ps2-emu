@@ -2405,6 +2405,9 @@ void CGSH_Hardware::DrawBatchWithProgram()
 	auto draw = [&]() {
 		if(indexed)
 		{
+			GsProfile::CScope glSection(GsProfile::SECTION_GL_DRAW);
+			g_drawsByKind[0]++;
+			g_drawElementsByKind[0] += m_batchIndices.size();
 			if(baseVertex != 0)
 				glDrawElementsBaseVertex(m_batchMode, static_cast<GLsizei>(m_batchIndices.size()), GL_UNSIGNED_SHORT, m_batchIndices.data(), baseVertex);
 			else
@@ -2412,6 +2415,9 @@ void CGSH_Hardware::DrawBatchWithProgram()
 		}
 		else
 		{
+			GsProfile::CScope glSection(GsProfile::SECTION_GL_DRAW);
+			g_drawsByKind[0]++;
+			g_drawElementsByKind[0] += count;
 			glDrawArrays(m_batchMode, baseVertex, count);
 		}
 	};
@@ -2558,13 +2564,19 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 		uint64 start = g_fineTimers ? NowUs() : 0;
 		~WORLD_TIMER() { if(g_fineTimers) g_worldUs += NowUs() - start; }
 	} worldTimer;
-	bool drawing = BeginBatchStrip();
-	if(drawing && !m_stateApplied) ApplyState();
 	const auto& s = m_state;
-	bool supported = drawing && !m_drawNothing && m_currentTarget && !m_alphaPass && s.gouraud && !s.fst && BuildWorldProgram() &&
-	                 (m_worldVertices.size() + batch.count <= 65535);
+	bool drawing = false, supported = false;
+	{
+		GsProfile::CScope setupSection(GsProfile::SECTION_WORLD_SETUP);
+		drawing = BeginBatchStrip();
+		if(drawing && !m_stateApplied) ApplyState();
+		supported = drawing && !m_drawNothing && m_currentTarget && !m_alphaPass && s.gouraud && !s.fst && BuildWorldProgram() &&
+		            (m_worldVertices.size() + batch.count <= 65535);
+	}
 	if(!supported)
 	{
+		g_worldBatchesByKind[3]++;
+		g_worldVerticesByKind[3] += batch.count;
 		if(drawing && !m_drawNothing) g_gpuWorldFallbacks++;
 		if(!drawing || m_drawNothing)
 		{
@@ -2584,6 +2596,9 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 	}
 	if(g_gpuWorldRetained && !batch.skin && DrawRetainedWorld(batch))
 	{
+		GsProfile::CScope endSection(GsProfile::SECTION_WORLD_END);
+		g_worldBatchesByKind[0]++;
+		g_worldVerticesByKind[0] += batch.count;
 		g_gpuWorldBatches++;
 		MarkTargetDirty(*m_currentTarget, 0, 0, m_currentTarget->width, m_currentTarget->height);
 		Re4Vu1::GS_VERTEX last = Re4Vu1::Project(Re4Vu1::ReadWorldVertex(batch, batch.count - 1));
@@ -2643,6 +2658,9 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 	// Vertices, and triangles where the program does not set ADC for a restart. Culling and
 	// clipping are the GPU's: each triangle's order follows its winding sign so that GL_FRONT
 	// culling drops what the program's back face test drops.
+	GsProfile::CScope vertsSection(batch.clipSpace ? GsProfile::SECTION_WORLD_SKIN : GsProfile::SECTION_WORLD_VERTS);
+	g_worldBatchesByKind[batch.clipSpace ? 2 : 1]++;
+	g_worldVerticesByKind[batch.clipSpace ? 2 : 1] += batch.count;
 	uint32 base = static_cast<uint32>(m_worldVertices.size());
 	g_gpuWorldMaxVertices = std::max<uint64>(g_gpuWorldMaxVertices, base + batch.count);
 	m_worldVertices.resize(base + batch.count);
@@ -2717,8 +2735,23 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 		if(clipped && !((flags[0] | flags[1] | flags[2]) & ~guardFlag)) g_gpuWorldGuarded++;
 		if(clipped && (raw[7] == 0) && !batch.skin && !(g_gpuWorldDebug & 1))
 		{
-			Re4Vu1::WORLD_VERTEX last3[3] = {Re4Vu1::ReadWorldVertex(batch, i - 2), Re4Vu1::ReadWorldVertex(batch, i - 1), Re4Vu1::ReadWorldVertex(batch, i)};
-			DrawClippedWorldTriangle(last3);
+			GsProfile::CScope clipSection(GsProfile::SECTION_WORLD_CLIP);
+			g_worldClipCalls++;
+			if(g_clipReject && !batch.clipSpace && Re4Vu1::ClipRejects(batch, i - 2))
+			{
+				g_worldClipRejected++;
+				if(g_clipRejectCheck)
+				{
+					Re4Vu1::WORLD_VERTEX last3[3] = {Re4Vu1::ReadWorldVertex(batch, i - 2), Re4Vu1::ReadWorldVertex(batch, i - 1), Re4Vu1::ReadWorldVertex(batch, i)};
+					Re4Vu1::WORLD_VERTEX polygon[12];
+					if(Re4Vu1::ClipTriangle(last3, polygon) >= 3) g_clipRejectMismatches++;
+				}
+			}
+			else
+			{
+				Re4Vu1::WORLD_VERTEX last3[3] = {Re4Vu1::ReadWorldVertex(batch, i - 2), Re4Vu1::ReadWorldVertex(batch, i - 1), Re4Vu1::ReadWorldVertex(batch, i)};
+				DrawClippedWorldTriangle(last3);
+			}
 		}
 		if((i >= 2) && (raw[7] == 0) && !clipped)
 		{
@@ -2762,6 +2795,7 @@ void CGSH_Hardware::DrawWorldBatch(const Re4Vu1::WORLD_BATCH& batch)
 			             w.v.x, w.v.y, w.v.z, w.v.w, g.screenX, g.screenY, v[0], v[1], v[2], v[3]);
 		}
 	}
+	GsProfile::CScope endSection(GsProfile::SECTION_WORLD_END);
 	MarkTargetDirty(*m_currentTarget, 0, 0, m_currentTarget->width, m_currentTarget->height);
 	Re4Vu1::GS_VERTEX last = Re4Vu1::Project(Re4Vu1::ReadWorldVertex(batch, batch.count - 1));
 	if(batch.count >= 2)
@@ -2840,7 +2874,12 @@ void CGSH_Hardware::FlushWorld()
 	//coordinates, and the targets are drawn with screen Y as GL Y: that is GL's clockwise
 	//(the order already follows the winding sign), so the CCW faces go.
 	glCullFace((g_gpuWorldDebug & 64) ? GL_BACK : GL_FRONT); //debug 64: the other faces
-	glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(m_worldIndices.size()), GL_UNSIGNED_SHORT, m_worldIndices.data());
+	{
+		GsProfile::CScope glSection(GsProfile::SECTION_GL_DRAW_WORLD);
+		g_drawsByKind[2]++;
+		g_drawElementsByKind[2] += m_worldIndices.size();
+		glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(m_worldIndices.size()), GL_UNSIGNED_SHORT, m_worldIndices.data());
+	}
 	if(g_gpuWorldDebug & 16)
 	{
 		static int printed = 0;
@@ -3195,8 +3234,13 @@ void CGSH_Hardware::FlushRetainedDraw()
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, chunk.ibo);
 		m_retainedBoundChunk = pending.chunk;
 	}
-	glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(pending.indexCount), GL_UNSIGNED_SHORT,
-	               reinterpret_cast<const void*>(static_cast<uintptr_t>(pending.firstIndex) * sizeof(uint16)));
+	{
+		GsProfile::CScope glSection(GsProfile::SECTION_GL_DRAW_RETAINED);
+		g_drawsByKind[3]++;
+		g_drawElementsByKind[3] += pending.indexCount;
+		glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(pending.indexCount), GL_UNSIGNED_SHORT,
+		               reinterpret_cast<const void*>(static_cast<uintptr_t>(pending.firstIndex) * sizeof(uint16)));
+	}
 	g_retainedDrawCalls++;
 }
 
@@ -4207,6 +4251,9 @@ void CGSH_Hardware::FlushBatch()
 	{
 		CPartTimer timer(GPU_PART_DRAW);
 		GetTimes().partUs[GPU_PART_DRAWS_FF] += 1000;
+		GsProfile::CScope glSection(GsProfile::SECTION_GL_DRAW);
+		g_drawsByKind[1]++;
+		g_drawElementsByKind[1] += m_batch.size();
 		glDrawArrays(m_batchMode, 0, static_cast<GLsizei>(m_batch.size()));
 	}
 	if(m_alphaPass)
