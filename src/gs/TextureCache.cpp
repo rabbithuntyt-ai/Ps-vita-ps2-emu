@@ -9,6 +9,7 @@ void CTextureCache::SetMemory(uint8* ram, const uint16* clut)
 	m_ram = ram;
 	m_clutRam = clut;
 	m_textures.clear();
+	m_index.clear();
 	m_textureBytes = 0;
 	MarkAllWritten();
 }
@@ -229,9 +230,26 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 {
 	m_useCounter++;
 	ApplyPendingWrite();
-	for(auto& texture : m_textures)
+	CTexture* found = nullptr;
+	if(g_indexedLookup)
 	{
-		if(texture->m_key == key)
+		auto it = m_index.find(key);
+		if(it != m_index.end()) found = it->second;
+	}
+	else
+	{
+		for(auto& texture : m_textures)
+		{
+			if(texture->m_key == key)
+			{
+				found = texture.get();
+				break;
+			}
+		}
+	}
+	if(found)
+	{
+		CTexture* texture = found;
 		{
 			texture->m_lastUse = m_useCounter;
 			if(texture->m_decodeStamp != m_stamp)
@@ -243,7 +261,7 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 					{
 						//Pages were rewritten with the same contents.
 						texture->m_decodeStamp = m_stamp;
-						return texture.get();
+						return texture;
 					}
 					Reset(*texture);
 					texture->m_contentHash = hash;
@@ -254,7 +272,7 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 					texture->m_decodeStamp = m_stamp;
 				}
 			}
-			return texture.get();
+			return texture;
 		}
 	}
 
@@ -265,6 +283,7 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 		auto lru = std::min_element(m_textures.begin(), m_textures.end(),
 		                            [](const auto& a, const auto& b) { return a->m_lastUse < b->m_lastUse; });
 		m_textureBytes -= static_cast<size_t>((*lru)->m_key.tw) * (*lru)->m_key.th * 4;
+		m_index.erase((*lru)->m_key);
 		if(m_deferredRelease) m_retired.push_back(std::move(*lru));
 		m_textures.erase(lru);
 	}
@@ -301,6 +320,7 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 		}
 	}
 
+	m_index[key] = texture.get();
 	m_textures.push_back(std::move(texture));
 	return m_textures.back().get();
 }

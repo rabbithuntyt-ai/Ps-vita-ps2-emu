@@ -108,6 +108,10 @@ namespace TargetPixels
 		uint32 width = 0, height = 0, unitBytes = 0;
 		uint16 place[128] = {};
 		bool pairs = false; //every 8 bytes are two neighbouring pixels of one row (32-bit)
+		//32-bit: the usual column layout (4 columns of 8x2 pixels; in each column's 16 units, group g
+		//of 4 holds pixels 2g, 2g+1 of the column's first row, then the same of its second row):
+		//the NEON block move below applies
+		bool columns32 = false;
 	};
 
 	inline BLOCK_LAYOUT BuildBlockLayout(uint32 psm)
@@ -151,9 +155,69 @@ namespace TargetPixels
 		{
 			if(layout.place[unit + 1] != layout.place[unit] + 1) layout.pairs = false;
 		}
+		if(!is16)
+		{
+			layout.columns32 = true;
+			for(uint32 unit = 0; unit < 64; unit++)
+			{
+				uint32 column = unit / 16, group = (unit % 16) / 4, k = unit % 4;
+				uint32 x = 2 * group + (k & 1), y = 2 * column + (k >> 1);
+				if(layout.place[unit] != (x | (y << 8))) layout.columns32 = false;
+			}
+		}
 		layout.valid = true;
 		return layout;
 	}
+
+	//target_pixels_neon (on): 32-bit blocks moved by NEON registers (columns32 layouts only)
+	inline bool g_neonColumns = true;
+	inline uint32 g_prefetchBlocks = 2; //target_pixels_prefetch: blocks ahead to prefetch (0: none)
+
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+	// One 32-bit block (columns32) to the pixels of its 8x8 rectangle ('p' its top left, 'stride'
+	// pixels between rows), alpha as BlockAlphaToTarget
+	inline void BlockToPixels32(const uint8* block, uint32* p, uint32 stride, bool is24)
+	{
+		const uint8x16_t alphaMask = vreinterpretq_u8_u32(vdupq_n_u32(0xFF000000));
+		for(uint32 column = 0; column < 4; column++)
+		{
+			uint8x16_t q[4];
+			for(uint32 g = 0; g < 4; g++)
+			{
+				uint8x16_t c = vld1q_u8(block + column * 64 + g * 16);
+				uint8x16_t a = is24 ? vdupq_n_u8(0xFF) : vqaddq_u8(c, c);
+				q[g] = vbslq_u8(alphaMask, a, c);
+			}
+			uint32* row0 = p + (2 * column) * stride;
+			uint32* row1 = row0 + stride;
+			vst1q_u8(reinterpret_cast<uint8*>(row0), vcombine_u8(vget_low_u8(q[0]), vget_low_u8(q[1])));
+			vst1q_u8(reinterpret_cast<uint8*>(row0 + 4), vcombine_u8(vget_low_u8(q[2]), vget_low_u8(q[3])));
+			vst1q_u8(reinterpret_cast<uint8*>(row1), vcombine_u8(vget_high_u8(q[0]), vget_high_u8(q[1])));
+			vst1q_u8(reinterpret_cast<uint8*>(row1 + 4), vcombine_u8(vget_high_u8(q[2]), vget_high_u8(q[3])));
+		}
+	}
+
+	// The pixels of an 8x8 rectangle into one 32-bit block (columns32), alpha as BlockAlphaToGs
+	inline void PixelsToBlock32(const uint32* p, uint32 stride, uint8* block, bool is24)
+	{
+		const uint8x16_t alphaMask = vreinterpretq_u8_u32(vdupq_n_u32(0xFF000000));
+		for(uint32 column = 0; column < 4; column++)
+		{
+			const uint32* row0 = p + (2 * column) * stride;
+			const uint32* row1 = row0 + stride;
+			uint8x16_t a0 = vld1q_u8(reinterpret_cast<const uint8*>(row0)), a1 = vld1q_u8(reinterpret_cast<const uint8*>(row0 + 4));
+			uint8x16_t b0 = vld1q_u8(reinterpret_cast<const uint8*>(row1)), b1 = vld1q_u8(reinterpret_cast<const uint8*>(row1 + 4));
+			uint8x16_t q[4] = {vcombine_u8(vget_low_u8(a0), vget_low_u8(b0)), vcombine_u8(vget_high_u8(a0), vget_high_u8(b0)),
+			                   vcombine_u8(vget_low_u8(a1), vget_low_u8(b1)), vcombine_u8(vget_high_u8(a1), vget_high_u8(b1))};
+			for(uint32 g = 0; g < 4; g++)
+			{
+				uint8* out = block + column * 64 + g * 16;
+				uint8x16_t a = is24 ? vld1q_u8(out) : vrhaddq_u8(q[g], vdupq_n_u8(0));
+				vst1q_u8(out, vbslq_u8(alphaMask, a, q[g]));
+			}
+		}
+	}
+#endif
 
 	inline const BLOCK_LAYOUT& GetBlockLayout(uint32 psm)
 	{
@@ -266,6 +330,28 @@ namespace TargetPixels
 			{
 				uint8* block = ram + (surface.Offset(rowBase, rowTable, bx) & ~255u);
 				uint32* p = pixels + (by - y0) * stride + (bx - x0);
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+				if(g_neonColumns && layout.columns32 && !is16)
+				{
+					if(g_prefetchBlocks != 0)
+					{
+						//The pixel rows of the block g_prefetchBlocks ahead (8 rows 'stride' apart: the
+						//prefetcher does not follow 8 streams) and its GS block
+						uint32 ahead = g_prefetchBlocks * layout.width;
+						if(bx + ahead < bx1)
+						{
+							const uint32* q = p + ahead;
+							if(write) for(uint32 r = 0; r < 8; r++) __builtin_prefetch(q + r * stride, 0);
+							__builtin_prefetch(ram + (surface.Offset(rowBase, rowTable, bx + ahead) & ~255u), write ? 1 : 0);
+						}
+					}
+					if(write)
+						PixelsToBlock32(p, stride, block, is24);
+					else
+						BlockToPixels32(block, p, stride, is24);
+					continue;
+				}
+#endif
 				if(!write)
 				{
 					if(is16)

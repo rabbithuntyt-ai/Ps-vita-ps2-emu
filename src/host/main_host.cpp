@@ -290,6 +290,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--target-pool-min-age") && (i + 1 < argc)) CGSH_Hardware::g_targetPoolMinAge = std::atoi(argv[++i]);
 		else if(!std::strcmp(argv[i], "--no-strip-merge-opaque")) CGSH_Hardware::g_stripMergeOpaque = false; //opaque strip sprites each their own draw
 		else if(!std::strcmp(argv[i], "--no-gpu-upload")) CGSH_Hardware::g_gpuUpload = false; //target uploads with glTexSubImage2D
+		else if(!std::strcmp(argv[i], "--no-texture-index")) CTextureCache::g_indexedLookup = false; //texture cache lookups compare every entry
 		else if(!std::strcmp(argv[i], "--feed-shapes")) CGSH_Hardware::g_feedShapes = true; //host to local transfers by format, size and alignment
 		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
 		else if(!std::strcmp(argv[i], "--reuse-scan")) CVpu::g_reuseScan = CGSHandler::g_shadowRegs = true; //relayed GIF data repeated across frames

@@ -15,6 +15,7 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 #include "Types.h"
 #include "GsSurface.h"
@@ -38,6 +39,19 @@ public:
 			       cpsm == rhs.cpsm && csa == rhs.csa && clutHash == rhs.clutHash && texa == rhs.texa;
 		}
 	};
+	struct KEY_HASH
+	{
+		size_t operator()(const KEY& k) const
+		{
+			uint64 h = k.clutHash ^ (static_cast<uint64>(k.tbp) * 0x9E3779B97F4A7C15ull);
+			h ^= (static_cast<uint64>(k.tbw) | (static_cast<uint64>(k.tpsm) << 8) | (static_cast<uint64>(k.tw) << 16) | (static_cast<uint64>(k.th) << 32)) * 0xC2B2AE3D27D4EB4Full;
+			h ^= (static_cast<uint64>(k.cpsm) | (static_cast<uint64>(k.csa) << 8) | (static_cast<uint64>(k.texa) << 16)) * 0x165667B19E3779F9ull;
+			return static_cast<size_t>(h ^ (h >> 32));
+		}
+	};
+	//texture_index (on): Get finds an entry by a hash of its key instead of comparing every
+	//entry's key (up to 512, hundreds of lookups a frame)
+	static inline bool g_indexedLookup = true;
 
 	class CTexture
 	{
@@ -229,6 +243,7 @@ private:
 	size_t m_textureBytes = 0;
 	std::atomic<uint32> m_decodedTiles{0};
 	std::vector<std::unique_ptr<CTexture>> m_textures;
+	std::unordered_map<KEY, CTexture*, KEY_HASH> m_index; //m_textures by key (kept in step with it)
 	std::vector<std::unique_ptr<CTexture>> m_retired;
 	bool m_deferredRelease = false;
 };

@@ -434,6 +434,9 @@ namespace
 		else if(key == "target_pool_min_age") CGSH_Hardware::g_targetPoolMinAge = static_cast<uint32_t>(value); //frames before a pooled target is reused (1)
 		else if(key == "strip_merge_opaque") CGSH_Hardware::g_stripMergeOpaque = value != 0; //opaque sprites continuing a strip cover merge too (exact; on)
 		else if(key == "gpu_upload") CGSH_Hardware::g_gpuUpload = value != 0; //target rows uploaded by drawing a scratch texture (exact; on)
+		else if(key == "target_pixels_neon") TargetPixels::g_neonColumns = value != 0; //32-bit target pixels moved by NEON per block column (exact; on)
+		else if(key == "target_pixels_prefetch") TargetPixels::g_prefetchBlocks = static_cast<uint32_t>(value); //blocks ahead to prefetch (2)
+		else if(key == "texture_index") CTextureCache::g_indexedLookup = value != 0; //texture cache lookups by key hash (exact; on)
 		else if(key == "gpu_skin") Re4Skin::g_gpuSkin = value != 0; //RE4: one-matrix skinning batches drawn by the GPU world path (off)
 		else if(key == "vu1_stats") EmuProfile::g_vu1Programs.enabled = value != 0; //vu1prog.txt every 10 s
 		else if(key == "spu_fast_reads") Iop::CSubSystem::g_fastSpuLevelReads = value != 0;
@@ -874,6 +877,31 @@ namespace
 						for(uint32 n = 0; n < transfers; n++) std::memcpy(ram.data() + (n * 0x8000) % (0x400000 - 0x40000), source.data(), 0x8000);
 						double copy = (sceKernelGetProcessTimeWide() - copyStart) * 1000.0 / (transfers * 32768.0);
 						std::fprintf(selfTest, "transfer writes ns/byte (pass %d): ct32 compare %.2f store %.2f, psmt4 compare %.2f store %.2f, memcpy %.2f\n", pass, ct32[1], ct32[0], t4[1], t4[0], copy);
+					}
+					{
+						//Render target pixels <-> GS memory (uploads read, read-backs write), 512x448 PSMCT32,
+						//in ns per pixel; and a 512x448 RGBA copy for scale
+						std::vector<uint32> pixels(512 * 448), copy(512 * 448);
+						for(size_t i = 0; i < pixels.size(); i++) pixels[i] = static_cast<uint32>(i * 2654435761u);
+						uint32 savedPrefetch = TargetPixels::g_prefetchBlocks;
+						const uint32 prefetchValues[4] = {0, 1, 2, 4};
+						for(int pass = 0; pass < 4; pass++)
+						{
+							TargetPixels::g_prefetchBlocks = prefetchValues[pass];
+							uint64 t0 = sceKernelGetProcessTimeWide();
+							for(int n = 0; n < 8; n++) TargetPixels::Write(ram.data(), CGSHandler::PSMCT32, 0x100000 + (n % 4) * 0x80000, 8, 0, 0, 512, 448, pixels.data());
+							uint64 t1 = sceKernelGetProcessTimeWide();
+							for(int n = 0; n < 8; n++) TargetPixels::Read(ram.data(), CGSHandler::PSMCT32, 0x100000 + (n % 4) * 0x80000, 8, 0, 0, 512, 448, pixels.data());
+							uint64 t2 = sceKernelGetProcessTimeWide();
+							for(int n = 0; n < 8; n++) std::memcpy(copy.data(), pixels.data(), 512 * 448 * 4);
+							uint64 t3 = sceKernelGetProcessTimeWide();
+							double px = 8.0 * 512 * 448;
+							std::fprintf(selfTest, "target pixels ns/pixel (prefetch %u blocks): write (read-back) %.2f, read (upload) %.2f, memcpy %.2f\n", prefetchValues[pass], (t1 - t0) * 1000.0 / px,
+							             (t2 - t1) * 1000.0 / px, (t3 - t2) * 1000.0 / px);
+						}
+						TargetPixels::g_prefetchBlocks = savedPrefetch;
+						std::fprintf(selfTest, "target pixels NEON column layout: ct32 %d ct24 %d (on %d)\n", TargetPixels::GetBlockLayout(CGSHandler::PSMCT32).columns32 ? 1 : 0,
+						             TargetPixels::GetBlockLayout(CGSHandler::PSMCT24).columns32 ? 1 : 0, TargetPixels::g_neonColumns ? 1 : 0);
 					}
 				}
 				{

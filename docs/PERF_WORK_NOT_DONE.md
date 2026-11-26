@@ -774,6 +774,20 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
   - One crash at app exit after R30b (gpu_upload on): ~CEmuSession, ReleaseImpl,
     glDeleteTextures, the same as R21w before any of this. ReleaseImpl now waits for the GPU
     (glFinish) before deleting; not shown to fix it.
+- **Target pixel swizzle: NEON block columns and prefetch (`target_pixels_neon`,
+  `target_pixels_prefetch`, on; R31-R34, 26 Nov 2026).**
+  - Vita part timers per game frame: read-back swizzle 9.3 ms (32 ns per pixel), upload
+    swizzle 11 ms (52 ns per pixel).
+  - Vita self-test, 512x448 PSMCT32, ns per pixel:
+    - read-back 27.7, upload 40.5, against 7.3 for a memcpy of the same bytes
+    - NEON moves per block column (the usual 32-bit layout, checked against Play's page
+      tables): upload 32.5, read-back unchanged
+    - prefetching the next blocks' 8 pixel rows: read-back 19.0 (prefetching for uploads made
+      them slower, so only read-backs prefetch rows)
+    - still memory-bound: 8 row streams 2 KB apart, which the A9 does not prefetch by itself
+  - Self-test: 0 of 100 rectangles differ from the per-pixel versions.
+  - Vita A/B (R34): 3.99/4.19/4.25 against 3.95/4.04/4.06 steady game fps; the sets overlap,
+    so no fps claim. GS read-backs 26 to 23 ms, uploads 16-17 to 14-15 ms per game frame.
 - **Read-backs and uploads, what they are (PC diagnostics, 25 Nov 2026).**
   - About 45 ms per game frame on the Vita (download 25, upload 20).
   - RE4 streams its textures and palettes every frame into 0x348000-0x3F0000. That is the same
