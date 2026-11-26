@@ -762,6 +762,18 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
   the strip-cover logic (W1) would only move its covered columns on (no GL work); that step runs
   as it would have. PC: 2,286 more merges, fixed-function draws 34,869 to 32,583, screenshots
   identical. About 0.5 ms per game frame: not measured on its own on the Vita.
+- **`gpu_upload` (on, exact on the PC): render target rows uploaded by drawing, not
+  glTexSubImage2D (R30, 25 Nov 2026).**
+  - vitaGL's glTexSubImage2D copies the whole texture first when it was drawn into in the last
+    few frames: 1 MB for a 512x512 target, to change a few rows. Every target upload hit this.
+  - Now: the rows go into a scratch texture of their own, drawn 1:1 into the target (nearest,
+    no blending, no depth), then deleted (vitaGL frees it when the GPU is done).
+  - PC: screenshots and read-back/upload counts identical.
+  - Vita, interleaved: 4.17/4.14/4.10 against 3.86/3.91/3.94 steady game fps (+6.0%). GS
+    uploads 19-20 to 16-17 ms, total 254-259 to 240-244 ms per game frame.
+  - One crash at app exit after R30b (gpu_upload on): ~CEmuSession, ReleaseImpl,
+    glDeleteTextures, the same as R21w before any of this. ReleaseImpl now waits for the GPU
+    (glFinish) before deleting; not shown to fix it.
 - **Read-backs and uploads, what they are (PC diagnostics, 25 Nov 2026).**
   - About 45 ms per game frame on the Vita (download 25, upload 20).
   - RE4 streams its textures and palettes every frame into 0x348000-0x3F0000. That is the same

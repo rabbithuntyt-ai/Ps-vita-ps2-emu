@@ -262,6 +262,10 @@ frame dumps) or results compared bit for bit.
     - Vita: 4.09/3.94/4.07 against 3.72/3.84/3.67 steady game fps (+7.7%). Free GL memory
       stays about 48 MB instead of sinking to about 30 MB.
     - This is the likely cause of the vitaGL texture-allocation crashes; none in 12 runs since.
+20. **Render target uploads drawn from a scratch texture (`gpu_upload`, on).**
+    - vitaGL copied the whole target texture (1 MB) on every glTexSubImage2D into a target
+      drawn recently.
+    - Vita: 4.17/4.14/4.10 against 3.86/3.91/3.94 steady game fps (+6.0%).
 
 ### VU recompiler (helps every game)
 

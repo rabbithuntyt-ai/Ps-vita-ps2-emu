@@ -321,6 +321,8 @@ public:
 	//1024-wide targets from its menus in the pool for good while the 256x512/256x384 targets it
 	//uses every frame were created and deleted twice a game frame)
 	static inline bool g_targetPoolLru = true;
+	static inline bool g_gpuUpload = true; //gpu_upload (on): target uploads drawn from a scratch texture (see UploadTarget)
+	static inline uint64 g_gpuUploads = 0;
 	static inline uint32 g_targetPoolMaxAge = 300;
 	static inline uint32 g_targetPoolMinAge = 1; //target_pool_min_age: frames before a pooled target is reused
 	static inline uint64 g_targetPoolEvictions = 0;

@@ -444,6 +444,10 @@ void CGSH_Hardware::ReleaseImpl()
 	if(!m_gpuInitialized) return;
 	m_gpuInitialized = false;
 	FlushBatch();
+	// The GPU idle before the deletes: twice (R21w, R30b) the Vita crashed inside glDeleteTextures
+	// here at session end, with vitaGL's garbage collector thread freeing deleted objects alongside
+	// (a mitigation; not shown to be the cause)
+	glFinish();
 	for(auto& target : m_targets)
 	{
 		DeleteTarget(*target);
@@ -1280,9 +1284,41 @@ void CGSH_Hardware::UploadTarget(TARGET& target, uint32 x0, uint32 y0, uint32 wi
 	else
 		TargetPixels::ReadPixels(m_pRAM, target.psm, target.fbp, target.fbw, x0, y0, width, height, pixels, width);
 	GetTimes().partUs[GPU_PART_UPLOAD_SWIZZLE] += NowUs() - swizzleStart;
-	glBindTexture(GL_TEXTURE_2D, target.colorTexture);
 	uint64 glStart = NowUs();
-	glTexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	if(g_gpuUpload)
+	{
+		// gpu_upload: the rows go into a new texture of their own and are drawn into the target
+		// 1:1 (nearest, no blending, no depth). glTexSubImage2D on a texture drawn in the last
+		// frames makes vitaGL copy the whole texture first (1 MB for a 512x512 target) to change
+		// a few rows. The scratch texture is deleted after the draw (vitaGL frees it when the GPU
+		// is done with it).
+		GLuint scratch = 0;
+		glGenTextures(1, &scratch);
+		glBindTexture(GL_TEXTURE_2D, scratch);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+		auto vertex = [&](uint32 px, uint32 py) {
+			BATCH_VERTEX v = {};
+			v.x = static_cast<float>(px) / static_cast<float>(target.width) * 2.0f - 1.0f;
+			v.y = static_cast<float>(py) / static_cast<float>(target.height) * 2.0f - 1.0f;
+			v.w = 1;
+			v.r = v.g = v.b = v.a = 255;
+			v.s = static_cast<float>(px - x0) / static_cast<float>(width);
+			v.t = static_cast<float>(py - y0) / static_cast<float>(height);
+			return v;
+		};
+		auto tl = vertex(x0, y0), tr = vertex(x0 + width, y0), bl = vertex(x0, y0 + height), br = vertex(x0 + width, y0 + height);
+		std::vector<BATCH_VERTEX> quad = {tl, tr, bl, tr, br, bl};
+		DrawCopyQuads(scratch, target.framebuffer, target.width, target.height, quad);
+		glDeleteTextures(1, &scratch);
+		g_gpuUploads++;
+	}
+	else
+	{
+		glBindTexture(GL_TEXTURE_2D, target.colorTexture);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	}
 	m_depthSceneValid = false;
 	GetTimes().uploadGlUs += NowUs() - glStart;
 	GetTimes().partUs[GPU_PART_UPLOAD_GL] += NowUs() - glStart;
