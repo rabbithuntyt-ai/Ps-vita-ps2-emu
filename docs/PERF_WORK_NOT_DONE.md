@@ -814,6 +814,13 @@ frame. On in RE4's profile. Details: [RE4_30FPS_BRIEF.md](RE4_30FPS_BRIEF.md), "
   - matrix and sampled vertices 4.7; hash and lookup 3.1; building and box test 2.8
   - flush and run setup 9.9: mostly the FlushBatch of whatever other path was pending
   - uniforms 2.3
+- **Texture section split (R46, 26 Nov 2026).** New GS sections texHash, texCreate, alphaClut.
+  - Per game frame: page hashes 6 ms, the rest of texture binding 6 ms, the alpha-CLUT GPU
+    pass 5 ms, new cache entries under 1 ms.
+  - GS idle is now about 40-50 ms per game frame.
+  - `texture_page_hash` (on, exact): pages are hashed only where a texture narrower than its
+    buffer can read. PC shots identical. Vita R47: texHash 7/7 off against 6/7 on, so no gain for
+    RE4 (its streamed textures fill their buffers' width); kept for other games.
 - **Read-back memory placement: no effect (R44-R45, 26 Nov 2026).** Vita self-test, glReadPixels of a
   512x448 render target:
   - in video RAM (vitaGL's choice): 10.37 ms

@@ -295,6 +295,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--block-coherency")) CGSH_Hardware::g_blockCoherency = true; //per-block stale/clean target tracking
 		else if(!std::strcmp(argv[i], "--no-resize-on-gpu")) CGSH_Hardware::g_resizeOnGpu = false; //shrinks and trims with glCopyTexSubImage2D
 		else if(!std::strcmp(argv[i], "--no-fast-skin-loop")) CGSH_Hardware::g_fastSkinLoop = false; //skinning batches through the generic world loop
+		else if(!std::strcmp(argv[i], "--no-texture-page-hash")) CTextureCache::g_exactPageHash = false; //page hashes over whole page rows
 		else if(!std::strcmp(argv[i], "--feed-shapes")) CGSH_Hardware::g_feedShapes = true; //host to local transfers by format, size and alignment
 		else if(!std::strcmp(argv[i], "--io-counts")) Ee::CSubSystem::g_ioCounts = true; //EE I/O accesses per register
 		else if(!std::strcmp(argv[i], "--reuse-scan")) CVpu::g_reuseScan = CGSHandler::g_shadowRegs = true; //relayed GIF data repeated across frames

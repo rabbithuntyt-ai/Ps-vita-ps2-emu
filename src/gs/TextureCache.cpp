@@ -3,6 +3,7 @@
 #include <cstring>
 #include "GsMemory.h"
 #include "xxhash.h"
+#include "GsProfile.h"
 
 void CTextureCache::SetMemory(uint8* ram, const uint16* clut)
 {
@@ -104,6 +105,30 @@ uint64 CTextureCache::HashPages(const CTexture& texture) const
 	//Bounded: hashing costs about as much as decoding past this size.
 	if(texture.m_pageCount > 64) return 0;
 	constexpr uint32 PAGE_SIZE = 1 << GS_SURFACE::PAGE_SHIFT;
+	if(g_exactPageHash && texture.m_hasSurface)
+	{
+		// texture_page_hash: a page-aligned texture no wider than its buffer reads, in each page row,
+		// only the first widthPages pages: those runs alone (the bytes it can read, and only those)
+		const auto& key = texture.m_key;
+		const auto& surface = texture.m_surface;
+		uint32 pagesPerRow = std::max<uint32>(surface.pagesPerRow, 1);
+		uint32 widthPages = (key.tw + surface.pwMask) >> surface.pwShift;
+		uint32 pageRows = (key.th + surface.phMask) >> surface.phShift;
+		bool pageAligned = (key.tbp & (PAGE_SIZE - 1)) == 0;
+		if(pageAligned && (widthPages < pagesPerRow))
+		{
+			uint64 hash = 0;
+			uint32 first = (key.tbp >> GS_SURFACE::PAGE_SHIFT) & (PAGE_COUNT - 1);
+			for(uint32 row = 0; row < pageRows; row++)
+			{
+				uint32 page = (first + row * pagesPerRow) & (PAGE_COUNT - 1);
+				uint32 contiguous = std::min<uint32>(widthPages, PAGE_COUNT - page);
+				hash = XXH3_64bits_withSeed(m_ram + page * PAGE_SIZE, contiguous * PAGE_SIZE, hash);
+				if(contiguous < widthPages) hash = XXH3_64bits_withSeed(m_ram, (widthPages - contiguous) * PAGE_SIZE, hash);
+			}
+			return (hash != 0) ? hash : 1;
+		}
+	}
 	uint32 first = texture.m_firstPage & (PAGE_COUNT - 1);
 	uint32 contiguous = std::min<uint32>(texture.m_pageCount, PAGE_COUNT - first);
 	uint64 hash = XXH3_64bits(m_ram + first * PAGE_SIZE, contiguous * PAGE_SIZE);
@@ -256,7 +281,11 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 			{
 				if(!IsValid(*texture))
 				{
-					uint64 hash = HashPages(*texture);
+					uint64 hash = 0;
+					{
+						GsProfile::CScope hashSection(GsProfile::SECTION_TEX_HASH);
+						hash = HashPages(*texture);
+					}
 					if((hash != 0) && (hash == texture->m_contentHash))
 					{
 						//Pages were rewritten with the same contents.
@@ -289,6 +318,7 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 	}
 	m_textureBytes += newBytes;
 
+	GsProfile::CScope createSection(GsProfile::SECTION_TEX_CREATE);
 	static std::atomic<uint64> nextUniqueId{1};
 	auto texture = std::make_unique<CTexture>();
 	texture->m_uniqueId = nextUniqueId++;
@@ -308,7 +338,10 @@ CTextureCache::CTexture* CTextureCache::Get(const KEY& key)
 	texture->m_decodeStamp = m_stamp;
 
 	GetPageRange(key, texture->m_firstPage, texture->m_pageCount);
-	texture->m_contentHash = HashPages(*texture);
+	{
+		GsProfile::CScope hashSection(GsProfile::SECTION_TEX_HASH);
+		texture->m_contentHash = HashPages(*texture);
+	}
 
 	//Snapshot the CLUT (the key holds its hash, so contents are fixed for this entry).
 	if(CGsPixelFormats::IsPsmIDTEX(key.tpsm))

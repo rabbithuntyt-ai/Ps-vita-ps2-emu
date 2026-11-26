@@ -2629,6 +2629,7 @@ bool CGSH_Hardware::BindAlphaClutTexture()
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	}
 	CPartTimer timer(GPU_PART_ALPHA_CLUT);
+	GsProfile::CScope alphaSection(GsProfile::SECTION_ALPHA_CLUT);
 	FlushBatch();
 	uint32 sampledRows = std::min(offsetY + s.th, source->height);
 	if(source->drawnRows > 2) sampledRows = std::min(sampledRows, std::max(source->drawnRows - 2, offsetY + 1));

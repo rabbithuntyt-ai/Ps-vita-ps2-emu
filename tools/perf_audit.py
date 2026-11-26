@@ -5,7 +5,7 @@
 # 1 ms samples in that row's interval; sections are exclusive (one current section per thread).
 import csv, sys
 STEADY_T = 25.0
-GS_NAMES = 'idle other registers vertex primitive addvertex state texture target flush upload download transfer world display worldRet worldSkin feedWrite glDraw glDrawWorld glDrawRet worldSetup worldVerts worldEnd worldClip tgtRelayout tgtAlloc tgtRemove tgtResize'.split()
+GS_NAMES = 'idle other registers vertex primitive addvertex state texture target flush upload download transfer world display worldRet worldSkin feedWrite glDraw glDrawWorld glDrawRet worldSetup worldVerts worldEnd worldClip tgtRelayout tgtAlloc tgtRemove tgtResize texHash texCreate alphaClut'.split()
 EE_NAMES = "other EE VU0 VU1 IOP SPU VIF GIF IPU SIF JIT GSwait idle SPUsync SPUread VIFdirect VIFunpack EEio EEkernel EEticks IOPio IOPkernel IOPticks IOPcounters IOPbios IOPdma IOPwait IOPdrain IOPlag IOPpark VU1relay VIFqueue VU1native VU1kick relayDirect relayWorld VU1hle VIFcmd VU1jit VIFlock VIFwake VIFcopy VIFunlock VU1sync VU1quiet EEioTimer EEioIntc EEioDma EEioGs EEioWait".split()
 for f in sys.argv[1:]:
     rows = list(csv.DictReader(open(f)))

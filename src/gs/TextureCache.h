@@ -52,6 +52,8 @@ public:
 	//texture_index (on): Get finds an entry by a hash of its key instead of comparing every
 	//entry's key (up to 512, hundreds of lookups a frame)
 	static inline bool g_indexedLookup = true;
+	//texture_page_hash (on): page hashes cover only the pages a texture narrower than its buffer reads
+	static inline bool g_exactPageHash = true;
 
 	class CTexture
 	{

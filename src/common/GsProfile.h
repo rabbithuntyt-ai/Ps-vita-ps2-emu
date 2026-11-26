@@ -40,12 +40,15 @@ namespace GsProfile
 		SECTION_TARGET_ALLOC,   //of target: GL objects of a target (pool or new)
 		SECTION_TARGET_REMOVE,  //of target: targets in the way removed (read-backs themselves are download)
 		SECTION_TARGET_RESIZE,  //of target: shrinks and front trims
+		SECTION_TEX_HASH,       //of texture: page hashes of rewritten or new texture cache entries
+		SECTION_TEX_CREATE,     //of texture: new texture cache entries (texel storage, CLUT snapshot)
+		SECTION_ALPHA_CLUT,     //of texture: alpha index textures looked up on the GPU
 		SECTION_COUNT
 	};
 
 	inline const char* GetSectionName(unsigned int section)
 	{
-		static const char* names[SECTION_COUNT] = {"idle", "other", "registers", "vertex", "primitive", "addvertex", "state", "texture", "target", "flush", "upload", "download", "transfer", "world", "display", "worldRet", "worldSkin", "feedWrite", "glDraw", "glDrawWorld", "glDrawRet", "worldSetup", "worldVerts", "worldEnd", "worldClip", "tgtRelayout", "tgtAlloc", "tgtRemove", "tgtResize"};
+		static const char* names[SECTION_COUNT] = {"idle", "other", "registers", "vertex", "primitive", "addvertex", "state", "texture", "target", "flush", "upload", "download", "transfer", "world", "display", "worldRet", "worldSkin", "feedWrite", "glDraw", "glDrawWorld", "glDrawRet", "worldSetup", "worldVerts", "worldEnd", "worldClip", "tgtRelayout", "tgtAlloc", "tgtRemove", "tgtResize", "texHash", "texCreate", "alphaClut"};
 		return (section < SECTION_COUNT) ? names[section] : "?";
 	}
 
