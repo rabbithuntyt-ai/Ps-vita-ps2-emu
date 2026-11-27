@@ -11,7 +11,7 @@ diff --git a/Source/ee/Vif.h b/Source/ee/Vif.h
 +	//unpack_prefetch: bulk unpacks prefetch their source ahead (the worker reads ring data written
 +	//up to ~4 MB earlier, out of the caches: RE4 ~120 ns a V4-16 value), and the worker prefetches
 +	//the next ring record when it starts one
-+	static inline bool g_unpackPrefetch = false;
++	static inline bool g_unpackPrefetch = true; //on since 27 Nov 2026: Vita worker VIFunpack 36 to 18.7 ms a game frame, game fps +3.4% (RE4)
 +	static inline uint64 g_unpackValues[16][2][2] = {};
  
  protected:

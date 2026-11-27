@@ -325,6 +325,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--spu-adma-full-fast")) Iop::CSubSystem::g_fastSpuAdmaFull = true; //ADMA into a full input buffer answered without pausing the mixer
 		else if(!std::strcmp(argv[i], "--flush-sites")) CGSH_Hardware::g_flushSites = new std::map<int, uint64>(); //fixed function draws by the FlushBatch call that ended them
 		else if(!std::strcmp(argv[i], "--unpack-stats")) CVif::g_unpackStats = true; //UNPACK values by data type, mask and loop
+		else if(!std::strcmp(argv[i], "--no-unpack-prefetch")) CVif::g_unpackPrefetch = false;
 		else if(!std::strcmp(argv[i], "--unpack-prefetch")) CVif::g_unpackPrefetch = true; //bulk unpacks and the next ring record prefetched
 		else if(!std::strcmp(argv[i], "--no-direct-pool")) CVpu::g_directPool = false;
 		else if(!std::strcmp(argv[i], "--direct-pool")) CVpu::g_directPool = true; //DIRECT packets in reused shared buffers

@@ -1277,6 +1277,14 @@ headers and comments. The ideas worth testing are in the brief's "Not done yet" 
   about 120 ns a value on the Vita, cold memory again (the worker reads ring data written up to
   ~4 MB earlier). `unpack_prefetch` (patch 0139) prefetches the bulk source 256 bytes ahead and
   the next ring record's first lines. PC: identical.
+  - **Vita (VU*, three off/on pairs): worker VIFunpack 35/36/37 to 19/18/19 ms a game frame
+    (-48%)**, worker idle 38/33/31 to 46/48/45, the emulation thread's VU1 wait 34/35/36 to
+    29/27/29, steady game fps 4.54/4.56/4.52 to 4.65/4.76/4.72 (game frames 448/450/448 to
+    461/467/467, +3.4%). **On by default.**
+  - Also (no switch, equivalent by construction): the EE thread keeps the worker's ring read
+    position as last loaded and reloads it only when the ring looks full, instead of moving the
+    worker's cache line to its core for every record. Host "most queued at once" is now an upper
+    bound.
 - **EE guest registers across blocks: measured, not built.** `tools/jit_reg_traffic.py` counts the
   context loads and stores per EE GPR in RE4's hot blocks (189 blocks, 60% of EE samples),
   weighted by samples. The traffic is spread: v0 (101 loads, 206 stores), a0 (76, 81), v1 (43,

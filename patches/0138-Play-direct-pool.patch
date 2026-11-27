@@ -23,7 +23,17 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
  	//Games send VIF1 data in small DMA chunks (Resident Evil 4: about 260 bytes); large ones
  	//go as several records (the stream reads them the same way as consecutive transfers)
  	while(size > ASYNC_RECORD_MAX)
-@@ -336,7 +342,7 @@
+@@ -327,7 +333,8 @@
+ 		uint32 dataSize = (size + 15) & ~15u;
+ 		uint32 recordEnd = m_asyncHeldOffset + sizeof(ASYNC_RECORD) + 0x10;
+ 		if(!tagIncluded && !m_asyncOverflow.load(std::memory_order_acquire) && (recordEnd + dataSize <= m_asyncRingSize) &&
+-		   ((m_asyncHeldEnd + dataSize - m_asyncRead.load(std::memory_order_acquire)) <= m_asyncRingSize))
++		   (((m_asyncHeldEnd + dataSize - m_asyncReadSeen) <= m_asyncRingSize) ||
++		    ((m_asyncReadSeen = m_asyncRead.load(std::memory_order_acquire)), ((m_asyncHeldEnd + dataSize - m_asyncReadSeen) <= m_asyncRingSize))))
+ 		{
+ 			{
+ 				EmuProfile::CScope copyScope(EmuProfile::SECTION_VIF_COPY);
+@@ -336,7 +343,7 @@
  				record->size = 0x10 + size;
  			}
  			m_asyncHeldEnd += dataSize;
@@ -32,7 +42,7 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
  			PublishHeld();
  			return;
  		}
-@@ -347,7 +353,7 @@
+@@ -347,7 +354,7 @@
  		packet.data.assign(data, data + size);
  		packet.tagIncluded = tagIncluded;
  		m_asyncQueue.push_back(std::move(packet));
@@ -41,7 +51,30 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
  		m_asyncQueued.fetch_add(1, std::memory_order_acq_rel);
  	};
  	if(m_asyncOverflow.load(std::memory_order_acquire))
-@@ -411,7 +417,7 @@
+@@ -364,7 +371,12 @@
+ 	uint32 write = m_asyncWrite.load(std::memory_order_relaxed);
+ 	uint32 offset = write & (m_asyncRingSize - 1);
+ 	uint32 filler = (offset + need > m_asyncRingSize) ? (m_asyncRingSize - offset) : 0;
+-	uint32 occupied = write + filler + need - m_asyncRead.load(std::memory_order_acquire);
++	uint32 occupied = write + filler + need - m_asyncReadSeen;
++	if(occupied > m_asyncRingSize)
++	{
++		m_asyncReadSeen = m_asyncRead.load(std::memory_order_acquire);
++		occupied = write + filler + need - m_asyncReadSeen;
++	}
+ 	if(occupied > g_asyncStats.ringPeak.load(std::memory_order_relaxed)) g_asyncStats.ringPeak.store(occupied, std::memory_order_relaxed);
+ 	if(occupied > m_asyncRingSize)
+ 	{
+@@ -373,7 +385,7 @@
+ 		//too long; then the overflow queue
+ 		EmuProfile::CScope waitScope(EmuProfile::SECTION_VIF_LOCK);
+ 		auto start = std::chrono::steady_clock::now();
+-		for(uint32 spins = 0; (write + filler + need - m_asyncRead.load(std::memory_order_acquire)) > m_asyncRingSize; spins++)
++		for(uint32 spins = 0; (write + filler + need - (m_asyncReadSeen = m_asyncRead.load(std::memory_order_acquire))) > m_asyncRingSize; spins++)
+ 		{
+ 			bool stalled = m_asyncStalled.load(std::memory_order_acquire);
+ 			if(stalled || (((spins & 63) == 63) && (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(2))))
+@@ -411,7 +423,7 @@
  			return;
  		}
  	}
@@ -50,7 +83,7 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
  	m_asyncQueued.fetch_add(1, std::memory_order_acq_rel);
  	m_asyncWrite.store(write + need, std::memory_order_release);
  	EmuProfile::CScope wakeScope(EmuProfile::SECTION_VIF_WAKE);
-@@ -421,7 +427,7 @@
+@@ -421,7 +433,7 @@
  void CVpu::PublishHeld()
  {
  	m_asyncHeld = false;
@@ -59,7 +92,7 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
  	m_asyncQueued.fetch_add(1, std::memory_order_acq_rel);
  	m_asyncWrite.store(m_asyncHeldEnd, std::memory_order_release);
  	EmuProfile::CScope wakeScope(EmuProfile::SECTION_VIF_WAKE);
-@@ -435,10 +441,46 @@
+@@ -435,10 +447,46 @@
  	{
  		//image_no_copy: shared storage the GS thread can keep a reference to (image data in it is not
  		//copied again); 0x10 zero bytes after it, as FeedImageData's own copies have
@@ -125,7 +158,18 @@ diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
  	void QueuePath3Mask(bool masked);
  	//True when the worker touches no VIF1 state: nothing queued, or it waits for the EE
  	//(VIF1 stalled on an interrupt or a stopped program). VIF1 state is then the EE's.
-@@ -355,6 +360,10 @@
+@@ -324,6 +329,10 @@
+ 	uint32 m_asyncRingSize = ASYNC_RING_SIZE; //fixed when the ring is made
+ 	std::atomic<uint32> m_asyncWrite = 0; //EE thread
+ 	std::atomic<uint32> m_asyncRead = 0;  //worker
++	//EE thread: m_asyncRead as last loaded (acquire). Never ahead of it, so free space computed from it
++	//is conservative; reloaded only when the ring looks full (the worker writes m_asyncRead for every
++	//record: reading it each time moved its cache line between the cores)
++	uint32 m_asyncReadSeen = 0;
+ 	struct ASYNC_PACKET
+ 	{
+ 		std::vector<uint8> data;
+@@ -355,6 +364,10 @@
  		int8 mask = -1;               //0 or 1: MSKPATH3 (asynchronous VIF1)
  	};
  	std::deque<PENDING_KICK> m_pendingKicks;
