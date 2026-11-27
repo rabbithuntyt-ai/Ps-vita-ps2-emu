@@ -448,6 +448,7 @@ namespace
 		else if(key == "feed_neon") GsTransferWrite::g_columns = value != 0; //PSMCT32 transfer blocks written by columns with NEON (exact; on)
 		else if(key == "spu_adma_full_fast") Iop::CSubSystem::g_fastSpuAdmaFull = value != 0; //ADMA into a full input buffer answered without pausing the mixer (on)
 		else if(key == "texture_lazy_texels") CTextureCache::g_lazyTexels = value != 0; //texture cache entries allocate their texels on first decode (exact on the PC; off until measured)
+		else if(key == "ring_prefetch") CVpu::g_ringPrefetch = value != 0; //the EE thread prefetches the VIF1 ring lines after each record (off until measured)
 		else if(key == "unpack_prefetch") CVif::g_unpackPrefetch = value != 0; //bulk unpacks and the next ring record prefetched (on)
 		else if(key == "direct_pool") CVpu::g_directPool = value != 0; //DIRECT packets in reused shared buffers (exact; on)
 		else if(key == "dma_chain_prefetch") Dmac::CChannel::g_chainPrefetch = value != 0; //DMA source chains prefetch the next tag and its data (off until measured)

@@ -74,7 +74,21 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
  		{
  			bool stalled = m_asyncStalled.load(std::memory_order_acquire);
  			if(stalled || (((spins & 63) == 63) && (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(2))))
-@@ -411,7 +423,7 @@
+@@ -399,6 +411,13 @@
+ 			offset = 0;
+ 		}
+ 		auto record = reinterpret_cast<ASYNC_RECORD*>(m_asyncRing + offset);
++		if(g_ringPrefetch)
++		{
++			//The lines after this record (a tag record: its data comes next, up to 512 bytes)
++			uint32 ahead = (tagIncluded && (size == 0x10)) ? std::min<uint32>((*reinterpret_cast<const uint32*>(data) & 0xFFFF) * 0x10 + 0x40, 512) : 256;
++			uint8* next = m_asyncRing + ((offset + need) & (m_asyncRingSize - 1));
++			for(uint32 i = 0; i < ahead; i += 64) __builtin_prefetch(next + i, 1);
++		}
+ 		record->size = size;
+ 		record->flags = tagIncluded ? ASYNC_RECORD_TAG : 0;
+ 		std::memcpy(record + 1, data, size);
+@@ -411,7 +430,7 @@
  			return;
  		}
  	}
@@ -83,7 +97,7 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
  	m_asyncQueued.fetch_add(1, std::memory_order_acq_rel);
  	m_asyncWrite.store(write + need, std::memory_order_release);
  	EmuProfile::CScope wakeScope(EmuProfile::SECTION_VIF_WAKE);
-@@ -421,7 +433,7 @@
+@@ -421,7 +440,7 @@
  void CVpu::PublishHeld()
  {
  	m_asyncHeld = false;
@@ -92,7 +106,7 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
  	m_asyncQueued.fetch_add(1, std::memory_order_acq_rel);
  	m_asyncWrite.store(m_asyncHeldEnd, std::memory_order_release);
  	EmuProfile::CScope wakeScope(EmuProfile::SECTION_VIF_WAKE);
-@@ -435,10 +447,46 @@
+@@ -435,10 +454,46 @@
  	{
  		//image_no_copy: shared storage the GS thread can keep a reference to (image data in it is not
  		//copied again); 0x10 zero bytes after it, as FeedImageData's own copies have
@@ -146,19 +160,22 @@ diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
 diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
 --- a/Source/ee/Vpu.h
 +++ b/Source/ee/Vpu.h
-@@ -151,6 +151,11 @@
+@@ -151,6 +151,14 @@
  	void QueueVifData(const uint8* data, uint32 size, bool tagIncluded);
  	//Worker (asynchronous VIF1): GIF work for the EE thread, in order with the XGKICK packets
  	void QueueDirect(const uint8* data, uint32 size);
 +	//direct_pool (with image_no_copy): DIRECT packets go to the GS in buffers from a ring of shared
 +	//buffers, reused once nothing else holds them, instead of two heap allocations each (Resident
 +	//Evil 4: about 1,700 a game frame, ~940 bytes on average). Buffers grown past 4 KB are not kept.
++	//ring_prefetch: the EE thread prefetches the ring lines after the record it writes (the 4 MB ring is
++	//out of the caches: every record's writes missed), so the next record's copy writes into cache
++	static inline bool g_ringPrefetch = false;
 +	static inline bool g_directPool = true; //on since 27 Nov 2026: Vita worker VIFdirect 20 to 17.3 ms a game frame (RE4)
 +	static inline uint64 g_directPoolHits = 0, g_directPoolMisses = 0;
  	void QueuePath3Mask(bool masked);
  	//True when the worker touches no VIF1 state: nothing queued, or it waits for the EE
  	//(VIF1 stalled on an interrupt or a stopped program). VIF1 state is then the EE's.
-@@ -324,6 +329,10 @@
+@@ -324,6 +332,10 @@
  	uint32 m_asyncRingSize = ASYNC_RING_SIZE; //fixed when the ring is made
  	std::atomic<uint32> m_asyncWrite = 0; //EE thread
  	std::atomic<uint32> m_asyncRead = 0;  //worker
@@ -169,7 +186,7 @@ diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
  	struct ASYNC_PACKET
  	{
  		std::vector<uint8> data;
-@@ -355,6 +364,10 @@
+@@ -355,6 +367,10 @@
  		int8 mask = -1;               //0 or 1: MSKPATH3 (asynchronous VIF1)
  	};
  	std::deque<PENDING_KICK> m_pendingKicks;

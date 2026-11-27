@@ -1285,6 +1285,13 @@ headers and comments. The ideas worth testing are in the brief's "Not done yet" 
     position as last loaded and reloads it only when the ring looks full, instead of moving the
     worker's cache line to its core for every record. Host "most queued at once" is now an upper
     bound.
+- **`ring_prefetch` (patch 0138, off):** the EE thread prefetches the ring lines after each record
+  it writes (for a tag record, its data's length). Vita (VR*, three pairs): VIFcopy 21/22/21 against
+  21/21/21 ms a game frame, game fps within the spread. No gain: the copy's cold side is the
+  source. Off.
+- **Baseline with all defaults of 27 Nov (VR*_off):** steady 4.80/4.75/4.87 game fps (476/471/486
+  game frames in 120 s). Emulation thread 195-200 ms a game frame, of which waiting for VU1
+  26-28: about 171 ms of its own work.
 - **EE guest registers across blocks: measured, not built.** `tools/jit_reg_traffic.py` counts the
   context loads and stores per EE GPR in RE4's hot blocks (189 blocks, 60% of EE samples),
   weighted by samples. The traffic is spread: v0 (101 loads, 206 stores), a0 (76, 81), v1 (43,
