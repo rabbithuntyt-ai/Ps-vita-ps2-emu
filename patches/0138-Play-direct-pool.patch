@@ -1,0 +1,138 @@
+diff --git a/Source/ee/Vpu.cpp b/Source/ee/Vpu.cpp
+--- a/Source/ee/Vpu.cpp
++++ b/Source/ee/Vpu.cpp
+@@ -249,6 +249,12 @@
+ 				}
+ 				m_asyncCurrentInRing = true;
+ 				m_asyncCurrentEnd = read + sizeof(ASYNC_RECORD) + ((record->size + 15) & ~15u);
++				if(CVif::g_unpackPrefetch)
++				{
++					//The next record's first lines (written by the EE thread, likely out of the caches by now)
++					const uint8* next = m_asyncRing + (m_asyncCurrentEnd & (m_asyncRingSize - 1));
++					for(uint32 i = 0; i < 256; i += 64) __builtin_prefetch(next + i);
++				}
+ 				m_asyncInProgress = true;
+ 				m_vif->BeginAsyncPacket(const_cast<uint8*>(reinterpret_cast<const uint8*>(record + 1)), record->size, (record->flags & ASYNC_RECORD_TAG) != 0);
+ 			}
+@@ -298,7 +304,7 @@
+ void CVpu::QueueVifData(const uint8* data, uint32 size, bool tagIncluded)
+ {
+ 	EmuProfile::CScope profileScope(EmuProfile::SECTION_VIF_QUEUE);
+-	g_asyncStats.bytes.fetch_add(size, std::memory_order_relaxed);
++	g_asyncStats.bytes.store(g_asyncStats.bytes.load(std::memory_order_relaxed) + size, std::memory_order_relaxed); //EE thread only: no read-modify-write
+ 	//Games send VIF1 data in small DMA chunks (Resident Evil 4: about 260 bytes); large ones
+ 	//go as several records (the stream reads them the same way as consecutive transfers)
+ 	while(size > ASYNC_RECORD_MAX)
+@@ -336,7 +342,7 @@
+ 				record->size = 0x10 + size;
+ 			}
+ 			m_asyncHeldEnd += dataSize;
+-			g_asyncStats.merged.fetch_add(1, std::memory_order_relaxed);
++			g_asyncStats.merged.store(g_asyncStats.merged.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); //EE thread only: no read-modify-write
+ 			PublishHeld();
+ 			return;
+ 		}
+@@ -347,7 +353,7 @@
+ 		packet.data.assign(data, data + size);
+ 		packet.tagIncluded = tagIncluded;
+ 		m_asyncQueue.push_back(std::move(packet));
+-		g_asyncStats.packets.fetch_add(1, std::memory_order_relaxed);
++		g_asyncStats.packets.store(g_asyncStats.packets.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); //EE thread only: no read-modify-write
+ 		m_asyncQueued.fetch_add(1, std::memory_order_acq_rel);
+ 	};
+ 	if(m_asyncOverflow.load(std::memory_order_acquire))
+@@ -411,7 +417,7 @@
+ 			return;
+ 		}
+ 	}
+-	g_asyncStats.packets.fetch_add(1, std::memory_order_relaxed);
++	g_asyncStats.packets.store(g_asyncStats.packets.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); //EE thread only: no read-modify-write
+ 	m_asyncQueued.fetch_add(1, std::memory_order_acq_rel);
+ 	m_asyncWrite.store(write + need, std::memory_order_release);
+ 	EmuProfile::CScope wakeScope(EmuProfile::SECTION_VIF_WAKE);
+@@ -421,7 +427,7 @@
+ void CVpu::PublishHeld()
+ {
+ 	m_asyncHeld = false;
+-	g_asyncStats.packets.fetch_add(1, std::memory_order_relaxed);
++	g_asyncStats.packets.store(g_asyncStats.packets.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); //EE thread only: no read-modify-write
+ 	m_asyncQueued.fetch_add(1, std::memory_order_acq_rel);
+ 	m_asyncWrite.store(m_asyncHeldEnd, std::memory_order_release);
+ 	EmuProfile::CScope wakeScope(EmuProfile::SECTION_VIF_WAKE);
+@@ -435,10 +441,46 @@
+ 	{
+ 		//image_no_copy: shared storage the GS thread can keep a reference to (image data in it is not
+ 		//copied again); 0x10 zero bytes after it, as FeedImageData's own copies have
+-		auto storage = std::make_shared<std::vector<uint8>>();
+-		storage->reserve(size + 0x10);
+-		storage->assign(data, data + size);
+-		storage->resize(size + 0x10, 0);
++		std::shared_ptr<std::vector<uint8>> storage;
++		if(g_directPool && (size + 0x10 <= DIRECT_POOL_KEEP))
++		{
++			if(m_directPool.empty()) m_directPool.resize(DIRECT_POOL_SIZE);
++			//A slot only the pool holds (the GS thread let go of it); a few tries, else a new buffer there
++			for(uint32 tries = 0; tries < 8; tries++)
++			{
++				auto& slot = m_directPool[m_directPoolCursor];
++				m_directPoolCursor = (m_directPoolCursor + 1) % DIRECT_POOL_SIZE;
++				if(!slot)
++				{
++					slot = std::make_shared<std::vector<uint8>>();
++					slot->reserve(DIRECT_POOL_KEEP);
++					storage = slot;
++					g_directPoolMisses++;
++					break;
++				}
++				if(slot.use_count() == 1)
++				{
++					//The GS thread's last reads come before its release of the reference
++					std::atomic_thread_fence(std::memory_order_acquire);
++					storage = slot;
++					g_directPoolHits++;
++					break;
++				}
++			}
++		}
++		if(storage)
++		{
++			storage->resize(size + 0x10);
++			std::memcpy(storage->data(), data, size);
++			std::memset(storage->data() + size, 0, 0x10);
++		}
++		else
++		{
++			storage = std::make_shared<std::vector<uint8>>();
++			storage->reserve(size + 0x10);
++			storage->assign(data, data + size);
++			storage->resize(size + 0x10, 0);
++		}
+ 		kick.shared = std::move(storage);
+ 	}
+ 	else
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -151,6 +151,11 @@
+ 	void QueueVifData(const uint8* data, uint32 size, bool tagIncluded);
+ 	//Worker (asynchronous VIF1): GIF work for the EE thread, in order with the XGKICK packets
+ 	void QueueDirect(const uint8* data, uint32 size);
++	//direct_pool (with image_no_copy): DIRECT packets go to the GS in buffers from a ring of shared
++	//buffers, reused once nothing else holds them, instead of two heap allocations each (Resident
++	//Evil 4: about 1,700 a game frame, ~940 bytes on average). Buffers grown past 4 KB are not kept.
++	static inline bool g_directPool = true; //on since 27 Nov 2026: Vita worker VIFdirect 20 to 17.3 ms a game frame (RE4)
++	static inline uint64 g_directPoolHits = 0, g_directPoolMisses = 0;
+ 	void QueuePath3Mask(bool masked);
+ 	//True when the worker touches no VIF1 state: nothing queued, or it waits for the EE
+ 	//(VIF1 stalled on an interrupt or a stopped program). VIF1 state is then the EE's.
+@@ -355,6 +360,10 @@
+ 		int8 mask = -1;               //0 or 1: MSKPATH3 (asynchronous VIF1)
+ 	};
+ 	std::deque<PENDING_KICK> m_pendingKicks;
++	static constexpr uint32 DIRECT_POOL_SIZE = 2048;
++	static constexpr size_t DIRECT_POOL_KEEP = 4096;
++	std::vector<std::shared_ptr<std::vector<uint8>>> m_directPool; //worker only
++	uint32 m_directPoolCursor = 0;
+ 	uint32 m_kickOffset = 0; //EE thread: bytes of the first pending packet already sent
+ 	std::atomic<bool> m_hasPendingKicks = false;
+ 	std::atomic<bool> m_pendingInterrupt = false;

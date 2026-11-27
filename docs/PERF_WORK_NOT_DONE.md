@@ -1264,6 +1264,29 @@ headers and comments. The ideas worth testing are in the brief's "Not done yet" 
 - **Baseline with all 27 Nov defaults (VP*_off):** steady 4.55-4.64 game fps; emulation thread
   204-208 ms a game frame, of which waiting for VU1 34-35: about 172 ms of its own work (EE 87,
   VIFcopy 22, VIFqueue 10, IOP 10, relayDirect 9, IOPkernel 7, relayWorld 6, EEioDma 6).
+- **DIRECT packets in reused buffers (`direct_pool`, patch 0138, on):** with `image_no_copy` each
+  DIRECT packet (RE4: ~1,700 a game frame, ~940 bytes) got a new shared buffer on the VU1 worker
+  (two heap allocations, a copy, a zero tail). Now a ring of 2,048 shared buffers is reused once
+  nothing else holds one (an acquire fence after `use_count() == 1`); buffers over 4 KB are not
+  kept. PC: 241,263 buffers reused against 2,048 made; screenshots identical. Vita (VD*, three
+  pairs): worker VIFdirect 20/20/20 to 17/18/17 ms a game frame; the emulation thread unchanged.
+  Also: the VIF1 queue's statistics counters, written by the EE thread alone, are no longer
+  atomic read-modify-writes (exclusive load/store loops on ARM).
+- **VIF unpacks (worker VIFunpack 33 ms):** host `--unpack-stats` shows RE4's unpacks are all V4-16
+  (39.4M values in the walk) and V4-32 (1.7M) in the CL == WL loop, 100% through the bulk path:
+  about 120 ns a value on the Vita, cold memory again (the worker reads ring data written up to
+  ~4 MB earlier). `unpack_prefetch` (patch 0139) prefetches the bulk source 256 bytes ahead and
+  the next ring record's first lines. PC: identical.
+- **EE guest registers across blocks: measured, not built.** `tools/jit_reg_traffic.py` counts the
+  context loads and stores per EE GPR in RE4's hot blocks (189 blocks, 60% of EE samples),
+  weighted by samples. The traffic is spread: v0 (101 loads, 206 stores), a0 (76, 81), v1 (43,
+  88), t0 (37, 81), a1 (44, 62), sp (50, 43), t1 (30, 59), ra (48, 38), a2 (31, 43), then a long
+  tail. Pinning 2-3 of them in host registers (the AArch32 back end pins the cycle quota and the
+  page table pointer, leaving 5 registers to allocate in a block) covers about 30% of guest
+  register traffic, about 3% of the instructions (at most ~2.5 ms of EE time), and takes 2-3
+  of the 5 registers from every block. Likely a net loss. The scratch registers (v0, v1, t0,
+  t1) are stored about twice as often as loaded: stores at block ends that the next block
+  overwrites first. Dropping them needs liveness across linked blocks (a larger project).
 - **IOP:** about 440 IOP interrupts a game frame, 165 of them the SPU2 IRQ line (RE4's driver never
   clears the flag; the edge-triggered variant made it poll more, 26 Nov). Not a quick win.
 

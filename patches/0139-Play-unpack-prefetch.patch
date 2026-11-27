@@ -1,0 +1,41 @@
+diff --git a/Source/ee/Vif.h b/Source/ee/Vif.h
+--- a/Source/ee/Vif.h
++++ b/Source/ee/Vif.h
+@@ -372,6 +372,14 @@
+ 	static inline bool g_bulkUnpack = true;
+ 	static inline bool g_bulkUnpackNeon = true; //the NEON widening in it (bulk_unpack_neon; off: plain C)
+ 	static inline uint64 g_bulkValues = 0; //values unpacked by runs (diagnostics, not atomic)
++	//Diagnostics (host --unpack-stats): values asked for by UNPACK commands, by data type, mask, and
++	//whether the CL == WL, no offset mode loop applies (index 1)
++	static inline bool g_unpackStats = false;
++	//unpack_prefetch: bulk unpacks prefetch their source ahead (the worker reads ring data written
++	//up to ~4 MB earlier, out of the caches: RE4 ~120 ns a V4-16 value), and the worker prefetches
++	//the next ring record when it starts one
++	static inline bool g_unpackPrefetch = false;
++	static inline uint64 g_unpackValues[16][2][2] = {};
+ 
+ protected:
+ 
+@@ -597,6 +605,7 @@
+ 		uint32 currentNum = (m_NUM == 0) ? 256 : m_NUM;
+ 		uint32 codeNum = (m_CODE.nNUM == 0) ? 256 : m_CODE.nNUM;
+ 		uint32 transfered = codeNum - currentNum;
++		if(g_unpackStats) g_unpackValues[dataType & 0x0F][useMask ? 1 : 0][(clGreaterEqualWl && (mode == 0) && (cl == wl)) ? 1 : 0] += currentNum;
+ 
+ 		if(cl > wl)
+ 		{
+@@ -656,8 +665,14 @@
+ 						if(count != 0)
+ 						{
+ 							const uint8* source = stream.GetDirectReadPointer();
++							const uint8* sourceEnd = source + count * valueSize;
++							if(g_unpackPrefetch)
++							{
++								for(const uint8* p = source; (p < sourceEnd) && (p < source + 256); p += 32) __builtin_prefetch(p);
++							}
+ 							for(uint32 n = 0; n < count; n++)
+ 							{
++								if(g_unpackPrefetch && ((n & 3) == 0) && (source + 256 < sourceEnd)) __builtin_prefetch(source + 256);
+ 								auto dst = reinterpret_cast<uint128*>(vuMem + nDstAddr);
+ 								if constexpr(dataType == 0x0C)
+ 								{

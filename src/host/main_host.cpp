@@ -324,6 +324,10 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-spu-adma-full-fast")) Iop::CSubSystem::g_fastSpuAdmaFull = false;
 		else if(!std::strcmp(argv[i], "--spu-adma-full-fast")) Iop::CSubSystem::g_fastSpuAdmaFull = true; //ADMA into a full input buffer answered without pausing the mixer
 		else if(!std::strcmp(argv[i], "--flush-sites")) CGSH_Hardware::g_flushSites = new std::map<int, uint64>(); //fixed function draws by the FlushBatch call that ended them
+		else if(!std::strcmp(argv[i], "--unpack-stats")) CVif::g_unpackStats = true; //UNPACK values by data type, mask and loop
+		else if(!std::strcmp(argv[i], "--unpack-prefetch")) CVif::g_unpackPrefetch = true; //bulk unpacks and the next ring record prefetched
+		else if(!std::strcmp(argv[i], "--no-direct-pool")) CVpu::g_directPool = false;
+		else if(!std::strcmp(argv[i], "--direct-pool")) CVpu::g_directPool = true; //DIRECT packets in reused shared buffers
 		else if(!std::strcmp(argv[i], "--dma-chain-prefetch")) Dmac::CChannel::g_chainPrefetch = true; //DMA source chains prefetch the next tag and its data
 		else if(!std::strcmp(argv[i], "--no-vu0-macro-flags")) CCOP_VU::g_macroFlagRuns = false;
 		else if(!std::strcmp(argv[i], "--vu0-macro-flags")) CCOP_VU::g_macroFlagRuns = true; //VU0 macro flag runs (COP_VU.h)
@@ -740,10 +744,19 @@ int main(int argc, char** argv)
 			std::printf("async VIF1: %llu packets, %.1f MB, %llu stalls, %llu quiet waits (%.0f ms), %llu PATH3 syncs\n", (unsigned long long)a.packets.load(),
 			            a.bytes.load() / 1048576.0, (unsigned long long)a.stalls.load(), (unsigned long long)a.quietWaits.load(), a.quietWaitUs.load() / 1000.0, (unsigned long long)a.path3Syncs.load());
 			std::printf("VIF1 ring: %u KB, most queued at once %llu KB, %llu records waited for room, %llu tags merged\n", CVpu::g_asyncRingSize / 1024, (unsigned long long)(a.ringPeak.load() / 1024), (unsigned long long)a.ringWaits.load(), (unsigned long long)a.merged.load());
+			std::printf("DIRECT pool: %llu buffers reused, %llu made%c", (unsigned long long)CVpu::g_directPoolHits, (unsigned long long)CVpu::g_directPoolMisses, 10);
 			std::printf("image data to the GS: %.1f MB by reference, %.1f MB copied\n", CGSHandler::g_imageNoCopyBytes / 1048576.0, CGSHandler::g_imageCopyBytes / 1048576.0);
 			std::printf("relay: %llu kicks (%.1f MB), %llu DIRECT (%.1f MB), %llu replaced; %llu register writes\n",(unsigned long long)a.kicks.load(), a.kickBytes.load() / 1048576.0,
 			            (unsigned long long)a.directs.load(), a.directBytes.load() / 1048576.0, (unsigned long long)a.customs.load(), (unsigned long long)CGSHandler::g_writeBufferTotal);
 			std::printf("VU0 macro FMAC instructions compiled without their MAC update: %llu\n", (unsigned long long)CCOP_VU::g_macroFlagsSkipped);
+			if(CVif::g_unpackStats)
+			{
+				static const char* types[16] = {"S-32", "S-16", "S-8", "?3", "V2-32", "V2-16", "V2-8", "?7", "V3-32", "V3-16", "V3-8", "?B", "V4-32", "V4-16", "V4-8", "V4-5"};
+				for(int t = 0; t < 16; t++)
+					for(int m = 0; m < 2; m++)
+						for(int f = 0; f < 2; f++)
+							if(CVif::g_unpackValues[t][m][f]) std::printf("unpack %s%s%s: %llu values%c", types[t], m ? " masked" : "", f ? " (cl=wl loop)" : "", (unsigned long long)CVif::g_unpackValues[t][m][f], 10);
+			}
 			std::printf("unpacked by runs: %llu values\n", (unsigned long long)CVif::g_bulkValues);
 			if(CVpu::g_reuseScan)
 				for(int k = 0; k < 2; k++)
