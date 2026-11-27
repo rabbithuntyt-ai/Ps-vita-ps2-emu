@@ -12,6 +12,14 @@ before it is built. The RE4-only ideas in "Not done yet" (characters drawn from 
 skinning, native C++ for RE4's game functions, skipping VIF data for retained geometry,
 dropping RE4's post-processing) are therefore on hold.
 
+**Status, 27 Nov 2026 (Vita, all defaults on):** RE4 at **4.75-4.87 steady game fps** (about 3.4 on
+24 Nov). Per game frame: emulation thread about 171 ms of its own work (EE game code 87, VIFcopy
+21, IOP ~20, VIFqueue 10, DIRECT relay 9) plus ~27 waiting for VU1; VU1 worker about 165 busy;
+GS thread about 170 busy. General changes kept on 26-27 Nov (each measured on the Vita):
+`vif_merge`, `spu_adma_full_fast`, `feed_neon`, `clut_load_keep_batch`, `readback_neon`
+(read-backs -24%), `vu0_macro_flags` (EE -5%), `image_no_copy`, `direct_pool`, `unpack_prefetch`
+(worker unpack -48%, game fps +3.4%). Details and the ones dropped: PERF_WORK_NOT_DONE.md.
+
 ## The setup
 
 - **Hardware:** PlayStation Vita. ARM Cortex-A9, 4 cores at 444 MHz (3 for applications; the
