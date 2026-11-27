@@ -1119,6 +1119,38 @@ headers and comments. The ideas worth testing are in the brief's "Not done yet" 
 - **Vita:** not measured (offline); the eboot builds. On the Vita the zeroing alone was 1-2 MB
   per entry, 26 entries a game frame.
 
+### Vita A/B of the nine changes built while it was offline (27 Nov 2026, runs VA*, patch 0135)
+
+- **Back online:** after the user restarted the Vita (a GPU crash had stopped it), RE4's JIT
+  cache file was empty. Each new eboot also invalidates it. The first three runs, alternating two
+  eboots, compiled everything live (the JIT's finish step about 2 ms a block, ~500 ms of every
+  second) and never got past loading: a black screen, 0-3 game frames. Nothing was wrong with
+  either build. Once a run of the current eboot wrote the cache (4 MB), runs reached gameplay
+  again. One core dump (data abort, main thread) came from the older R55 eboot during a cold run.
+  **Lesson:** after any restart or new eboot, do one warm-up run before measuring.
+- **Method:** one eboot (all changes in, all off), a warm-up, then two rounds of: all off, then
+  each switch alone. 120 s each, `gp.sh`, read with `tools/perf_audit.py` (`runs/re4/abv1_sum.py`).
+- **Results** (mean of two runs, ms per game frame; steady game fps per run):
+
+| Switch | Steady fps | What it targets | Verdict |
+|---|---|---|---|
+| all off | 4.27, 4.16 | emulation thread VIF queueing 34, SPUread 7; worker VIF 66.5; GS feedWrite 17, draw+flush 14, textures 11, busy 178 | baseline |
+| `vif_merge` (0133) | 4.40, 4.27 | VIF queueing 34 to 30; worker VIF 66.5 to 60.5 | **on** |
+| `spu_adma_full_fast` (0134) | 4.21, 4.29 | SPUread 7 to 0 | **on** |
+| `feed_neon` (0130) | 4.08, 4.36 | feedWrite 17 to 15; frame dumps right | **on** |
+| `clut_load_keep_batch` | 4.07, 4.25 | GS draw+flush 14 to 12.5 (RE4 makes few CLUT flushes) | **on** |
+| `pump_keep_batch` | 4.10, 4.16 | GS draw+flush 13.5: no change in RE4 | off; judge on SH2 |
+| `texture_lazy_texels` | 4.18, 4.10 | GS textures 11.5: no change (RE4 never thrashed) | off; judge on SH2 |
+| `image_no_copy` (0132) | 4.23, 4.25 | worker DIRECT 68 against 66.5 | off: no gain |
+| `vif_ring_kb=512` (0131) | 3.40, 3.44 | - | off: slower |
+| `vif_ring_kb=256` (0131) | 0.00, 3.31 | - | off: slower, and stalled the emulator in one run |
+
+- Game fps moves within the spread, as expected: RE4's limit is its game code (EE ~94 ms a game
+  frame). The four kept switches are all general mechanisms; they are now the defaults for every
+  game (patch 0135 for the three in Play, `GSH_Hardware.h` for the CLUT one). One combined run
+  (all four on, frame dumps every 20): 412 game frames, pictures right.
+- The 256 KB ring's stall is not investigated: the 4 MB ring stays.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an

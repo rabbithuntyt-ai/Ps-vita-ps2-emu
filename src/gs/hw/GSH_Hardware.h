@@ -268,7 +268,7 @@ public:
 	//clut_load_keep_batch: a TEX0 that loads the CLUT ends the batch only when a render target overlaps
 	//the CLUT's memory (a read-back might need what the batch draws) or the CLUT it loads differs
 	//(the hash check after the load); Silent Hill 2 reloads the same CLUT before most draws
-	static inline bool g_clutLoadKeepBatch = false;
+	static inline bool g_clutLoadKeepBatch = true; //on since 27 Nov 2026: Vita GS draw + flush 14 to 12.5 ms a game frame (RE4)
 	static inline uint64 g_clutLoadsKept = 0; //CLUT loads that kept the batch open (whole run)
 	static inline bool g_stateBreaks = false; //host --state-breaks: fixed function draws ended by a state change, by the fields that changed
 	static inline std::map<std::string, std::pair<uint64, uint64>> g_stateBreakCounts; //fields: draws, vertices

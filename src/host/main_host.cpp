@@ -313,14 +313,18 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-end-on-worker")) Re4Vu1::g_endOnWorker = false; //world batch ends projected on the GS thread
 		else if(!std::strcmp(argv[i], "--solid-readback-check")) CGSH_Hardware::g_solidReadbackCheck = true; //solid read-backs also read the GPU and count differences
 		else if(!std::strcmp(argv[i], "--no-mailbox-batch")) CMailBox::g_batched = false; //one lock and one notify per mailbox call
+		else if(!std::strcmp(argv[i], "--no-feed-neon")) GsTransferWrite::g_columns = false;
 		else if(!std::strcmp(argv[i], "--feed-neon")) GsTransferWrite::g_columns = true; //PSMCT32 transfer blocks written by columns
 		else if(!std::strcmp(argv[i], "--image-no-copy")) CGSHandler::g_imageNoCopy = true; //DIRECT image data to the GS thread without a copy
 		else if(!std::strcmp(argv[i], "--vif-ring-kb") && (i + 1 < argc)) CVpu::g_asyncRingSize = static_cast<uint32>(std::atoi(argv[++i])) * 1024; //VIF1 ring size (power of 2, >= 128)
 		else if(!std::strcmp(argv[i], "--spu-slow-reads")) Iop::CSubSystem::g_spuSlowCounts = new std::map<uint32, uint64>(); //SPU reads and DMAs that pause the mixer, by address
+		else if(!std::strcmp(argv[i], "--no-spu-adma-full-fast")) Iop::CSubSystem::g_fastSpuAdmaFull = false;
 		else if(!std::strcmp(argv[i], "--spu-adma-full-fast")) Iop::CSubSystem::g_fastSpuAdmaFull = true; //ADMA into a full input buffer answered without pausing the mixer
 		else if(!std::strcmp(argv[i], "--flush-sites")) CGSH_Hardware::g_flushSites = new std::map<int, uint64>(); //fixed function draws by the FlushBatch call that ended them
 		else if(!std::strcmp(argv[i], "--pump-keep-batch")) CGSH_Hardware::g_pumpKeepBatch = true; //the batch stays open across GS pumps (flushed at flips)
+		else if(!std::strcmp(argv[i], "--no-clut-load-keep-batch")) CGSH_Hardware::g_clutLoadKeepBatch = false;
 		else if(!std::strcmp(argv[i], "--clut-load-keep-batch")) CGSH_Hardware::g_clutLoadKeepBatch = true; //CLUT loads end the batch only when needed
+		else if(!std::strcmp(argv[i], "--no-vif-merge")) CVpu::g_asyncMerge = false;
 		else if(!std::strcmp(argv[i], "--vif-merge")) CVpu::g_asyncMerge = true; //DMA tag records joined with their data records in the VIF1 ring
 		else if(!std::strcmp(argv[i], "--fine-timers")) CGSH_Hardware::g_fineTimers = true; //per batch timers: retained world segments printed at the end
 		else if(!std::strcmp(argv[i], "--feed-shapes")) CGSH_Hardware::g_feedShapes = true; //host to local transfers by format, size and alignment

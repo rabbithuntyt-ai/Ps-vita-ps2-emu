@@ -1,0 +1,36 @@
+diff --git a/Source/gs/GsTransferWrite.h b/Source/gs/GsTransferWrite.h
+--- a/Source/gs/GsTransferWrite.h
++++ b/Source/gs/GsTransferWrite.h
+@@ -46,7 +46,7 @@
+ 	// 64-byte columns; a column holds two transfer rows' 8 pixels, 2 pixels from each row in turn
+ 	// (checked against Play's page offsets: ColumnLayoutMatches). One column: two 32-byte loads, four
+ 	// 16-byte stores (NEON), instead of eight 8-byte copies through an offset table.
+-	inline bool g_columns = false;
++	inline bool g_columns = true; //on since 27 Nov 2026: Vita feedWrite 17 to 15 ms a game frame, pictures right
+ 	inline uint64 g_blockUnits = 0, g_singleUnits = 0, g_calls = 0, g_unalignedStarts = 0;
+ 
+ 	// For one block: the source unit of every unit of the block (in memory order), as an index
+diff --git a/Source/ee/Vpu.h b/Source/ee/Vpu.h
+--- a/Source/ee/Vpu.h
++++ b/Source/ee/Vpu.h
+@@ -175,7 +175,7 @@
+ 	//until the next record, or until the EE thread asks whether VIF1 is quiet. The worker reads the
+ 	//same words in the same order (the stream skips the tag's lower 8 bytes either way); RE4 queues
+ 	//about 15,000 records a game frame, half of them tags, each with its own atomics and wake check
+-	static inline bool g_asyncMerge = false;
++	static inline bool g_asyncMerge = true; //on since 27 Nov 2026: Vita VIF queueing 34 to 30 ms a game frame, worker VIF 66.5 to 60.5
+ 	//Diagnostics (PC runner, --reuse-scan): GIF data the relay hands to the GS, hashed; a packet
+ 	//"repeats" when the same bytes were relayed in the last REUSE_WINDOW vblanks.
+ 	//[0] XGKICK packets, [1] VIF1 DIRECT transfers; counts and bytes, all and repeated
+diff --git a/Source/iop/Iop_SubSystem.h b/Source/iop/Iop_SubSystem.h
+--- a/Source/iop/Iop_SubSystem.h
++++ b/Source/iop/Iop_SubSystem.h
+@@ -80,7 +80,7 @@
+ 		static inline std::map<uint32, uint64>* g_spuSlowCounts = nullptr;
+ 		//spu_adma_full_fast: a core input (ADMA) DMA into a full input buffer answers 0 blocks
+ 		//without pausing the mixer, when no register write is queued (off until measured)
+-		static inline bool g_fastSpuAdmaFull = false;
++		static inline bool g_fastSpuAdmaFull = true; //on since 27 Nov 2026: Vita SPUread 7 to 0 ms a game frame
+ 
+ 		CMIPS m_cpu;
+ 		CMA_MIPSIV m_cpuArch;

@@ -21,34 +21,20 @@ sound, then measure what was built blind, then the new work. Background and numb
   pairs of 120 s runs with `timeout 480`. Read the results with `tools/perf_audit.py RUN/perf.csv`
   (steady game fps from 25 s, ms per game frame by section).
 
-## 1. Back online
+## 1. Back online: done 27 Nov 2026
 
-1. `bash runs/re4/vitacheck.sh` and `vitalab find` (in `/c/Users/troy2/Downloads`).
-2. Build the current branch (patches through 0134): `runs/re4/vb.sh base`.
-3. Sanity run: one `gp.sh` run with every new switch off. It must finish without a crash dump,
-   at about 4.2 steady game fps (the last result, R55c: 4.17). Look at a few frame dumps
-   (`DUMP=20`).
+- After a restart or a new eboot, do one warm-up run before measuring: the JIT cache starts
+  empty, and a cold run spends its 120 s compiling (black screen, 0-3 game frames).
 
-## 2. A/B the changes built while it was offline (all off by default, all exact on the PC; "src" = in this repository, not a Play patch)
+## 2. A/B of the changes built while it was offline: done 27 Nov 2026
 
-| Switch | Patch | What it should move | Also check |
-|---|---|---|---|
-| `feed_neon=1` | 0130 | GS thread `feedWrite` (16 ms a game frame): PSMCT32 transfer blocks written by columns with NEON | Frame dumps right (only the Vita runs the NEON path) |
-| `vif_ring_kb=256`, `512` against `4096` | 0131 | Emulation thread `VIFcopy` (20 ms) and the worker's `VIFunpack`: a ring that fits the L2 | `ringWaits` in perf.csv; VU1 wait not worse |
-| `image_no_copy=1` | 0132 | DIRECT image data to the GS by reference: worker `VIFdirect` (19 ms), the relay | Frame dumps right (texture uploads) |
-| `vif_merge=1` | 0133 | Emulation thread `VIFqueue` (13 ms) and `VIFwake`; worker `VIFcmd` (13 ms). Ring records -41% (RE4), -45% (SH2) | - |
-| `clut_load_keep_batch=1` | src | GS thread GL draw cost: SH2 fixed function draws -62% to -83%. Measure on SH2 too | Frame dumps right (palette textures) |
-| `pump_keep_batch=1` | src | GS thread GL draw cost: with the CLUT switch SH2 draws -91% (459 to 39 a game frame), RE4 -18% | UI and overlay still draw right; nothing drawn late after a flip |
-| `texture_lazy_texels=1` | src | GS thread `texCreate`: SH2 made 26 texture cache entries a game frame (1-2 MB allocated and zeroed each), 0.1 with it; PC GS busy -18% in SH2 gameplay | Textures right; free memory |
-| `spu_adma_full_fast=1` | 0134 | Emulation thread `SPUread` (~7 ms, all waiting). Paused SPU DMAs -92% (RE4), -95% (SH2) | `spu_wait_ms` and `spu_read_waits` in perf.csv; listen for audio glitches |
+Results in [PERF_WORK_NOT_DONE.md](PERF_WORK_NOT_DONE.md), "Vita A/B of the nine changes".
 
-- Turn on as the global default whatever is exact and cuts its section time, even if game fps
-  stays within the spread. All five are general mechanisms; use a game profile only for a
-  measured reason. Commit with
-  `runs/re4/commit.sh`, and put the numbers in the brief and in PERF_WORK_NOT_DONE.md.
-- `vif_merge` and `spu_adma_full_fast` are general (both checked on Silent Hill 2). If they hold
-  up, make them the global default, not RE4-only.
-- After that: one combined run with everything kept, as the new baseline.
+- On by default for every game since then (patch 0135 and `GSH_Hardware.h`): `vif_merge`,
+  `spu_adma_full_fast`, `feed_neon`, `clut_load_keep_batch`.
+- Still off, to be judged on Silent Hill 2 (no effect in RE4): `pump_keep_batch`,
+  `texture_lazy_texels`.
+- Dropped: `image_no_copy` (no gain); `vif_ring_kb` below 4096 (slower; 256 KB stalled once).
 
 ## 3. Silent Hill 2: a gameplay baseline (never measured on the Vita)
 
@@ -59,7 +45,8 @@ sound, then measure what was built blind, then the new work. Background and numb
 - Then a `gp.sh`-style script for SH2: load the state, walk (left stick) for 120 s, and read it
   with `perf_audit.py`. Add the result to `docs/COMPATIBILITY.md`, whose SH2 row (2 Nov) has
   only menus and the movie.
-- Repeat the A/Bs of section 2 for `vif_merge` and `spu_adma_full_fast` on SH2.
+- A/B `pump_keep_batch` and `texture_lazy_texels` on SH2 (on the PC: draws -91% with the CLUT
+  switch, texture cache entries 44,175 to 224).
 - **Check the old gameplay freeze first.** The user saw SH2 gameplay on the Vita freeze on a
   picture of a single floating wall (date not recorded). It is not documented anywhere else.
   - On the PC runner, with SH2's profile settings (`threaded_vu1=1`, threaded SPU, no
