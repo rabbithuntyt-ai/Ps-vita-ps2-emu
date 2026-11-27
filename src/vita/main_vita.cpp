@@ -446,6 +446,8 @@ namespace
 		else if(key == "feed_neon") GsTransferWrite::g_columns = value != 0; //PSMCT32 transfer blocks written by columns with NEON (exact; on)
 		else if(key == "spu_adma_full_fast") Iop::CSubSystem::g_fastSpuAdmaFull = value != 0; //ADMA into a full input buffer answered without pausing the mixer (on)
 		else if(key == "texture_lazy_texels") CTextureCache::g_lazyTexels = value != 0; //texture cache entries allocate their texels on first decode (exact on the PC; off until measured)
+		else if(key == "readback_neon_check") CGSH_Hardware::g_readbackNeonCheck = value != 0; //each direct read-back also read by glReadPixels, differences counted (perf.csv rb_neon_differ)
+		else if(key == "readback_neon") CGSH_Hardware::g_readbackNeon = value != 0; //read-backs copy the target's texture memory with NEON block loads (exact; on)
 		else if(key == "pump_keep_batch") CGSH_Hardware::g_pumpKeepBatch = value != 0; //the GS batch stays open across pumps, flushed at flips (exact on the PC; off until measured)
 		else if(key == "clut_load_keep_batch") CGSH_Hardware::g_clutLoadKeepBatch = value != 0; //CLUT loads end the batch only when a target holds CLUT memory or the CLUT changes (exact; on)
 		else if(key == "vif_merge") CVpu::g_asyncMerge = value != 0; //DMA tag records joined with their data records in the VIF1 ring (exact; on)
@@ -966,7 +968,7 @@ namespace
 				std::fprintf(perfFile, ",gpu_pump_ms,gpu_gl_ms,gpu_tex_ms,gpu_xfer_ms,gpu_disp_ms,present_ms,gpu_draws,gpu_tex_up,gpu_rt_up,gpu_rt_dl,up_gl_ms,up_kpix,dl_gl_ms,dl_kpix,f_targets_new,f_xfer_in,f_xfer_out,f_xfer_local,rt_deferred,rt_skip_rows,xfer_same,idle_intc_gs_t1_ipu_dstat_chcr_vifgif,idle_chcr_d0_x_d1_x_d2_x_d3_d4_d5_d6_d8_d9,vif1_kqw,vif1_empty,vif_vu_waits,vif_vu_giveups,unpack_k_s32_s16_s8_x_v2_32_16_8_x_v3_32_16_8_x_v4_32_16_8_5,unpack_k_masked,unpack_k_mode,unpack_k_cycle,threads,heap_used_mb,heap_free_mb,jit_pool_kb,jit_flushes,mpeg_pictures,tex_decode_ms,tex_gl_ms,mpeg_wait_ms,mpeg_decode_ms,mpeg_starved,disc_ms,disc_reads,vu_sync_ms,spu_wait_ms,mailbox_wait_ms,limiter_ms,dispatch_ee,dispatch_iop,gpu_pic_up,iop_cross_ee,iop_cross_iop");
 				//The IOP thread's sections (iop_thread)
 				for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, ",iopt_%s", EmuProfile::GetSectionName(i));
-				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3,gs_feed_ms,gs_feed_calls,gs_feed_kb,gs_regs_ms,gs_reg_calls,gs_reg_writes,gs_mail_calls,world_ms,targets_pooled,gs_send_ms,gs_send_calls,vif1_readback_ms,vif1_readbacks,vif1_readback_kb,gs_wait_ms,gs_wait_calls,world_hits,world_misses,world_cache_mb,gl_free_mb,gl_free_min_mb,gl_target_allocs,targets_live,targets_pool,world_runs,world_seg,world_slot_ms,reg_split,apply_calls,draw_calls,apply_split,prim_calls,gs_sections,gs_ready_sections,gs_blocked_sections,vu1_sections,gs_wb_peak,gs_wb_overflows");
+				std::fprintf(perfFile, ",iop_inline_drains,iopt_busy_ms,iopt_sleep_ms,iopt_wake_latency_ms,iopt_wake_requests,iopt_wakes,iop_lag_ms,iop_lag_waits,iop_drain_ms,iop_drain_waits,iopt_spin_ms,tier2_regions,tier2_failed,tier2_instr,tier2_code_kb,tier2_ms,tier2_inlined,gpu_parts,game_fps,battery_pct,charging,battery_temp_c,arm_mhz,core3,gs_feed_ms,gs_feed_calls,gs_feed_kb,gs_regs_ms,gs_reg_calls,gs_reg_writes,gs_mail_calls,world_ms,targets_pooled,gs_send_ms,gs_send_calls,vif1_readback_ms,vif1_readbacks,vif1_readback_kb,gs_wait_ms,gs_wait_calls,world_hits,world_misses,world_cache_mb,gl_free_mb,gl_free_min_mb,gl_target_allocs,targets_live,targets_pool,world_runs,world_seg,world_slot_ms,reg_split,apply_calls,draw_calls,apply_split,prim_calls,gs_sections,gs_ready_sections,gs_blocked_sections,vu1_sections,gs_wb_peak,gs_wb_overflows,rb_neon,rb_gl,rb_neon_differ");
 				std::fprintf(perfFile, "\n");
 			}
 		}
@@ -1819,6 +1821,7 @@ namespace
 								auto vu1Profile = session->TakeProfile(2);
 								for(unsigned int i = 0; i < EmuProfile::SECTION_COUNT; i++) std::fprintf(perfFile, "%c%.3f", (i == 0) ? ',' : ';', vu1Profile.share[i]);
 								std::fprintf(perfFile, ",%u,%llu", CGSHandler::g_writeBufferPeak, (unsigned long long)CGSHandler::g_writeBufferOverflows);
+								std::fprintf(perfFile, ",%llu,%llu,%llu", (unsigned long long)CGSH_Hardware::g_readbacksNeon, (unsigned long long)CGSH_Hardware::g_readbacksGl, (unsigned long long)CGSH_Hardware::g_readbackNeonDiffers);
 								CGSHandler::g_writeBufferPeak = 0;
 							}
 						}
@@ -2246,6 +2249,15 @@ int main()
 		return 0;
 	}
 	Theme::Init();
+	//Read-back self test (glReadPixels against the texture's memory): ux0:data/VitaPS2/readback_test.txt present
+	{
+		SceIoStat stat;
+		if(sceIoGetstat(VITAPS2_DATA_DIR "/readback_test.txt", &stat) >= 0)
+		{
+			sceIoRemove(VITAPS2_DATA_DIR "/readback_test_result.txt");
+			CGSH_Hardware::RunReadbackSelfTest(VITAPS2_DATA_DIR "/readback_test_result.txt");
+		}
+	}
 	//Shader self test (vitaGL's GLSL translation): ux0:data/VitaPS2/shader_test.txt present
 	{
 		SceIoStat stat;

@@ -1923,6 +1923,56 @@ void CGSH_Hardware::MarkTargetDirty(TARGET& target, int32 x0, int32 y0, int32 x1
 	target.dirtyY1 = std::max<uint32>(target.dirtyY1, y1);
 }
 
+void CGSH_Hardware::ReadTargetPixels(const TARGET& target, uint32 x, uint32 y, uint32 width, uint32 height, uint32* pixels)
+{
+#ifdef __vita__
+	if(g_readbackNeon && (x + width <= target.width) && (y + height <= target.height))
+	{
+		uint32 sync = 0;
+		glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &sync); //vitaGL's scene end and GPU wait, as for the whole rectangle
+		GLint previous = 0;
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
+		glBindTexture(GL_TEXTURE_2D, target.colorTexture);
+		SceGxmTexture* gxm = vglGetGxmTexture(GL_TEXTURE_2D);
+		const uint8* data = reinterpret_cast<const uint8*>(vglGetTexDataPointer(GL_TEXTURE_2D));
+		bool usable = gxm && data && (sceGxmTextureGetType(gxm) == SCE_GXM_TEXTURE_LINEAR) && (sceGxmTextureGetFormat(gxm) == SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR) &&
+		              (sceGxmTextureGetWidth(gxm) == target.width);
+		glBindTexture(GL_TEXTURE_2D, previous);
+		if(usable)
+		{
+			// Rows as vitaGL's glReadPixels returns them: the rectangle at y holds the texture's memory
+			// rows height - y - h .. height - y - 1, in memory order (self-test)
+			uint32 rowBytes = ((target.width + 7) & ~7u) * 4;
+			uint32 firstRow = target.height - y - height;
+			for(uint32 row = 0; row < height; row++)
+			{
+				const uint8* s = data + (firstRow + row) * rowBytes + x * 4;
+				uint8* d = reinterpret_cast<uint8*>(pixels + row * width);
+				uint32 bytes = width * 4, blocks = bytes / 128;
+				for(uint32 i = 0; i < blocks; i++)
+				{
+					asm volatile("vldm %[s]!, {d0-d15}\n\tvstm %[d]!, {d0-d15}\n\t"
+					             : [s] "+r"(s), [d] "+r"(d)
+					             :
+					             : "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d9", "d10", "d11", "d12", "d13", "d14", "d15", "memory");
+				}
+				std::memcpy(d, s, bytes - blocks * 128);
+			}
+			g_readbacksNeon++;
+			if(g_readbackNeonCheck)
+			{
+				std::vector<uint32> check(width * height);
+				glReadPixels(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, check.data());
+				for(uint32 i = 0; i < width * height; i++) g_readbackNeonDiffers += (check[i] != pixels[i]) ? 1 : 0;
+			}
+			return;
+		}
+	}
+#endif
+	g_readbacksGl++;
+	glReadPixels(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+}
+
 void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEnd)
 {
 	GsProfile::CScope gsSection(GsProfile::SECTION_DOWNLOAD);
@@ -2017,7 +2067,7 @@ void CGSH_Hardware::DownloadTarget(TARGET& target, uint32 rowBegin, uint32 rowEn
 #ifdef __vita__
 		if(learn) glFinish();
 #endif
-		glReadPixels(x0, y0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+		ReadTargetPixels(target, x0, y0, width, height, pixels);
 		if(learn)
 		{
 			bool same = true;
@@ -3290,6 +3340,263 @@ namespace
 	    "	gl_FragColor = vec4(rgb, a);\n"
 	    "}\n";
 	const char* g_batchUniforms[] = {"uTex", "uMode", "uFog", "uAlpha", "uFogOn"};
+}
+
+void CGSH_Hardware::RunReadbackSelfTest(const char* path)
+{
+	auto note = [path](const char* format, auto... args) {
+		if(FILE* file = std::fopen(path, "a"))
+		{
+			std::fprintf(file, format, args...);
+			std::fclose(file);
+		}
+	};
+#ifdef __vita__
+	const uint32 W = 512, H = 448;
+	auto clock = []() -> uint64 { return sceKernelGetProcessTimeWide(); };
+	// A target made as AllocateTargetGl makes one (colour texture and depth buffer)
+	auto makeTarget = [&](GLuint& texture, GLuint& depth, GLuint& framebuffer) {
+		glGenTextures(1, &texture);
+		glBindTexture(GL_TEXTURE_2D, texture);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glGenRenderbuffers(1, &depth);
+		glBindRenderbuffer(GL_RENDERBUFFER, depth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, W, H);
+		glGenFramebuffers(1, &framebuffer);
+		glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
+	};
+	GLuint tex[2] = {}, depth[2] = {}, fbo[2] = {};
+	makeTarget(tex[0], depth[0], fbo[0]);
+	makeTarget(tex[1], depth[1], fbo[1]);
+	// A pattern drawn by the GPU: 16x16 cells cleared under a scissor, each colour from its position
+	auto drawPattern = [&](GLuint framebuffer, uint32 seed) {
+		glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+		glViewport(0, 0, W, H);
+		glEnable(GL_SCISSOR_TEST);
+		for(uint32 cy = 0; cy < H / 16; cy++)
+			for(uint32 cx = 0; cx < W / 16; cx++)
+			{
+				glScissor(cx * 16, cy * 16, 16, 16);
+				glClearColor(((cx * 8 + seed) & 255) / 255.0f, ((cy * 9 + seed * 5) & 255) / 255.0f, (((cx ^ cy) * 16 + seed * 3) & 255) / 255.0f, ((cx + cy + seed) & 255) / 255.0f);
+				glClear(GL_COLOR_BUFFER_BIT);
+			}
+		glDisable(GL_SCISSOR_TEST);
+	};
+	std::vector<uint32> viaGl(W * H), direct(W * H), tiny(4);
+	uint32 rowBytes = 0;
+	const uint8* data = nullptr;
+	auto describe = [&](GLuint texture) {
+		glBindTexture(GL_TEXTURE_2D, texture);
+		SceGxmTexture* gxm = vglGetGxmTexture(GL_TEXTURE_2D);
+		data = reinterpret_cast<const uint8*>(vglGetTexDataPointer(GL_TEXTURE_2D));
+		SceGxmTextureType type = sceGxmTextureGetType(gxm);
+		uint32 stride = (type == SCE_GXM_TEXTURE_LINEAR_STRIDED) ? sceGxmTextureGetStride(gxm) : 0;
+		rowBytes = stride ? stride : ((W + 7) & ~7u) * 4;
+		note("texture %u: data %p, gxm data %p, type %08X, format %08X, width %u, stride %u, row bytes used %u\n", texture, data, sceGxmTextureGetData(gxm), static_cast<uint32>(type),
+		     static_cast<uint32>(sceGxmTextureGetFormat(gxm)), sceGxmTextureGetWidth(gxm), stride, rowBytes);
+	};
+	auto copyDirect = [&]() {
+		for(uint32 y = 0; y < H; y++) std::memcpy(direct.data() + y * W, data + y * rowBytes, W * 4);
+	};
+	auto compare = [&](const char* what) {
+		uint32 same = 0, flipped = 0, firstSame = ~0u;
+		for(uint32 y = 0; y < H; y++)
+			for(uint32 x = 0; x < W; x++)
+			{
+				if(viaGl[y * W + x] != direct[y * W + x])
+				{
+					same++;
+					if(firstSame == ~0u) firstSame = y * W + x;
+				}
+				if(viaGl[y * W + x] != direct[(H - 1 - y) * W + x]) flipped++;
+			}
+		note("%s: pixels differing, same row order %u, rows flipped %u of %u", what, same, flipped, W * H);
+		if(firstSame != ~0u) note(" (first at %u,%u: gl %08X direct %08X)", firstSame % W, firstSame / W, viaGl[firstSame], direct[firstSame]);
+		note("\n");
+	};
+	// 1. Finished GPU: both reads of the same pixels, timed
+	drawPattern(fbo[0], 1);
+	glFinish();
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo[0]);
+	uint64 t0 = clock();
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, viaGl.data());
+	uint64 t1 = clock();
+	describe(tex[0]);
+	uint64 t2 = clock();
+	copyDirect();
+	uint64 t3 = clock();
+	note("finished GPU: glReadPixels %.2f ms, direct copy %.2f ms (%u x %u)\n", (t1 - t0) / 1000.0, (t3 - t2) / 1000.0, W, H);
+	compare("finished GPU");
+	// 2. Just drawn, the target in use: a 1x1 glReadPixels (vitaGL ends the scene and waits), then the
+	// direct copy; against a full glReadPixels after glFinish
+	drawPattern(fbo[0], 2);
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo[0]);
+	t0 = clock();
+	glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, tiny.data());
+	t1 = clock();
+	copyDirect();
+	t2 = clock();
+	glFinish();
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, viaGl.data());
+	note("in-use target: 1x1 glReadPixels %.2f ms, direct copy %.2f ms\n", (t1 - t0) / 1000.0, (t2 - t1) / 1000.0);
+	compare("in-use target, 1x1 read then direct");
+	// 3. Drawn, then another target drawn after it (the case vitaGL's glReadPixels does not wait for)
+	drawPattern(fbo[0], 3);
+	drawPattern(fbo[1], 4);
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo[0]);
+	glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, tiny.data());
+	copyDirect();
+	std::vector<uint32> early(W * H);
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, early.data());
+	glFinish();
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, viaGl.data());
+	compare("earlier target, 1x1 read then direct (against finished)");
+	uint32 staleGl = 0;
+	for(uint32 i = 0; i < W * H; i++) staleGl += (early[i] != viaGl[i]) ? 1 : 0;
+	note("earlier target, full glReadPixels before glFinish: %u pixels differ from finished\n", staleGl);
+	// 4. A rectangle in the middle (as DownloadTarget reads: x0, y0, width, height)
+	{
+		const uint32 x0 = 64, y0 = 96, w = 256, h = 32;
+		std::vector<uint32> part(w * h);
+		glBindFramebuffer(GL_FRAMEBUFFER, fbo[0]);
+		glReadPixels(x0, y0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, part.data());
+		uint32 differ = 0;
+		for(uint32 y = 0; y < h; y++)
+			for(uint32 x = 0; x < w; x++) differ += (part[y * w + x] != viaGl[(y0 + y) * W + x0 + x]) ? 1 : 0;
+		note("rectangle %u,%u %ux%u by glReadPixels against the whole read: %u differ\n", x0, y0, w, h, differ);
+	}
+	// 5. Where a rectangle read comes from: candidate rows and columns in the whole read
+	{
+		const uint32 x0 = 64, y0 = 96, w = 256, h = 32;
+		std::vector<uint32> part(w * h);
+		glBindFramebuffer(GL_FRAMEBUFFER, fbo[0]);
+		glReadPixels(x0, y0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, part.data());
+		const uint32 ys[2] = {y0, H - y0 - h}, xs[3] = {x0, 0, W - x0 - w};
+		for(uint32 yi = 0; yi < 2; yi++)
+			for(uint32 xi = 0; xi < 3; xi++)
+				for(uint32 flip = 0; flip < 2; flip++)
+				{
+					uint32 differ = 0;
+					for(uint32 y = 0; y < h; y++)
+						for(uint32 x = 0; x < w; x++)
+						{
+							uint32 sy = ys[yi] + (flip ? (h - 1 - y) : y);
+							differ += (part[y * w + x] != viaGl[sy * W + xs[xi] + x]) ? 1 : 0;
+						}
+					note("rectangle against rows from %u, columns from %u, %s: %u differ\n", ys[yi], xs[xi], flip ? "flipped" : "in order", differ);
+				}
+		note("rectangle first pixels: %08X %08X; whole read at (64,96): %08X, at (64,%u): %08X\n", part[0], part[1], viaGl[96 * W + 64], H - 96 - 32, viaGl[(H - 96 - 32) * W + 64]);
+	}
+	// 6. vglReadPixels (the GPU copy engine) into vitaGL's RAM pool (cached, GPU mapped)
+	{
+		uint32* gpuBuffer = reinterpret_cast<uint32*>(vglAlloc(W * H * 4, VGL_MEM_RAM));
+		note("vglAlloc RAM buffer %p\n", gpuBuffer);
+		if(gpuBuffer)
+		{
+			for(int round = 0; round < 3; round++)
+			{
+				drawPattern(fbo[0], 10 + round);
+				glFinish();
+				glBindFramebuffer(GL_FRAMEBUFFER, fbo[0]);
+				glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, viaGl.data());
+				uint64 v0 = clock();
+				vglReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, gpuBuffer);
+				uint64 v1 = clock();
+				std::memcpy(direct.data(), gpuBuffer, W * H * 4); //the CPU reads it (rounds 1-2: lines may be cached from round 0)
+				uint64 v2 = clock();
+				note("vglReadPixels round %d: %.2f ms, then memcpy from the buffer %.2f ms\n", round, (v1 - v0) / 1000.0, (v2 - v1) / 1000.0);
+				compare("vglReadPixels whole against glReadPixels finished");
+			}
+			// A rectangle by vglReadPixels
+			const uint32 x0 = 64, y0 = 96, w = 256, h = 32;
+			vglReadPixels(x0, y0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, gpuBuffer);
+			uint32 differ = 0, differFlip = 0;
+			for(uint32 y = 0; y < h; y++)
+				for(uint32 x = 0; x < w; x++)
+				{
+					differ += (gpuBuffer[y * w + x] != viaGl[(y0 + y) * W + x0 + x]) ? 1 : 0;
+					differFlip += (gpuBuffer[y * w + x] != viaGl[(H - y0 - h + y) * W + x0 + x]) ? 1 : 0;
+				}
+			note("vglReadPixels rectangle %u,%u %ux%u: %u differ from rows %u on, %u from rows %u on\n", x0, y0, w, h, differ, y0, differFlip, H - y0 - h);
+			// Just drawn, not finished: does vglReadPixels wait for the GPU?
+			drawPattern(fbo[0], 20);
+			glBindFramebuffer(GL_FRAMEBUFFER, fbo[0]);
+			uint64 v0 = clock();
+			vglReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, gpuBuffer);
+			uint64 v1 = clock();
+			std::memcpy(direct.data(), gpuBuffer, W * H * 4);
+			glFinish();
+			glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, viaGl.data());
+			note("vglReadPixels just after drawing: %.2f ms\n", (v1 - v0) / 1000.0);
+			compare("vglReadPixels just after drawing, against finished");
+			vglFree(gpuBuffer);
+		}
+	}
+	// 7. Reading GPU memory with wide NEON block loads (128 bytes an instruction) against memcpy
+	{
+		auto neonCopy = [](uint32* destination, const uint8* source, uint32 bytes) {
+			uint8* d = reinterpret_cast<uint8*>(destination);
+			const uint8* s = source;
+			uint32 blocks = bytes / 128;
+			for(uint32 i = 0; i < blocks; i++)
+			{
+				asm volatile("vldm %[s]!, {d0-d15}\n\tvstm %[d]!, {d0-d15}\n\t" : [s] "+r"(s), [d] "+r"(d) : : "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d9", "d10", "d11", "d12", "d13", "d14", "d15", "memory");
+			}
+			std::memcpy(d, s, bytes - blocks * 128);
+		};
+		drawPattern(fbo[0], 30);
+		glFinish();
+		glBindFramebuffer(GL_FRAMEBUFFER, fbo[0]);
+		glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, viaGl.data());
+		describe(tex[0]);
+		for(int pass = 0; pass < 2; pass++)
+		{
+			uint64 n0 = clock();
+			for(uint32 y = 0; y < H; y++) neonCopy(direct.data() + y * W, data + y * rowBytes, W * 4);
+			uint64 n1 = clock();
+			copyDirect();
+			uint64 n2 = clock();
+			note("render target memory, pass %d: NEON block loads %.2f ms, memcpy %.2f ms\n", pass, (n1 - n0) / 1000.0, (n2 - n1) / 1000.0);
+		}
+		for(uint32 y = 0; y < H; y++) neonCopy(direct.data() + y * W, data + y * rowBytes, W * 4);
+		compare("NEON block loads from the render target");
+		uint32* gpuBuffer = reinterpret_cast<uint32*>(vglAlloc(W * H * 4, VGL_MEM_RAM));
+		if(gpuBuffer)
+		{
+			vglReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, gpuBuffer);
+			glFinish();
+			uint64 n0 = clock();
+			neonCopy(direct.data(), reinterpret_cast<const uint8*>(gpuBuffer), W * H * 4);
+			uint64 n1 = clock();
+			std::memcpy(direct.data(), gpuBuffer, W * H * 4);
+			uint64 n2 = clock();
+			note("vglAlloc RAM buffer: NEON block loads %.2f ms, memcpy %.2f ms\n", (n1 - n0) / 1000.0, (n2 - n1) / 1000.0);
+			vglFree(gpuBuffer);
+		}
+		std::vector<uint32> heap(W * H);
+		uint64 n0 = clock();
+		neonCopy(direct.data(), reinterpret_cast<const uint8*>(heap.data()), W * H * 4);
+		uint64 n1 = clock();
+		std::memcpy(direct.data(), heap.data(), W * H * 4);
+		uint64 n2 = clock();
+		note("ordinary heap: NEON block loads %.2f ms, memcpy %.2f ms\n", (n1 - n0) / 1000.0, (n2 - n1) / 1000.0);
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	for(int i = 0; i < 2; i++)
+	{
+		glDeleteFramebuffers(1, &fbo[i]);
+		glDeleteRenderbuffers(1, &depth[i]);
+		glDeleteTextures(1, &tex[i]);
+	}
+	note("done\n");
+#else
+	note("read-back self-test: Vita only\n");
+#endif
 }
 
 void CGSH_Hardware::RunShaderSelfTest(const char* path)

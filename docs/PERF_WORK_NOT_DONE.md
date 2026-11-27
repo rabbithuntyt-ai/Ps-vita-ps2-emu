@@ -1174,6 +1174,50 @@ headers and comments. The ideas worth testing are in the brief's "Not done yet" 
   in these 6 minutes. A noisy, garbled texture on a wall panel shows on the Vita too (seen once
   on the PC). Neither is investigated yet. Screenshots: `runs/sh2v/S1/s1*.png`.
 
+### Read-backs: where the time goes on the Vita, and NEON block loads (27 Nov 2026, `readback_neon`)
+
+- **RE4 on the Vita (VA2_0), per game frame:** download 37 ms on the GS thread, of which 29.2 ms
+  inside `glReadPixels` and 7.4 writing the pixels into GS memory; 319,000 pixels read back.
+  Read-backs are mostly an RE4 pattern (SH2 reads back 786,000 pixels in a whole PC run). The
+  cost of each read-back is general.
+- **Vita self-test** (`ux0:data/VitaPS2/readback_test.txt` present at start-up;
+  `CGSH_Hardware::RunReadbackSelfTest`): a 512x448 render target made as the renderer makes one,
+  a pattern drawn by the GPU (scissored clears, each 16x16 cell its own colour), then:
+
+| Read (512x448, GPU finished) | Time | Pixels |
+|---|---|---|
+| `glReadPixels` | 10.3 ms | reference |
+| memcpy straight from the texture memory (`vglGetTexDataPointer`) | 9.7 ms | identical |
+| NEON block loads (`vldm` 128 bytes) from the texture memory | **5.2 ms** | identical |
+| `vglReadPixels` into a `vglAlloc(VGL_MEM_RAM)` buffer, then memcpy / NEON | 0.6 + 7.0 / 4.1 ms | identical only once the GPU has finished |
+| memcpy / NEON from an ordinary heap buffer (cached, for scale) | 2.0 / 5.0 ms | - |
+
+- **What this shows:**
+  - The cost is the CPU reading GPU memory: about 95 MB/s by word loads (vitaGL's copy and
+    memcpy alike), about 175 MB/s by 128-byte block loads. Not vitaGL's code, not the GPU.
+  - Render targets are linear (`SCE_GXM_TEXTURE_LINEAR`, U8U8U8U8_ABGR, rows of the width
+    rounded to 8 pixels). `glReadPixels` returns rows in memory order, and a rectangle at y holds
+    memory rows height - y - h on (GL's lower-left origin).
+  - A 1x1 `glReadPixels` on a target just drawn took 22.5 ms: vitaGL ends the scene and waits
+    for the GPU. After it, the direct copy is exact.
+  - For a target drawn before another one, the 1x1 read does not wait (98,592 of 229,376
+    pixels stale in the direct copy right after it). That is vitaGL's stale read-back case.
+  - `vglReadPixels` does not wait for the GPU (all pixels wrong right after drawing), and its
+    rectangles land elsewhere. Not usable as it is.
+- **`readback_neon` (off until measured):** `DownloadTarget` reads through `ReadTargetPixels`: a
+  1x1 `glReadPixels` (vitaGL's sync, the same as now), then the rectangle copied from the
+  texture memory with NEON block loads. Other layouts or formats keep `glReadPixels`.
+  `readback_neon_check=1` also reads every rectangle by `glReadPixels` and counts differing
+  pixels (perf.csv `rb_neon`, `rb_gl`, `rb_neon_differ`).
+- **Vita, RE4 (runs VN*, one eboot, warm-up, then a check run and three off/on pairs):**
+  - Check run: 4,646 read-backs by the direct path, **0 pixels differing** from `glReadPixels`,
+    none fell back.
+  - GS thread `download`, ms per game frame: off 46, 41, 40; on 32, 32, 32 (**42 to 32, -24%**).
+    Inside the read itself: 38.7/32.6 against 24.2/23.3. The time goes to GS idle.
+  - Steady game fps 4.40/4.62/4.55 off against 4.48/4.59/4.40 on: the emulation thread is RE4's
+    limit.
+  - **On by default since then, for every game.**
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an

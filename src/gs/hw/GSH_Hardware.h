@@ -314,6 +314,16 @@ public:
 	static inline uint64 g_worldScratchChunks = 0, g_worldScratchDraws = 0;
 	static inline uint64 g_solidUploads = 0, g_solidUploadPixels = 0, g_solidUploadMismatches = 0;
 	static inline bool g_solidReadbackCheck = false;
+	//readback_neon (Vita): read-backs copy the rectangle straight from the render target's texture memory
+	//with NEON block loads, after a 1x1 glReadPixels (vitaGL ends the scene and waits as for a whole
+	//read). The CPU reads GPU memory at about 95 MB/s by word loads (vitaGL's copy and memcpy alike)
+	//and about 175 MB/s by 128-byte block loads: 512x448 in 5.2 ms against 10.3 for glReadPixels
+	//(self-test, same pixels). Other texture layouts or formats keep glReadPixels.
+	static inline bool g_readbackNeon = true; //on since 27 Nov 2026: Vita read-backs 42 to 32 ms a game frame (RE4), pixels identical
+	static inline uint64 g_readbacksNeon = 0, g_readbacksGl = 0;
+	//readback_neon_check: each direct copy is also read by glReadPixels and the pixels compared
+	static inline bool g_readbackNeonCheck = false;
+	static inline uint64 g_readbackNeonDiffers = 0;
 	static inline uint64 g_solidReadbacks = 0, g_solidReadbackPixels = 0, g_solidReadbackMismatches = 0, g_solidLearned = 0, g_solidBorderPixels = 0, g_solidLearnFailures = 0;
 	static inline uint32 g_solidFirstMismatch[4] = {}; //x, y, GPU pixel, pixel written (solid_readback_check)
 	static inline uint64 g_alphaClutReuses = 0, g_alphaClutPassesTotal = 0;
@@ -335,6 +345,9 @@ public:
 	// programs), writing a line before and after each link to 'path' (closed each time, so a
 	// crash leaves the step it died in). For vitaGL's GLSL translation on the Vita.
 	static void RunShaderSelfTest(const char* path);
+	// Vita: render target read-backs by glReadPixels against reading the texture's memory directly
+	// (layout, row order, pixels, time; and whether a 1x1 glReadPixels first gives the GPU's pixels)
+	static void RunReadbackSelfTest(const char* path);
 	// With gs_shaders: batch vertices in a ring of GPU buffers, one copy instead of vitaGL's
 	// copy per attribute (gs_vertex_ring, on)
 	static inline bool g_vertexRing = true;
@@ -811,6 +824,8 @@ private:
 	void UploadTarget(TARGET&, uint32 x, uint32 y, uint32 width, uint32 height);
 	// Writes GPU pixels of rows [rowBegin, rowEnd) of the dirty rectangle back to GS memory.
 	void DownloadTarget(TARGET&, uint32 rowBegin = 0, uint32 rowEnd = ~0U);
+	// glReadPixels of the bound framebuffer (the target's), or readback_neon's direct copy
+	void ReadTargetPixels(const TARGET&, uint32 x, uint32 y, uint32 width, uint32 height, uint32* pixels);
 	// overwritten: the caller writes every byte of the range next.
 	void DownloadTargetsOverlapping(uint32 start, uint32 size, bool overwritten = false, bool alphaOnly = false);
 	// Forgets GPU pixels of rows [rowBegin, rowEnd) (overwritten in GS memory). False
