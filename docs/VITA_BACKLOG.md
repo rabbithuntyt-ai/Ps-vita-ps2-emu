@@ -36,7 +36,18 @@ Results in [PERF_WORK_NOT_DONE.md](PERF_WORK_NOT_DONE.md), "Vita A/B of the nine
   `texture_lazy_texels`.
 - Dropped: `image_no_copy` (no gain); `vif_ring_kb` below 4096 (slower; 256 KB stalled once).
 
-## 3. Silent Hill 2: a gameplay baseline (never measured on the Vita)
+## 3. Silent Hill 2
+
+**First Vita numbers, 27 Nov 2026** (PERF_WORK_NOT_DONE.md, "Silent Hill 2 gameplay on the
+Vita"): 1.54 game fps in the restroom. The VU1 worker is the limit (VU1 JIT 391 ms a game
+frame). Flat grey untextured polygons appear as the camera moves (likely the "floating wall"),
+with no freeze in 6 minutes. Still to do:
+- Find the grey polygons: frame dumps with `gs_debug`, then the same scene on the PC runner.
+- A/B `pump_keep_batch` and `texture_lazy_texels` on SH2 with a saved state (`save_state_at`)
+  once a pad script reaches the restroom; texCreate was 62 ms a game frame.
+- Then the VU1 JIT (general): SH2's programs cost 391 ms a game frame on the worker.
+
+Earlier plan:
 
 - On the PC runner, gameplay starts at about vblank 2000. The presses are crosses at vblanks 900,
   1200, 1400 and 1600 (New Game, Normal, Normal), and start at 1900 (skips the opening movie).

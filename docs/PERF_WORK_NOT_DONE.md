@@ -1151,6 +1151,29 @@ headers and comments. The ideas worth testing are in the brief's "Not done yet" 
   (all four on, frame dumps every 20): 412 game frames, pictures right.
 - The 256 KB ring's stall is not investigated: the 4 MB ring stays.
 
+### Silent Hill 2 gameplay on the Vita, first numbers (27 Nov 2026, run `runs/sh2v/S1`)
+
+- **Run:** eboot with the 27 Nov defaults, SH2's profile (`threaded_vu1=1`, no `vu1_async`), cold
+  JIT cache. Driven by hand with Vita Lab: New Game, Normal/Normal, opening movie skipped with
+  start, then James walked around the first restroom with d-pad holds of 12-40 s. 10 minutes in
+  all, about 6 of them in gameplay.
+- **Speed in gameplay** (rows from 240 s): **1.54 game fps**, 3.1 vblanks a second. The opening
+  movie plays at about 1 picture a second, partly drawn: the known VU1 colour conversion path.
+- **Per game frame** (`tools/perf_audit.py` on the gameplay rows):
+  - VU1 worker: **VU1 programs in the JIT 391 ms**, idle 227, kicks 26. The worker is the limit:
+    SH2's VU1 programs run through the generic VU1 JIT, which nothing has optimised for it.
+  - Emulation thread: waiting for VU1 319 ms, VIF 71, VU1 JIT 53, EE 52, relay 48, GIF 30.
+  - GS thread: busy about 310 ms. feedWrite 86, texCreate 62, texHash 58, glDraw 27, vertex 20,
+    registers 19. `texture_lazy_texels` was off: on the PC it removes texCreate.
+- **For the general-purpose direction:** a game without game-specific paths is bound by the VU1
+  JIT. The VU recompiler items (the brief's V2 completion; VitaSX2's 16 NEON registers, flag
+  liveness and deferred flags) help every game that uses VU1 this way.
+- **Rendering:** with the camera in the restroom corridor, large flat grey untextured polygons
+  appear (across the bottom of the screen, or a big wedge at the top right), and come and go as
+  the camera changes. Likely the "floating wall" the user saw before. The game does not freeze
+  in these 6 minutes. A noisy, garbled texture on a wall panel shows on the Vita too (seen once
+  on the PC). Neither is investigated yet. Screenshots: `runs/sh2v/S1/s1*.png`.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an
