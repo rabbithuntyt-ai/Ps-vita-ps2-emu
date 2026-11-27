@@ -107,7 +107,8 @@ def main():
         s = block_start(ram, a, targets)
         starts[s] = starts.get(s, 0) + w
     with tempfile.TemporaryDirectory() as tmp:
-        out = subprocess.run([dump, os.path.join(run, 'eeram.bin')] + ['%X' % s for s in starts] + ['--out', tmp],
+        extra = ['--vu0-macro-flags'] if '--vu0-macro-flags' in sys.argv else []
+        out = subprocess.run([dump, os.path.join(run, 'eeram.bin')] + ['%X' % s for s in starts] + ['--out', tmp] + extra,
                              capture_output=True, text=True).stdout
         info = {}
         for line in out.splitlines():

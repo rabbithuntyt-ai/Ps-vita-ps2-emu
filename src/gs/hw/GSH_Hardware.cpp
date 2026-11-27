@@ -13,6 +13,7 @@
 #ifdef __vita__
 #include <psp2/gxm.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/clib.h>
 #include <vitaGL.h>
 #endif
 
@@ -3584,6 +3585,55 @@ void CGSH_Hardware::RunReadbackSelfTest(const char* path)
 		std::memcpy(direct.data(), heap.data(), W * H * 4);
 		uint64 n2 = clock();
 		note("ordinary heap: NEON block loads %.2f ms, memcpy %.2f ms\n", (n1 - n0) / 1000.0, (n2 - n1) / 1000.0);
+	}
+	// 8. VIF1 ring copies: 4 MB of 272-byte records (a DMA tag and its data) from cold memory (a 32 MB
+	// source walked once) into a 4 MB ring, by memcpy, sceClibMemcpy and NEON block loads with prefetch
+	{
+		const uint32 recordBytes = 272, total = 4 * 1024 * 1024, sourceBytes = 32 * 1024 * 1024;
+		std::vector<uint8> source(sourceBytes), ring(total + 4096);
+		for(uint32 i = 0; i < sourceBytes; i += 64) source[i] = static_cast<uint8>(i >> 6);
+		auto neonCopyPld = [](uint8* d, const uint8* s, uint32 bytes, uint32 ahead) {
+			const uint8* end = s + bytes;
+			for(const uint8* p = s; p < end; p += 32) asm volatile("pld [%0, %1]" : : "r"(p), "r"(ahead));
+			uint32 blocks = bytes / 128;
+			for(uint32 i = 0; i < blocks; i++)
+			{
+				asm volatile("vldm %[s]!, {d0-d15}\n\tvstm %[d]!, {d0-d15}\n\t" : [s] "+r"(s), [d] "+r"(d) : : "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d9", "d10", "d11", "d12", "d13", "d14", "d15", "memory");
+			}
+			std::memcpy(d, s, bytes - blocks * 128);
+		};
+		for(int method = 0; method < 5; method++)
+		{
+			for(int pass = 0; pass < 2; pass++)
+			{
+				//Each pass reads another 4 MB of the source: cold (8 passes fit in 32 MB)
+				uint32 base = static_cast<uint32>((method * 2 + pass) % 8) * total;
+				uint64 c0 = clock();
+				for(uint32 offset = 0; offset + recordBytes <= total; offset += recordBytes)
+				{
+					uint8* d = ring.data() + offset;
+					const uint8* s = source.data() + base + offset;
+					switch(method)
+					{
+					case 0: std::memcpy(d, s, recordBytes); break;
+					case 1: sceClibMemcpy(d, s, recordBytes); break;
+					case 2: neonCopyPld(d, s, recordBytes, 0); break;
+					case 3:
+						//The next record prefetched while this one is copied
+						asm volatile("pld [%0]\n\tpld [%0, #64]\n\tpld [%0, #128]\n\tpld [%0, #192]\n\tpld [%0, #256]" : : "r"(s + recordBytes));
+						std::memcpy(d, s, recordBytes);
+						break;
+					case 4:
+						asm volatile("pld [%0]\n\tpld [%0, #64]\n\tpld [%0, #128]\n\tpld [%0, #192]\n\tpld [%0, #256]" : : "r"(s + recordBytes));
+						neonCopyPld(d, s, recordBytes, 0);
+						break;
+					}
+				}
+				uint64 c1 = clock();
+				static const char* names[5] = {"memcpy", "sceClibMemcpy", "NEON blocks", "memcpy, next record prefetched", "NEON, next record prefetched"};
+				note("ring copy, %s, pass %d: %.2f ms for 4 MB (%.0f MB/s)\n", names[method], pass, (c1 - c0) / 1000.0, total / ((c1 - c0) / 1e6) / 1048576.0);
+			}
+		}
 	}
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glBindTexture(GL_TEXTURE_2D, 0);

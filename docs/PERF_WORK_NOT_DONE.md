@@ -1218,6 +1218,41 @@ headers and comments. The ideas worth testing are in the brief's "Not done yet" 
     limit.
   - **On by default since then, for every game.**
 
+### Emulation thread: VU0 macro flag runs, DIRECT images by reference (27 Nov 2026, patch 0136)
+
+- **Where the emulation thread's ~210 ms a game frame went (Vita, RE4, VN runs):** EE 93,
+  waiting for VU1 30, VIFcopy 21, IOP 21 (IOP 10, kernel 7, I/O 3), relayDirect 16, VIFqueue 9,
+  relayWorld 6, small pieces about 17.
+- **EE hot code** (`tools/jit_arm_report.py` on a Vita run's eehot/eeram: the hot blocks compiled
+  with the Vita's ARM back end on the PC): 21-23 ARM instructions per EE instruction. RE4's two
+  hottest blocks are VU0 macro code (libvu0 matrix times vector: LQC2, a VMULA/VMADDA/VMADD
+  chain, SQC2), at 33 ARM instructions per VU0 instruction. Each FMAC instruction had operand
+  clamps, the arithmetic (2-3 NEON instructions), the MAC flags (~13), and ~30 integer
+  instructions queueing the MAC and sticky flags into the 8-slot timed flag pipeline.
+- **Macro mode never moves `pipeTime`**, so all queued flag values are visible at once; the
+  pipeline there only adds work. VU micro blocks already skip unread MAC updates and defer
+  sticky flags (`COMPILEHINT_SKIP_FMAC_UPDATE`, `COMPILEHINT_DEFER_STICKY`); macro mode passed no
+  hints.
+- **`vu0_macro_flags` (patch 0136):** while an EE block is compiled (`CBasicBlock::CompileRange`
+  tells `CCOP_VU` its range), an FMAC instruction followed by another FMAC before anything that
+  can read the flags gets both hints. The run's last one flushes the deferred sticky bits and
+  updates both flags as before. Runs end at CFC2, CTC2, BC2, interlocked moves, VCALLMS(R), DIV,
+  SQRT, RSQRT, WAITQ, unknown COP2 codes, any store (a VIF0 FIFO or DMA register write can start
+  VU0), SYSCALL/BREAK, COP0, and the block's branch and delay slot. The JIT cache keys the
+  switch and keeps a file per setting (`.jit.vu0f`), so switching it does not wipe the cache.
+  - Code: RE4's hottest block 1,808 to 1,552 bytes, the next VU0 block 2,928 to 1,712. Over
+    RE4's hot code (189 blocks, 60% of EE samples): 20.96 to 19.23 ARM instructions per EE
+    instruction (-8%).
+  - PC: RE4 and SH2 (inline) screenshots identical, except one SH2 title shot that also differs
+    between two runs without it.
+  - Vita (runs VM*, three off/on pairs): EE 92/92/91 to 86/88/87 ms a game frame (**-4.7 ms,
+    -5%**). Frame dumps right. **On by default.**
+- **`image_no_copy` re-read:** dropped in the morning A/B for no gain on the worker, but on the
+  emulation thread relayDirect went 15/16 to 9/9 ms a game frame (VA1_4, VA2_4); the time moved
+  to waiting for VU1 (32/34 to 35). Its own work is 6.5 ms thinner: **on by default** (patch 0135).
+- **IOP:** about 440 IOP interrupts a game frame, 165 of them the SPU2 IRQ line (RE4's driver never
+  clears the flag; the edge-triggered variant made it poll more, 26 Nov). Not a quick win.
+
 ### Suggestions from readers (Reddit, 17 Nov 2026), with their status
 
 A commenter suggested bypassing the standard GXM driver path, relying on CapUnlocker, an

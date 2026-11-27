@@ -14,6 +14,7 @@
 // small Gfx layer on the same context. vitaGL compiles shaders at runtime and
 // needs libshacccg.suprx (ur0:data/libshacccg.suprx or ur0:data/external/).
 
+#include "ee/COP_VU.h"
 #include <algorithm>
 #include <malloc.h>
 #include <cctype>
@@ -446,13 +447,14 @@ namespace
 		else if(key == "feed_neon") GsTransferWrite::g_columns = value != 0; //PSMCT32 transfer blocks written by columns with NEON (exact; on)
 		else if(key == "spu_adma_full_fast") Iop::CSubSystem::g_fastSpuAdmaFull = value != 0; //ADMA into a full input buffer answered without pausing the mixer (on)
 		else if(key == "texture_lazy_texels") CTextureCache::g_lazyTexels = value != 0; //texture cache entries allocate their texels on first decode (exact on the PC; off until measured)
+		else if(key == "vu0_macro_flags") CCOP_VU::g_macroFlagRuns = value != 0; //VU0 macro FMAC runs skip the MAC update but the last (exact; on)
 		else if(key == "readback_neon_check") CGSH_Hardware::g_readbackNeonCheck = value != 0; //each direct read-back also read by glReadPixels, differences counted (perf.csv rb_neon_differ)
 		else if(key == "readback_neon") CGSH_Hardware::g_readbackNeon = value != 0; //read-backs copy the target's texture memory with NEON block loads (exact; on)
 		else if(key == "pump_keep_batch") CGSH_Hardware::g_pumpKeepBatch = value != 0; //the GS batch stays open across pumps, flushed at flips (exact on the PC; off until measured)
 		else if(key == "clut_load_keep_batch") CGSH_Hardware::g_clutLoadKeepBatch = value != 0; //CLUT loads end the batch only when a target holds CLUT memory or the CLUT changes (exact; on)
 		else if(key == "vif_merge") CVpu::g_asyncMerge = value != 0; //DMA tag records joined with their data records in the VIF1 ring (exact; on)
 		else if(key == "vif_ring_kb") CVpu::g_asyncRingSize = static_cast<uint32>(value) * 1024; //VIF1 ring size in KB (power of 2, >= 128; 4096)
-		else if(key == "image_no_copy") CGSHandler::g_imageNoCopy = value != 0; //DIRECT image data to the GS thread without a copy (exact; off until measured)
+		else if(key == "image_no_copy") CGSHandler::g_imageNoCopy = value != 0; //DIRECT image data to the GS thread without a copy (exact; on)
 		else if(key == "texture_page_hash") CTextureCache::g_exactPageHash = value != 0; //hash only the pages a texture reads (exact; on)
 		else if(key == "alpha_clut_reuse") CGSH_Hardware::g_alphaClutReuse = value != 0; //alpha CLUT results reused while no target alpha changed (exact; on)
 		else if(key == "solid_readback") CGSH_Hardware::g_solidReadback = value != 0; //read-backs of solid-filled targets write the colour (exact; on)

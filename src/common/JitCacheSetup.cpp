@@ -1,3 +1,4 @@
+#include "ee/COP_VU.h"
 #include "JitCacheSetup.h"
 #include <cstdio>
 #include <vector>
@@ -86,10 +87,10 @@ namespace
 		}
 #if defined(__arm__) && !defined(__aarch64__)
 		// Modes that change the generated code without changing the executable.
-		uint8 modes[7] = {Jitter::CCodeGen_AArch32::GetConservativeAllocation(), Jitter::CCodeGen_AArch32::GetChainedFrames(),
+		uint8 modes[8] = {Jitter::CCodeGen_AArch32::GetConservativeAllocation(), Jitter::CCodeGen_AArch32::GetChainedFrames(),
 		                  Jitter::CCodeGen_AArch32::GetGuestMemoryOps(), CBasicBlock::GetCheapExits(),
 		                  Jitter::CCodeGen_AArch32::GetPinnedFields(), CBasicBlock::GetFastRam(),
-		                  CBasicBlock::GetMemoryExceptionPoison()};
+		                  CBasicBlock::GetMemoryExceptionPoison(), static_cast<uint8>(CCOP_VU::g_macroFlagRuns ? 1 : 0)};
 		XXH3_64bits_update(state, modes, sizeof(modes));
 #endif
 		uint64 hash = XXH3_64bits_digest(state);
@@ -103,7 +104,9 @@ bool JitCacheSetup::Open(const std::string& cachePath, const std::string& execut
 	if(!CJitCache::IsSupported()) return false;
 	auto ranges = GetImageRanges();
 	if(ranges.empty()) return false;
-	return CJitCache::GetInstance().Open(cachePath, Fingerprint(executablePath), ranges);
+	//vu0_macro_flags changes the code: its own cache file, so switching it does not wipe the other
+	std::string path = CCOP_VU::g_macroFlagRuns ? (cachePath + ".vu0f") : cachePath;
+	return CJitCache::GetInstance().Open(path, Fingerprint(executablePath), ranges);
 }
 
 void JitCacheSetup::Close()

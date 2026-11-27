@@ -27,6 +27,7 @@
 //
 // Exit code is 0 when at least one frame was presented.
 
+#include "ee/COP_VU.h"
 #include "ee/Tier2.h"
 #include "ee/VuBasicBlock.h"
 #include "ee/VUShared.h"
@@ -315,12 +316,15 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-mailbox-batch")) CMailBox::g_batched = false; //one lock and one notify per mailbox call
 		else if(!std::strcmp(argv[i], "--no-feed-neon")) GsTransferWrite::g_columns = false;
 		else if(!std::strcmp(argv[i], "--feed-neon")) GsTransferWrite::g_columns = true; //PSMCT32 transfer blocks written by columns
+		else if(!std::strcmp(argv[i], "--no-image-no-copy")) CGSHandler::g_imageNoCopy = false;
 		else if(!std::strcmp(argv[i], "--image-no-copy")) CGSHandler::g_imageNoCopy = true; //DIRECT image data to the GS thread without a copy
 		else if(!std::strcmp(argv[i], "--vif-ring-kb") && (i + 1 < argc)) CVpu::g_asyncRingSize = static_cast<uint32>(std::atoi(argv[++i])) * 1024; //VIF1 ring size (power of 2, >= 128)
 		else if(!std::strcmp(argv[i], "--spu-slow-reads")) Iop::CSubSystem::g_spuSlowCounts = new std::map<uint32, uint64>(); //SPU reads and DMAs that pause the mixer, by address
 		else if(!std::strcmp(argv[i], "--no-spu-adma-full-fast")) Iop::CSubSystem::g_fastSpuAdmaFull = false;
 		else if(!std::strcmp(argv[i], "--spu-adma-full-fast")) Iop::CSubSystem::g_fastSpuAdmaFull = true; //ADMA into a full input buffer answered without pausing the mixer
 		else if(!std::strcmp(argv[i], "--flush-sites")) CGSH_Hardware::g_flushSites = new std::map<int, uint64>(); //fixed function draws by the FlushBatch call that ended them
+		else if(!std::strcmp(argv[i], "--no-vu0-macro-flags")) CCOP_VU::g_macroFlagRuns = false;
+		else if(!std::strcmp(argv[i], "--vu0-macro-flags")) CCOP_VU::g_macroFlagRuns = true; //VU0 macro flag runs (COP_VU.h)
 		else if(!std::strcmp(argv[i], "--pump-keep-batch")) CGSH_Hardware::g_pumpKeepBatch = true; //the batch stays open across GS pumps (flushed at flips)
 		else if(!std::strcmp(argv[i], "--no-clut-load-keep-batch")) CGSH_Hardware::g_clutLoadKeepBatch = false;
 		else if(!std::strcmp(argv[i], "--clut-load-keep-batch")) CGSH_Hardware::g_clutLoadKeepBatch = true; //CLUT loads end the batch only when needed
@@ -737,6 +741,7 @@ int main(int argc, char** argv)
 			std::printf("image data to the GS: %.1f MB by reference, %.1f MB copied\n", CGSHandler::g_imageNoCopyBytes / 1048576.0, CGSHandler::g_imageCopyBytes / 1048576.0);
 			std::printf("relay: %llu kicks (%.1f MB), %llu DIRECT (%.1f MB), %llu replaced; %llu register writes\n",(unsigned long long)a.kicks.load(), a.kickBytes.load() / 1048576.0,
 			            (unsigned long long)a.directs.load(), a.directBytes.load() / 1048576.0, (unsigned long long)a.customs.load(), (unsigned long long)CGSHandler::g_writeBufferTotal);
+			std::printf("VU0 macro FMAC instructions compiled without their MAC update: %llu\n", (unsigned long long)CCOP_VU::g_macroFlagsSkipped);
 			std::printf("unpacked by runs: %llu values\n", (unsigned long long)CVif::g_bulkValues);
 			if(CVpu::g_reuseScan)
 				for(int k = 0; k < 2; k++)

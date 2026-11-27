@@ -34,3 +34,15 @@ diff --git a/Source/iop/Iop_SubSystem.h b/Source/iop/Iop_SubSystem.h
  
  		CMIPS m_cpu;
  		CMA_MIPSIV m_cpuArch;
+diff --git a/Source/gs/GSHandler.h b/Source/gs/GSHandler.h
+--- a/Source/gs/GSHandler.h
++++ b/Source/gs/GSHandler.h
+@@ -861,7 +861,7 @@
+ 	//image data inside it goes to the GS thread as a reference to it instead of a copy (Resident Evil
+ 	//4: ~1.5 MB of textures a game frame, about 200 allocations)
+ 	static inline const std::shared_ptr<std::vector<uint8>>* g_imageDataOwner = nullptr;
+-	static inline bool g_imageNoCopy = false;
++	static inline bool g_imageNoCopy = true; //on since 27 Nov 2026: Vita emulation thread relayDirect 15.5 to 9 ms a game frame
+ 	static inline uint64 g_imageNoCopyBytes = 0, g_imageCopyBytes = 0;
+ 	//GS thread section times (microseconds, inclusive: draws inside count too) and counts, when
+ 	//g_sectionClock is set (VitaPS2 perf.csv: gs_feed_ms, gs_regs_ms, gs_reg_writes...)

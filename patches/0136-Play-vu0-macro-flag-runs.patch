@@ -1,0 +1,523 @@
+diff --git a/Source/ee/COP_VU.cpp b/Source/ee/COP_VU.cpp
+--- a/Source/ee/COP_VU.cpp
++++ b/Source/ee/COP_VU.cpp
+@@ -7,6 +7,13 @@
+ #include "offsetof_def.h"
+ #include "Vpu.h"
+ 
++namespace
++{
++	//vu0_macro_flags: the compiling block's end (0: off) and whether sticky bits wait in the accumulator
++	thread_local uint32 t_macroEnd = 0;
++	thread_local bool t_stickyDeferred = false;
++}
++
+ #undef MAX
+ 
+ enum CTRL_REG
+@@ -45,6 +52,51 @@
+ 
+ 	m_nBc = (uint8)((m_nOpcode >> 0) & 0x03);
+ 
++	//vu0_macro_flags: hints for this instruction from the rest of its run
++	m_macroHints = 0;
++	if(t_macroEnd != 0)
++	{
++		auto kind = ClassifyMacro(m_nOpcode);
++		bool laterFmac = false;
++		if(kind == MACRO_FMAC)
++		{
++			for(uint32 address = nAddress + 4; address < t_macroEnd; address += 4)
++			{
++				auto next = ClassifyMacro(pCtx->m_pMemoryMap->GetInstruction(address));
++				if(next == MACRO_FMAC)
++				{
++					laterFmac = true;
++					break;
++				}
++				if(next == MACRO_BOUNDARY) break;
++			}
++		}
++		//OPMULA takes no hints (always updates both); with a later FMAC it can stay in the run
++		bool hintable = (kind == MACRO_FMAC) && ((m_nOpcode >> 26) == 0x12) && !((((m_nOpcode & 0x3F) >= 0x3C)) && ((((m_nOpcode >> 6) & 0x1F) << 2 | (m_nOpcode & 3)) == 0x2E));
++		if(kind == MACRO_FMAC)
++		{
++			if(laterFmac)
++			{
++				if(hintable)
++				{
++					m_macroHints = VUShared::COMPILEHINT_SKIP_FMAC_UPDATE | VUShared::COMPILEHINT_DEFER_STICKY;
++					t_stickyDeferred = true;
++					g_macroFlagsSkipped++;
++				}
++			}
++			else if(t_stickyDeferred)
++			{
++				//The run's last FMAC: the accumulated sticky bits first, then its full update
++				EmitStickyFlush(codeGen);
++			}
++		}
++		else if((kind == MACRO_BOUNDARY) && t_stickyDeferred)
++		{
++			//Cannot happen (a run ends before a boundary); flush anyway
++			EmitStickyFlush(codeGen);
++		}
++	}
++
+ 	m_nIT = m_nFT;
+ 	m_nIS = m_nFS;
+ 	m_nID = m_nFD;
+@@ -71,6 +123,83 @@
+ 	}
+ }
+ 
++void CCOP_VU::BeginMacroBlock(uint32 begin, uint32 end)
++{
++	//Not the branch and its delay slot (a likely branch may skip the slot)
++	t_macroEnd = (g_macroFlagRuns && (end >= begin + 8)) ? (end - 4) : 0;
++	t_stickyDeferred = false;
++}
++
++void CCOP_VU::EndMacroBlock()
++{
++	assert(!t_stickyDeferred);
++	t_macroEnd = 0;
++	t_stickyDeferred = false;
++}
++
++CCOP_VU::MACRO_KIND CCOP_VU::ClassifyMacro(uint32 opcode)
++{
++	uint32 major = opcode >> 26;
++	if(major == 0x36) return MACRO_NEUTRAL;  //LQC2
++	if(major == 0x3E) return MACRO_BOUNDARY; //SQC2: a store (the VIF0 FIFO can start VU0)
++	if(major == 0x12)
++	{
++		uint32 rs = (opcode >> 21) & 0x1F;
++		if((rs & 0x10) == 0)
++		{
++			//QMFC2, QMTC2 without interlock move data; CFC2, CTC2, BC2 and the interlocked forms may read flags
++			if(((rs == 0x01) || (rs == 0x05)) && ((opcode & 1) == 0)) return MACRO_NEUTRAL;
++			return MACRO_BOUNDARY;
++		}
++		uint32 funct = opcode & 0x3F;
++		if(funct < 0x3C)
++		{
++			if(funct <= 0x0F) return MACRO_FMAC;                       //ADD/SUB/MADD/MSUB bc
++			if(funct <= 0x17) return MACRO_NEUTRAL;                    //MAX/MINI bc
++			if(funct <= 0x1C) return MACRO_FMAC;                       //MULbc, MULq
++			if(funct == 0x1E) return MACRO_FMAC;                       //MULi
++			if((funct == 0x1D) || (funct == 0x1F)) return MACRO_NEUTRAL; //MAXi, MINIi
++			if(funct <= 0x2A) return MACRO_FMAC;                       //q/i forms, ADD, MADD, MUL
++			if((funct == 0x2C) || (funct == 0x2D) || (funct == 0x2E)) return MACRO_FMAC; //SUB, MSUB, OPMSUB
++			if((funct == 0x2B) || (funct == 0x2F)) return MACRO_NEUTRAL; //MAX, MINI
++			if((funct >= 0x30) && (funct <= 0x35)) return MACRO_NEUTRAL; //IADD, ISUB, IADDI, IAND, IOR
++			return MACRO_BOUNDARY;                                     //VCALLMS, VCALLMSR, others
++		}
++		uint32 funct2 = (((opcode >> 6) & 0x1F) << 2) | (opcode & 3);
++		if(funct2 <= 0x0F) return MACRO_FMAC;                          //ADDA/SUBA/MADDA/MSUBA bc
++		if(funct2 <= 0x17) return MACRO_NEUTRAL;                       //ITOF, FTOI
++		if(funct2 <= 0x1C) return MACRO_FMAC;                          //MULAbc, MULAq
++		if(funct2 == 0x1E) return MACRO_FMAC;                          //MULAi
++		if((funct2 == 0x1D) || (funct2 == 0x1F)) return MACRO_NEUTRAL; //ABS, CLIP (clip flags only)
++		if(funct2 <= 0x2A) return MACRO_FMAC;                          //q/i forms, ADDA, MADDA, MULA
++		if((funct2 == 0x2C) || (funct2 == 0x2D) || (funct2 == 0x2E)) return MACRO_FMAC; //SUBA, MSUBA, OPMULA
++		if((funct2 == 0x2B) || (funct2 == 0x2F)) return MACRO_NEUTRAL; //NOP
++		if((funct2 == 0x30) || (funct2 == 0x31)) return MACRO_NEUTRAL; //MOVE, MR32
++		if((funct2 >= 0x34) && (funct2 <= 0x37)) return MACRO_NEUTRAL; //LQI, SQI, LQD, SQD (VU0 memory)
++		if((funct2 >= 0x3C) && (funct2 <= 0x43)) return MACRO_NEUTRAL; //MTIR, MFIR, ILWR, ISWR, R*
++		return MACRO_BOUNDARY;                                         //DIV, SQRT, RSQRT, WAITQ, others
++	}
++	//EE instructions: stores (a VIF0 or DMA register can start VU0), syscall/break, COP0 end runs
++	if((major >= 0x28) && (major <= 0x2F)) return MACRO_BOUNDARY; //SB..SWR, SDL/SDR
++	if((major == 0x39) || (major == 0x3F) || (major == 0x1F)) return MACRO_BOUNDARY; //SWC1, SD, SQ
++	if(major == 0x10) return MACRO_BOUNDARY;                    //COP0
++	if((major == 0x00) && (((opcode & 0x3F) == 0x0C) || ((opcode & 0x3F) == 0x0D))) return MACRO_BOUNDARY; //SYSCALL, BREAK
++	return MACRO_NEUTRAL;
++}
++
++void CCOP_VU::EmitStickyFlush(CMipsJitter* codeGen)
++{
++	VUShared::FlushDeferredSticky(codeGen, 0);
++	codeGen->PushCst(0);
++	codeGen->PullRel(offsetof(CMIPS, m_vuStickyAccumulator));
++	if(codeGen->SupportsMdSignZeroAccumulate())
++	{
++		codeGen->MD_PushCstExpandW(0U);
++		codeGen->MD_PullRel(offsetof(CMIPS, m_vuStickyAccumulator128));
++	}
++	t_stickyDeferred = false;
++}
++
+ //////////////////////////////////////////////////
+ //General Instructions
+ //////////////////////////////////////////////////
+@@ -388,7 +517,7 @@
+ //03
+ void CCOP_VU::VADDbc()
+ {
+-	VUShared::ADDbc(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, m_nBc, 0, 0);
++	VUShared::ADDbc(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, m_nBc, 0, m_macroHints);
+ }
+ 
+ //04
+@@ -397,7 +526,7 @@
+ //07
+ void CCOP_VU::VSUBbc()
+ {
+-	VUShared::SUBbc(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, m_nBc, 0, 0);
++	VUShared::SUBbc(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, m_nBc, 0, m_macroHints);
+ }
+ 
+ //08
+@@ -406,7 +535,7 @@
+ //0B
+ void CCOP_VU::VMADDbc()
+ {
+-	VUShared::MADDbc(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, m_nBc, 0, 0);
++	VUShared::MADDbc(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, m_nBc, 0, m_macroHints);
+ }
+ 
+ //0C
+@@ -415,7 +544,7 @@
+ //0F
+ void CCOP_VU::VMSUBbc()
+ {
+-	VUShared::MSUBbc(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, m_nBc, 0, 0);
++	VUShared::MSUBbc(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, m_nBc, 0, m_macroHints);
+ }
+ 
+ //10
+@@ -442,13 +571,13 @@
+ //1B
+ void CCOP_VU::VMULbc()
+ {
+-	VUShared::MULbc(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, m_nBc, 0, 0);
++	VUShared::MULbc(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, m_nBc, 0, m_macroHints);
+ }
+ 
+ //1C
+ void CCOP_VU::VMULq()
+ {
+-	VUShared::MULq(m_codeGen, m_nDest, m_nFD, m_nFS, 0, 0);
++	VUShared::MULq(m_codeGen, m_nDest, m_nFD, m_nFS, 0, m_macroHints);
+ }
+ 
+ //1D
+@@ -460,7 +589,7 @@
+ //1E
+ void CCOP_VU::VMULi()
+ {
+-	VUShared::MULi(m_codeGen, m_nDest, m_nFD, m_nFS, 0, 0);
++	VUShared::MULi(m_codeGen, m_nDest, m_nFD, m_nFS, 0, m_macroHints);
+ }
+ 
+ //1F
+@@ -472,67 +601,67 @@
+ //20
+ void CCOP_VU::VADDq()
+ {
+-	VUShared::ADDq(m_codeGen, m_nDest, m_nFD, m_nFS, 0, 0);
++	VUShared::ADDq(m_codeGen, m_nDest, m_nFD, m_nFS, 0, m_macroHints);
+ }
+ 
+ //21
+ void CCOP_VU::VMADDq()
+ {
+-	VUShared::MADDq(m_codeGen, m_nDest, m_nFD, m_nFS, 0, 0);
++	VUShared::MADDq(m_codeGen, m_nDest, m_nFD, m_nFS, 0, m_macroHints);
+ }
+ 
+ //22
+ void CCOP_VU::VADDi()
+ {
+-	VUShared::ADDi(m_codeGen, m_nDest, m_nFD, m_nFS, 0, 0);
++	VUShared::ADDi(m_codeGen, m_nDest, m_nFD, m_nFS, 0, m_macroHints);
+ }
+ 
+ //23
+ void CCOP_VU::VMADDi()
+ {
+-	VUShared::MADDi(m_codeGen, m_nDest, m_nFD, m_nFS, 0, 0);
++	VUShared::MADDi(m_codeGen, m_nDest, m_nFD, m_nFS, 0, m_macroHints);
+ }
+ 
+ //24
+ void CCOP_VU::VSUBq()
+ {
+-	VUShared::SUBq(m_codeGen, m_nDest, m_nFD, m_nFS, 0, 0);
++	VUShared::SUBq(m_codeGen, m_nDest, m_nFD, m_nFS, 0, m_macroHints);
+ }
+ 
+ //25
+ void CCOP_VU::VMSUBq()
+ {
+-	VUShared::MSUBq(m_codeGen, m_nDest, m_nFD, m_nFS, 0, 0);
++	VUShared::MSUBq(m_codeGen, m_nDest, m_nFD, m_nFS, 0, m_macroHints);
+ }
+ 
+ //26
+ void CCOP_VU::VSUBi()
+ {
+-	VUShared::SUBi(m_codeGen, m_nDest, m_nFD, m_nFS, 0, 0);
++	VUShared::SUBi(m_codeGen, m_nDest, m_nFD, m_nFS, 0, m_macroHints);
+ }
+ 
+ //27
+ void CCOP_VU::VMSUBi()
+ {
+-	VUShared::MSUBi(m_codeGen, m_nDest, m_nFD, m_nFS, 0, 0);
++	VUShared::MSUBi(m_codeGen, m_nDest, m_nFD, m_nFS, 0, m_macroHints);
+ }
+ 
+ //28
+ void CCOP_VU::VADD()
+ {
+-	VUShared::ADD(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, 0, 0);
++	VUShared::ADD(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, 0, m_macroHints);
+ }
+ 
+ //29
+ void CCOP_VU::VMADD()
+ {
+-	VUShared::MADD(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, 0, 0);
++	VUShared::MADD(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, 0, m_macroHints);
+ }
+ 
+ //2A
+ void CCOP_VU::VMUL()
+ {
+-	VUShared::MUL(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, 0, 0);
++	VUShared::MUL(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, 0, m_macroHints);
+ }
+ 
+ //2B
+@@ -544,19 +673,19 @@
+ //2C
+ void CCOP_VU::VSUB()
+ {
+-	VUShared::SUB(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, 0, 0);
++	VUShared::SUB(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, 0, m_macroHints);
+ }
+ 
+ //2D
+ void CCOP_VU::VMSUB()
+ {
+-	VUShared::MSUB(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, 0, 0);
++	VUShared::MSUB(m_codeGen, m_nDest, m_nFD, m_nFS, m_nFT, 0, m_macroHints);
+ }
+ 
+ //2E
+ void CCOP_VU::VOPMSUB()
+ {
+-	VUShared::OPMSUB(m_codeGen, m_nFD, m_nFS, m_nFT, 0, 0);
++	VUShared::OPMSUB(m_codeGen, m_nFD, m_nFS, m_nFT, 0, m_macroHints);
+ }
+ 
+ //2F
+@@ -653,31 +782,31 @@
+ //
+ void CCOP_VU::VADDAbc()
+ {
+-	VUShared::ADDAbc(m_codeGen, m_nDest, m_nFS, m_nFT, m_nBc, 0, 0);
++	VUShared::ADDAbc(m_codeGen, m_nDest, m_nFS, m_nFT, m_nBc, 0, m_macroHints);
+ }
+ 
+ //
+ void CCOP_VU::VSUBAbc()
+ {
+-	VUShared::SUBAbc(m_codeGen, m_nDest, m_nFS, m_nFT, m_nBc, 0, 0);
++	VUShared::SUBAbc(m_codeGen, m_nDest, m_nFS, m_nFT, m_nBc, 0, m_macroHints);
+ }
+ 
+ //
+ void CCOP_VU::VMADDAbc()
+ {
+-	VUShared::MADDAbc(m_codeGen, m_nDest, m_nFS, m_nFT, m_nBc, 0, 0);
++	VUShared::MADDAbc(m_codeGen, m_nDest, m_nFS, m_nFT, m_nBc, 0, m_macroHints);
+ }
+ 
+ //
+ void CCOP_VU::VMSUBAbc()
+ {
+-	VUShared::MSUBAbc(m_codeGen, m_nDest, m_nFS, m_nFT, m_nBc, 0, 0);
++	VUShared::MSUBAbc(m_codeGen, m_nDest, m_nFS, m_nFT, m_nBc, 0, m_macroHints);
+ }
+ 
+ //
+ void CCOP_VU::VMULAbc()
+ {
+-	VUShared::MULAbc(m_codeGen, m_nDest, m_nFS, m_nFT, m_nBc, 0, 0);
++	VUShared::MULAbc(m_codeGen, m_nDest, m_nFS, m_nFT, m_nBc, 0, m_macroHints);
+ }
+ 
+ //////////////////////////////////////////////////
+@@ -699,25 +828,25 @@
+ //07
+ void CCOP_VU::VMULAq()
+ {
+-	VUShared::MULAq(m_codeGen, m_nDest, m_nFS, 0, 0);
++	VUShared::MULAq(m_codeGen, m_nDest, m_nFS, 0, m_macroHints);
+ }
+ 
+ //08
+ void CCOP_VU::VADDAq()
+ {
+-	VUShared::ADDAq(m_codeGen, m_nDest, m_nFS, 0, 0);
++	VUShared::ADDAq(m_codeGen, m_nDest, m_nFS, 0, m_macroHints);
+ }
+ 
+ //0A
+ void CCOP_VU::VADDA()
+ {
+-	VUShared::ADDA(m_codeGen, m_nDest, m_nFS, m_nFT, 0, 0);
++	VUShared::ADDA(m_codeGen, m_nDest, m_nFS, m_nFT, 0, m_macroHints);
+ }
+ 
+ //0B
+ void CCOP_VU::VSUBA()
+ {
+-	VUShared::SUBA(m_codeGen, m_nDest, m_nFS, m_nFT, 0, 0);
++	VUShared::SUBA(m_codeGen, m_nDest, m_nFS, m_nFT, 0, m_macroHints);
+ }
+ 
+ //0C
+@@ -776,25 +905,25 @@
+ //08
+ void CCOP_VU::VMADDAq()
+ {
+-	VUShared::MADDAq(m_codeGen, m_nDest, m_nFS, 0, 0);
++	VUShared::MADDAq(m_codeGen, m_nDest, m_nFS, 0, m_macroHints);
+ }
+ 
+ //09
+ void CCOP_VU::VMSUBAq()
+ {
+-	VUShared::MSUBAq(m_codeGen, m_nDest, m_nFS, 0, 0);
++	VUShared::MSUBAq(m_codeGen, m_nDest, m_nFS, 0, m_macroHints);
+ }
+ 
+ //0A
+ void CCOP_VU::VMADDA()
+ {
+-	VUShared::MADDA(m_codeGen, m_nDest, m_nFS, m_nFT, 0, 0);
++	VUShared::MADDA(m_codeGen, m_nDest, m_nFS, m_nFT, 0, m_macroHints);
+ }
+ 
+ //0B
+ void CCOP_VU::VMSUBA()
+ {
+-	VUShared::MSUBA(m_codeGen, m_nDest, m_nFS, m_nFT, 0, 0);
++	VUShared::MSUBA(m_codeGen, m_nDest, m_nFS, m_nFT, 0, m_macroHints);
+ }
+ 
+ //0C
+@@ -847,25 +976,25 @@
+ //07
+ void CCOP_VU::VMULAi()
+ {
+-	VUShared::MULAi(m_codeGen, m_nDest, m_nFS, 0, 0);
++	VUShared::MULAi(m_codeGen, m_nDest, m_nFS, 0, m_macroHints);
+ }
+ 
+ //08
+ void CCOP_VU::VADDAi()
+ {
+-	VUShared::ADDAi(m_codeGen, m_nDest, m_nFS, 0, 0);
++	VUShared::ADDAi(m_codeGen, m_nDest, m_nFS, 0, m_macroHints);
+ }
+ 
+ //09
+ void CCOP_VU::VSUBAi()
+ {
+-	VUShared::SUBAi(m_codeGen, m_nDest, m_nFS, 0, 0);
++	VUShared::SUBAi(m_codeGen, m_nDest, m_nFS, 0, m_macroHints);
+ }
+ 
+ //0A
+ void CCOP_VU::VMULA()
+ {
+-	VUShared::MULA(m_codeGen, m_nDest, m_nFS, m_nFT, 0, 0);
++	VUShared::MULA(m_codeGen, m_nDest, m_nFS, m_nFT, 0, m_macroHints);
+ }
+ 
+ //0B
+@@ -924,13 +1053,13 @@
+ //08
+ void CCOP_VU::VMADDAi()
+ {
+-	VUShared::MADDAi(m_codeGen, m_nDest, m_nFS, 0, 0);
++	VUShared::MADDAi(m_codeGen, m_nDest, m_nFS, 0, m_macroHints);
+ }
+ 
+ //09
+ void CCOP_VU::VMSUBAi()
+ {
+-	VUShared::MSUBAi(m_codeGen, m_nDest, m_nFS, 0, 0);
++	VUShared::MSUBAi(m_codeGen, m_nDest, m_nFS, 0, m_macroHints);
+ }
+ 
+ //0B
+diff --git a/Source/ee/COP_VU.h b/Source/ee/COP_VU.h
+--- a/Source/ee/COP_VU.h
++++ b/Source/ee/COP_VU.h
+@@ -10,6 +10,19 @@
+ 	CCOP_VU(MIPS_REGSIZE);
+ 
+ 	void CompileInstruction(uint32, CMipsJitter*, CMIPS*, uint32) override;
++
++	//vu0_macro_flags: in a run of VU0 macro arithmetic instructions (FMAC: they set the MAC and
++	//sticky flags) with nothing between them that can read the flags, all but the last skip the
++	//MAC flag update and accumulate their sticky bits in a vector register; the last one flushes
++	//them and updates both as before. Macro mode never moves pipeTime, so every queued flag value
++	//is visible at once: at every point that can read the flags (CFC2, CTC2, VCALLMS, BC2, DIV and
++	//the other non-FMAC COP2 instructions that touch them, stores, syscalls, COP0, the block's
++	//branch and delay slot) the MAC flag and the sticky flags are the ones the full updates give.
++	static inline bool g_macroFlagRuns = true; //on since 27 Nov 2026: Vita EE 91.7 to 87.0 ms a game frame (RE4), pictures right
++	static inline uint64 g_macroFlagsSkipped = 0; //FMAC instructions compiled without their MAC update (whole run)
++	//The block being compiled (CBasicBlock::CompileRange): runs only look at [begin, end)
++	static void BeginMacroBlock(uint32 begin, uint32 end);
++	static void EndMacroBlock();
+ 	void GetInstruction(uint32, char*) override;
+ 	void GetArguments(uint32, uint32, char*) override;
+ 	uint32 GetEffectiveAddress(uint32, uint32) override;
+@@ -18,6 +31,16 @@
+ protected:
+ 	typedef void (CCOP_VU::*InstructionFuncConstant)();
+ 
++	enum MACRO_KIND
++	{
++		MACRO_NEUTRAL,  //touches neither the MAC nor the sticky flags
++		MACRO_FMAC,     //sets both (all of MAC)
++		MACRO_BOUNDARY, //may read them, or leaves the block
++	};
++	static MACRO_KIND ClassifyMacro(uint32 opcode);
++	static void EmitStickyFlush(CMipsJitter*);
++	uint32 m_macroHints = 0;
++
+ 	void SetupReflectionTables();
+ 
+ 	static void ReflMnemI(MIPSReflection::INSTRUCTION*, CMIPS*, uint32, char*, unsigned int);
+diff --git a/Source/BasicBlock.cpp b/Source/BasicBlock.cpp
+--- a/Source/BasicBlock.cpp
++++ b/Source/BasicBlock.cpp
+@@ -1,3 +1,4 @@
++#include "ee/COP_VU.h"
+ #include "BasicBlock.h"
+ #include "MemStream.h"
+ #include "offsetof_def.h"
+@@ -255,6 +256,7 @@
+ 
+ 	if(m_exitLikely) m_likelyExitLabel = jitter->CreateLabel();
+ 	jitter->m_likelyNotTakenUsed = false;
++	CCOP_VU::BeginMacroBlock(m_begin, m_end);
+ 	for(uint32 address = m_begin; address <= m_end; address += 4)
+ 	{
+ 		if(m_exitLikely && (address == (m_end - 4))) jitter->m_likelyNotTakenLabel = m_likelyExitLabel;
+@@ -266,6 +268,7 @@
+ 		//Sanity check
+ 		assert(jitter->IsStackEmpty());
+ 	}
++	CCOP_VU::EndMacroBlock();
+ 
+ 	//The branch didn't take the likely exit (compiled another way): the usual exit
+ 	if(m_exitLikely && !jitter->m_likelyNotTakenUsed) m_exitLikely = false;

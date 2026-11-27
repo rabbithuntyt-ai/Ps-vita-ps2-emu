@@ -44,6 +44,8 @@ int main(int argc, char** argv)
 	{
 		if(!std::strcmp(argv[i], "--out") && (i + 1 < argc)) outDir = argv[++i];
 		else if(!std::strcmp(argv[i], "--unchained")) chained = false;
+		else if(!std::strcmp(argv[i], "--no-vu0-macro-flags")) CCOP_VU::g_macroFlagRuns = false;
+		else if(!std::strcmp(argv[i], "--vu0-macro-flags")) CCOP_VU::g_macroFlagRuns = true; //VU0 macro flag runs (COP_VU.h)
 		else if(!std::strcmp(argv[i], "--region")) regions = true; //compile a tier 2 region where there is one
 		else if(!std::strcmp(argv[i], "--tier2")) tier2 = true;    //a Tier2.h region: its IR (and ARM code in TIER2_DUMP)
 		else if(!std::strcmp(argv[i], "--find-regions") && (i + 2 < argc))
