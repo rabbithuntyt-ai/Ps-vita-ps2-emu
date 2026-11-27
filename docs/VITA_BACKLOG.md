@@ -43,6 +43,9 @@ Vita"): 1.54 game fps in the restroom. The VU1 worker is the limit (VU1 JIT 391 
 frame). Flat grey untextured polygons appear as the camera moves (likely the "floating wall"),
 with no freeze in 6 minutes. Still to do:
 - Find the grey polygons: frame dumps with `gs_debug`, then the same scene on the PC runner.
+- The user saw, on the Vita: in the opening movie a black frame between every movie picture;
+  in gameplay, every third frame or so the picture flickers grey or vanishes, as if loading in
+  again. For another time (noted 27 Nov 2026).
 - A/B `pump_keep_batch` and `texture_lazy_texels` on SH2 with a saved state (`save_state_at`)
   once a pad script reaches the restroom; texCreate was 62 ms a game frame.
 - Then the VU1 JIT (general): SH2's programs cost 391 ms a game frame on the worker.
