@@ -1250,6 +1250,20 @@ headers and comments. The ideas worth testing are in the brief's "Not done yet" 
 - **`image_no_copy` re-read:** dropped in the morning A/B for no gain on the worker, but on the
   emulation thread relayDirect went 15/16 to 9/9 ms a game frame (VA1_4, VA2_4); the time moved
   to waiting for VU1 (32/34 to 35). Its own work is 6.5 ms thinner: **on by default** (patch 0135).
+- **VIF1 ring copies (VIFcopy, 21 ms a game frame), Vita self-test:** 4 MB of 272-byte records
+  from cold memory (a 32 MB source) into a 4 MB ring: memcpy 22.7 ms (176 MB/s), sceClibMemcpy
+  21.6, NEON block copies 21.6, **memcpy with the next record prefetched while this one is copied
+  18.6 (-18%)**, NEON with it 21.5. The copy is bound by cold memory, not by how it copies.
+  - `dma_chain_prefetch` (patch 0137): a DMA source chain, as it hands record N to the receiver,
+    prefetches tag N+1 (at TADR) and the first 512 bytes of the data it points to. General for
+    every source chain (VIF1, GIF). PC: RE4 screenshots identical (prefetches change nothing).
+  - Vita (runs VP*, three off/on pairs, eboot with the 27 Nov defaults): VIFcopy 22/22/22 to
+    20/20/19 ms a game frame, but VIFqueue 10 to 11 (the tag peek and prefetches run there), and
+    the thread's own work (total minus the VU1 wait) 174/170/173 against 173/177/169: no net gain.
+    **Off.**
+- **Baseline with all 27 Nov defaults (VP*_off):** steady 4.55-4.64 game fps; emulation thread
+  204-208 ms a game frame, of which waiting for VU1 34-35: about 172 ms of its own work (EE 87,
+  VIFcopy 22, VIFqueue 10, IOP 10, relayDirect 9, IOPkernel 7, relayWorld 6, EEioDma 6).
 - **IOP:** about 440 IOP interrupts a game frame, 165 of them the SPU2 IRQ line (RE4's driver never
   clears the flag; the edge-triggered variant made it poll more, 26 Nov). Not a quick win.
 

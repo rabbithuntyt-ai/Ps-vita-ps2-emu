@@ -14,6 +14,7 @@
 // small Gfx layer on the same context. vitaGL compiles shaders at runtime and
 // needs libshacccg.suprx (ur0:data/libshacccg.suprx or ur0:data/external/).
 
+#include "ee/Dmac_Channel.h"
 #include "ee/COP_VU.h"
 #include <algorithm>
 #include <malloc.h>
@@ -447,6 +448,7 @@ namespace
 		else if(key == "feed_neon") GsTransferWrite::g_columns = value != 0; //PSMCT32 transfer blocks written by columns with NEON (exact; on)
 		else if(key == "spu_adma_full_fast") Iop::CSubSystem::g_fastSpuAdmaFull = value != 0; //ADMA into a full input buffer answered without pausing the mixer (on)
 		else if(key == "texture_lazy_texels") CTextureCache::g_lazyTexels = value != 0; //texture cache entries allocate their texels on first decode (exact on the PC; off until measured)
+		else if(key == "dma_chain_prefetch") Dmac::CChannel::g_chainPrefetch = value != 0; //DMA source chains prefetch the next tag and its data (off until measured)
 		else if(key == "vu0_macro_flags") CCOP_VU::g_macroFlagRuns = value != 0; //VU0 macro FMAC runs skip the MAC update but the last (exact; on)
 		else if(key == "readback_neon_check") CGSH_Hardware::g_readbackNeonCheck = value != 0; //each direct read-back also read by glReadPixels, differences counted (perf.csv rb_neon_differ)
 		else if(key == "readback_neon") CGSH_Hardware::g_readbackNeon = value != 0; //read-backs copy the target's texture memory with NEON block loads (exact; on)

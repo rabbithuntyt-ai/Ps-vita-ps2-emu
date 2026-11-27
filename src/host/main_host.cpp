@@ -27,6 +27,7 @@
 //
 // Exit code is 0 when at least one frame was presented.
 
+#include "ee/Dmac_Channel.h"
 #include "ee/COP_VU.h"
 #include "ee/Tier2.h"
 #include "ee/VuBasicBlock.h"
@@ -323,6 +324,7 @@ int main(int argc, char** argv)
 		else if(!std::strcmp(argv[i], "--no-spu-adma-full-fast")) Iop::CSubSystem::g_fastSpuAdmaFull = false;
 		else if(!std::strcmp(argv[i], "--spu-adma-full-fast")) Iop::CSubSystem::g_fastSpuAdmaFull = true; //ADMA into a full input buffer answered without pausing the mixer
 		else if(!std::strcmp(argv[i], "--flush-sites")) CGSH_Hardware::g_flushSites = new std::map<int, uint64>(); //fixed function draws by the FlushBatch call that ended them
+		else if(!std::strcmp(argv[i], "--dma-chain-prefetch")) Dmac::CChannel::g_chainPrefetch = true; //DMA source chains prefetch the next tag and its data
 		else if(!std::strcmp(argv[i], "--no-vu0-macro-flags")) CCOP_VU::g_macroFlagRuns = false;
 		else if(!std::strcmp(argv[i], "--vu0-macro-flags")) CCOP_VU::g_macroFlagRuns = true; //VU0 macro flag runs (COP_VU.h)
 		else if(!std::strcmp(argv[i], "--pump-keep-batch")) CGSH_Hardware::g_pumpKeepBatch = true; //the batch stays open across GS pumps (flushed at flips)
